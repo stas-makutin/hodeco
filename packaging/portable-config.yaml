@@ -1,0 +1,16 @@
+# Portable defaults for running hodeco from an extracted Linux release archive.
+# Launch the binary from this directory so the relative paths resolve here:
+#
+#   ./hodeco run --config config.yaml
+#
+# For a system-wide install, use the .deb/.rpm package or the platform
+# defaults instead of this file.
+workingDir: .
+log:
+  dir: log
+  file: hodeco.log
+messageLog:
+  file: messages.log
+httpServer:
+  static:
+    dir: site

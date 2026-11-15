@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" href="data:," />
+    <title>hodeco</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #14171c;
+        color: #e7eaf0;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+
+      #hodeco-canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        outline: none;
+      }
+
+      /* eframe paints the canvas as soon as the first frame is drawn. */
+      #hodeco-loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        z-index: 1;
+        transition: opacity 300ms ease-out;
+      }
+
+      #hodeco-loading.hodeco-loading-hidden {
+        opacity: 0;
+      }
+
+      .hodeco-loading-title {
+        font-size: 28px;
+        font-weight: 600;
+        color: #5fa8ff;
+      }
+
+      .hodeco-loading-detail {
+        margin-top: 8px;
+        font-size: 13px;
+        color: #949eae;
+      }
+
+      .hodeco-noscript {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        text-align: center;
+        font-size: 15px;
+      }
+    </style>
+    <script type="module">
+      import init from "./hodeco-ui.js";
+
+      try {
+        await init();
+        const loading = document.getElementById("hodeco-loading");
+        if (loading) {
+          loading.classList.add("hodeco-loading-hidden");
+          window.setTimeout(() => loading.remove(), 600);
+        }
+      } catch (error) {
+        console.error("failed to start hodeco-ui", error);
+      }
+    </script>
+  </head>
+  <body>
+    <!-- The full-window egui surface. eframe binds to this element. -->
+    <canvas id="hodeco-canvas" aria-label="hodeco admin and diagnostics frontend"></canvas>
+    <div id="hodeco-loading">
+      <div class="hodeco-loading-title">hodeco</div>
+      <div class="hodeco-loading-detail">Loading the admin interface…</div>
+    </div>
+    <noscript>
+      <div class="hodeco-noscript">
+        hodeco-ui requires JavaScript and WebAssembly.
+      </div>
+    </noscript>
+  </body>
+</html>

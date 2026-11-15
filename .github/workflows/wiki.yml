@@ -1,0 +1,69 @@
+name: Wiki
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - "wiki/**"
+      - ".github/workflows/wiki.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wiki
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Sync wiki
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish wiki pages
+        shell: bash
+        env:
+          WIKI_TOKEN: ${{ secrets.WIKI_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WIKI_TOKEN:-}" ]; then
+            echo "::error::The WIKI_TOKEN secret is not set. See RELEASING.md."
+            exit 1
+          fi
+          if [ ! -f wiki/Home.md ]; then
+            echo "::error::wiki/Home.md is missing."
+            exit 1
+          fi
+
+          wiki_dir="$(mktemp -d)"
+          trap 'rm -rf "$wiki_dir"' EXIT
+
+          auth="$(printf 'x-access-token:%s' "$WIKI_TOKEN" | base64 | tr -d '\n')"
+          wiki_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.wiki.git"
+
+          if ! git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
+            clone "$wiki_url" "$wiki_dir"; then
+            echo "::error::Could not clone ${wiki_url}."
+            echo "Enable Wikis and create the first wiki page in the GitHub UI, then re-run this workflow."
+            exit 1
+          fi
+
+          rsync -a --delete --exclude=.git wiki/ "$wiki_dir/"
+          git -C "$wiki_dir" config user.name "github-actions[bot]"
+          git -C "$wiki_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$wiki_dir" add -A
+
+          if git -C "$wiki_dir" diff --cached --quiet; then
+            echo "Wiki is already up to date."
+            exit 0
+          fi
+
+          git -C "$wiki_dir" commit -m "Sync wiki from ${GITHUB_SHA:0:7}"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
+            -C "$wiki_dir" push

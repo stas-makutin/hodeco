@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": "controller",
+      "label": "Controller",
+      "location": "Utility",
+      "vendor": "Aeotec"
+    },
+    {
+      "id": "kitchen-overhead",
+      "label": "Kitchen overhead",
+      "location": "Kitchen"
+    },
+    {
+      "id": "hallway-dimmer",
+      "label": "Hallway dimmer",
+      "location": "Hallway"
+    },
+    {
+      "id": "front-door-sensor",
+      "label": "Front door sensor",
+      "location": "Entry"
+    },
+    {
+      "id": "office-lamp",
+      "label": "Office lamp",
+      "location": "Office"
+    },
+    {
+      "id": "office-motion",
+      "label": "Office motion",
+      "location": "Office"
+    }
+  ],
+  "services": {
+    "key:zwave/serial/COM3": {
+      "devices": [
+        { "device_id": "controller", "service_id": 1 },
+        { "device_id": "hallway-dimmer", "service_id": 3 },
+        { "device_id": "front-door-sensor", "service_id": 4 }
+      ]
+    },
+    "alias:ZW": {
+      "devices": [
+        { "device_id": "controller", "service_id": 1 },
+        { "device_id": "office-lamp", "service_id": 2 },
+        { "device_id": "office-motion", "service_id": 4 }
+      ]
+    },
+    "alias:ZW-Lab": {
+      "devices": [
+        { "device_id": "controller", "service_id": 1 },
+        { "device_id": "kitchen-overhead", "service_id": 2 },
+        { "device_id": "hallway-dimmer", "service_id": 3 }
+      ]
+    }
+  }
+}

@@ -1,0 +1,60 @@
+# nFPM package definition for the Linux release artifacts.
+#
+# The release workflow sets the HODECO_* variables before invoking nfpm.
+# For a local build, stage the files under $HODECO_STAGE as:
+#
+#   usr/bin/hodeco
+#   usr/share/hodeco/site/
+#   usr/share/doc/hodeco/
+#
+# and run, for example:
+#
+#   HODECO_VERSION=0.1.0 HODECO_ARCH=amd64 HODECO_STAGE="$PWD/pkgroot" \
+#   HODECO_MAINTAINER="Stas Makutin <33303268+stas-makutin@users.noreply.github.com>" \
+#   HODECO_HOMEPAGE="https://github.com/OWNER/REPO" \
+#   nfpm package --config packaging/nfpm.yaml --packager deb --target /tmp/hodeco.deb
+
+name: hodeco
+arch: ${HODECO_ARCH}
+platform: linux
+version: ${HODECO_VERSION}
+version_schema: semver
+section: net
+priority: optional
+maintainer: ${HODECO_MAINTAINER}
+description: |-
+  Home devices HTTP gateway with a JSON-RPC API, WebSocket notifications,
+  and a bundled egui web frontend.
+vendor: hodeco
+homepage: ${HODECO_HOMEPAGE}
+license: MIT OR Apache-2.0
+# Normalize source modes so packages do not inherit group-writable files
+# from the build environment.
+umask: 0o022
+
+contents:
+  - src: ${HODECO_STAGE}/usr/bin/hodeco
+    dst: /usr/bin/hodeco
+    expand: true
+    file_info:
+      mode: 0755
+
+  - src: ${HODECO_STAGE}/usr/share/hodeco/site
+    dst: /usr/share/hodeco/site
+    type: tree
+    expand: true
+
+  - src: ${HODECO_STAGE}/usr/share/doc/hodeco
+    dst: /usr/share/doc/hodeco
+    type: tree
+    expand: true
+
+overrides:
+  deb:
+    depends:
+      - libc6
+      - libgcc-s1
+  rpm:
+    depends:
+      - glibc
+      - libgcc

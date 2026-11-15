@@ -1,0 +1,436 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # GitHub no-reply address: valid package metadata, but it does not receive
+  # email. Replace it with a real contact address if desired.
+  HODECO_MAINTAINER: "Stas Makutin <33303268+stas-makutin@users.noreply.github.com>"
+
+jobs:
+  validate:
+    name: Validate versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check workspace and UI versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root_versions="$(
+            cargo metadata --no-deps --format-version 1 --locked |
+              jq -r '.packages[].version' |
+              sort -u
+          )"
+          if [ "$(printf '%s\n' "$root_versions" | wc -l)" -ne 1 ]; then
+            echo "::error::Packages in the root workspace use different versions:"
+            printf '%s\n' "$root_versions"
+            exit 1
+          fi
+
+          version="$(printf '%s\n' "$root_versions")"
+          ui_version="$(
+            cargo metadata --manifest-path hodeco-ui/Cargo.toml --no-deps --format-version 1 --locked |
+              jq -r '.packages[] | select(.name == "hodeco-ui") | .version'
+          )"
+
+          if [ "$version" != "$ui_version" ]; then
+            echo "::error::hodeco is $version but hodeco-ui is $ui_version"
+            exit 1
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$tag_version" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match version ${version}"
+              exit 1
+            fi
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${version}"
+
+  check:
+    name: Check and test
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            hodeco-ui -> target
+
+      - name: Format
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path hodeco-ui/Cargo.toml --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Check contract for wasm32
+        run: cargo check -p hodeco-contract --target wasm32-unknown-unknown --locked
+
+  web:
+    name: Build web UI
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hodeco-ui -> target
+
+      - name: Read wasm-bindgen version
+        id: wasm_bindgen
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(
+            awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' \
+              hodeco-ui/Cargo.lock
+          )"
+          if [ -z "$version" ]; then
+            echo "::error::Could not read wasm-bindgen from hodeco-ui/Cargo.lock"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wasm_bindgen.outputs.version }}
+          fallback: none
+
+      - name: Install binaryen and brotli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen brotli
+
+      - name: Build web assets
+        working-directory: hodeco-ui
+        run: ./scripts/build-web.sh
+
+      - name: Verify precompressed assets
+        working-directory: hodeco-ui
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in dist/index.html dist/hodeco-ui.js dist/hodeco-ui_bg.wasm; do
+            for ext in br gz; do
+              if [ ! -f "$file.$ext" ]; then
+                echo "::error::Missing ${file}.${ext}"
+                exit 1
+              fi
+            done
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: hodeco-ui/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: ${{ matrix.label }}
+    needs: [validate, check, web]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            platform: windows
+            label: windows-x86_64
+            toolchain: msvc
+            packages: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            platform: windows
+            label: windows-aarch64
+            toolchain: msvc
+            packages: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: linux
+            label: linux-x86_64
+            toolchain: native
+            packages: true
+            goarch: amd64
+            debarch: amd64
+            rpmarch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: linux
+            label: linux-aarch64
+            toolchain: aarch64-gnu
+            packages: true
+            goarch: arm64
+            debarch: arm64
+            rpmarch: aarch64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            platform: linux
+            label: linux-x86_64-musl
+            toolchain: zig
+            packages: false
+            goarch: amd64
+            debarch: amd64
+            rpmarch: x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            platform: linux
+            label: linux-aarch64-musl
+            toolchain: zig
+            packages: false
+            goarch: arm64
+            debarch: arm64
+            rpmarch: aarch64
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+            platform: linux
+            label: linux-armv7
+            toolchain: armv7-gnu
+            packages: true
+            goarch: arm7
+            debarch: armhf
+            rpmarch: armv7hl
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      LABEL: ${{ matrix.label }}
+      RUSTFLAGS: ${{ matrix.platform == 'windows' && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Set up MSVC ARM64 environment
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Install GNU cross linker
+        if: matrix.toolchain == 'aarch64-gnu' || matrix.toolchain == 'armv7-gnu'
+        shell: bash
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.toolchain }}" = "aarch64-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          else
+            sudo apt-get install -y gcc-arm-linux-gnueabihf
+          fi
+
+      - name: Configure GNU cross linker
+        if: matrix.toolchain == 'aarch64-gnu' || matrix.toolchain == 'armv7-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_upper="$(printf '%s' "$TARGET" | tr 'a-z-' 'A-Z_')"
+          if [ "${{ matrix.toolchain }}" = "aarch64-gnu" ]; then
+            linker="aarch64-linux-gnu-gcc"
+          else
+            linker="arm-linux-gnueabihf-gcc"
+          fi
+          echo "CARGO_TARGET_${target_upper}_LINKER=${linker}" >> "$GITHUB_ENV"
+
+      - name: Install Zig and cargo-zigbuild
+        if: matrix.toolchain == 'zig'
+        shell: bash
+        run: |
+          python3 -m pip install --user --break-system-packages \
+            cargo-zigbuild==0.24.1 \
+            ziglang==0.17.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "CARGO_ZIGBUILD_PYTHON_PATH=$(command -v python3)" >> "$GITHUB_ENV"
+
+      - name: Install nfpm
+        if: matrix.packages
+        shell: bash
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.49.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: hodeco-ui/dist
+
+      - name: Build backend
+        shell: bash
+        run: |
+          if [ "${{ matrix.toolchain }}" = "zig" ]; then
+            cargo zigbuild --release --locked --target "$TARGET" -p hodeco
+          else
+            cargo build --release --locked --target "$TARGET" -p hodeco
+          fi
+
+      - name: Stage portable archive (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "stage/hodeco-$env:VERSION-$env:LABEL"
+          Remove-Item stage, artifacts -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "$stage/site" -Force | Out-Null
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Copy-Item "target/$env:TARGET/release/hodeco.exe" "$stage/hodeco.exe"
+          Copy-Item "hodeco-ui/dist/*" "$stage/site" -Recurse -Force
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-LICENSES.md $stage
+          Copy-Item "hodeco-ui/THIRD-PARTY-LICENSES.md" `
+            "$stage/THIRD-PARTY-LICENSES-UI.md"
+          Compress-Archive -Path $stage `
+            -DestinationPath "artifacts/hodeco-$env:VERSION-$env:LABEL.zip" `
+            -CompressionLevel Optimal -Force
+
+      - name: Stage portable archive (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="stage/hodeco-${VERSION}-${LABEL}"
+          rm -rf stage artifacts
+          mkdir -p "$stage/site" artifacts
+          install -m 0755 "target/${TARGET}/release/hodeco" "$stage/hodeco"
+          cp -a hodeco-ui/dist/. "$stage/site/"
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md "$stage/"
+          cp hodeco-ui/THIRD-PARTY-LICENSES.md "$stage/THIRD-PARTY-LICENSES-UI.md"
+          cp packaging/portable-config.yaml "$stage/config.yaml"
+          find "$stage" -type d -exec chmod 0755 {} +
+          find "$stage" -type f -exec chmod 0644 {} +
+          chmod 0755 "$stage/hodeco"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            -C stage -czf "artifacts/hodeco-${VERSION}-${LABEL}.tar.gz" \
+            "hodeco-${VERSION}-${LABEL}"
+
+      - name: Build deb and rpm packages
+        if: matrix.packages
+        shell: bash
+        env:
+          HODECO_STAGE: ${{ github.workspace }}/pkgroot
+          HODECO_VERSION: ${{ needs.validate.outputs.version }}
+          HODECO_ARCH: ${{ matrix.goarch }}
+          HODECO_HOMEPAGE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          rm -rf pkgroot
+          mkdir -p \
+            pkgroot/usr/bin \
+            pkgroot/usr/share/hodeco/site \
+            pkgroot/usr/share/doc/hodeco
+          install -m 0755 "target/${TARGET}/release/hodeco" pkgroot/usr/bin/hodeco
+          cp -a hodeco-ui/dist/. pkgroot/usr/share/hodeco/site/
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md \
+            pkgroot/usr/share/doc/hodeco/
+          cp hodeco-ui/THIRD-PARTY-LICENSES.md \
+            pkgroot/usr/share/doc/hodeco/THIRD-PARTY-LICENSES-UI.md
+          find pkgroot -type d -exec chmod 0755 {} +
+          find pkgroot -type f -exec chmod 0644 {} +
+          chmod 0755 pkgroot/usr/bin/hodeco
+          nfpm package \
+            --config packaging/nfpm.yaml \
+            --packager deb \
+            --target "artifacts/hodeco_${VERSION}_${{ matrix.debarch }}.deb"
+          nfpm package \
+            --config packaging/nfpm.yaml \
+            --packager rpm \
+            --target "artifacts/hodeco-${VERSION}-1.${{ matrix.rpmarch }}.rpm"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hodeco-${{ matrix.label }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hodeco-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG" == *-* ]]; then
+            gh release create "$TAG" artifacts/* \
+              --title "hodeco $TAG" \
+              --generate-notes \
+              --prerelease
+          else
+            gh release create "$TAG" artifacts/* \
+              --title "hodeco $TAG" \
+              --generate-notes \
+              --latest
+          fi
