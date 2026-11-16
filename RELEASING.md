@@ -199,3 +199,7 @@ Get-FileHash .\hodeco-0.1.0-windows-x86_64.zip -Algorithm SHA256
 - **Cross-build failures:** check the matrix entry in
   `.github/workflows/release.yml`. GNU ARM targets use the apt cross linkers;
   musl targets use Zig through `cargo-zigbuild`.
+- **Windows ARM64 build fails with error 216** ("This version of %1 is not
+  compatible with the version of Windows you're running"): the MSVC environment
+  is using ARM64-hosted tools on the x64 runner. Configure it with
+  `arch: amd64_arm64` in `ilammy/msvc-dev-cmd`, not `arch: arm64`.

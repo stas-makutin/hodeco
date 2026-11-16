@@ -30,14 +30,21 @@ fn main() {
 
     // 3. Compile the message text file into a MESSAGETABLE resource. mc.exe emits
     //    messages.rc plus the MSG00001.bin payload into OUT_DIR.
-    let status = Command::new(mc)
+    let status = Command::new(&mc)
         .arg("-r")
         .arg(&out_dir)
         .arg("-h")
         .arg(&out_dir)
         .arg(manifest_dir.join("messages.mc"))
         .status()
-        .expect("Failed to execute mc.exe");
+        .unwrap_or_else(|err| {
+            panic!(
+                "Failed to execute {}: {err}\n\
+                 Ensure the host-architecture Windows SDK tools are used. For ARM64 \
+                 cross-builds, configure MSVC with `vcvarsall amd64_arm64`, not `arm64`.",
+                mc.display()
+            )
+        });
 
     if !status.success() {
         panic!(
@@ -47,14 +54,21 @@ fn main() {
     }
 
     // 4. Compile the generated resource script into a .res file
-    let status = Command::new(rc)
+    let status = Command::new(&rc)
         .current_dir(&out_dir)
         .arg("/nologo")
         .arg("/fo")
         .arg("messages.res")
         .arg("messages.rc")
         .status()
-        .expect("Failed to execute rc.exe");
+        .unwrap_or_else(|err| {
+            panic!(
+                "Failed to execute {}: {err}\n\
+                 Ensure the host-architecture Windows SDK tools are used. For ARM64 \
+                 cross-builds, configure MSVC with `vcvarsall amd64_arm64`, not `arm64`.",
+                rc.display()
+            )
+        });
 
     if !status.success() {
         panic!(
@@ -70,9 +84,43 @@ fn main() {
     );
 }
 
-/// Finds a Windows SDK tool, preferring PATH and falling back to the newest
-/// installed Windows 10/11 SDK for the host architecture.
+/// Finds a Windows SDK tool for the host architecture.
+///
+/// Build scripts always run on the host, and resource compiler output does not
+/// depend on the target architecture. `mc.exe` and `rc.exe` must therefore be
+/// host binaries even when cross-compiling. In particular, an MSVC environment
+/// configured with `vcvarsall arm64` puts ARM64 tools on `PATH`, which an x64
+/// host cannot execute (Windows error 216).
+///
+/// The SDK directories are checked before `PATH` so that cross-compilation
+/// environments cannot accidentally supply tools for the wrong architecture.
 fn find_windows_sdk_tool(name: &str) -> Option<PathBuf> {
+    let host_arch = host_tool_arch();
+
+    // The SDK selected by the developer environment, if any.
+    if let Some(bin) = env::var_os("WindowsSdkVerBinPath") {
+        let candidate = PathBuf::from(bin).join(host_arch).join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Any installed Windows 10/11 SDK, newest version first.
+    let mut bin_roots = Vec::new();
+    if let Some(sdk_dir) = env::var_os("WindowsSdkDir") {
+        bin_roots.push(PathBuf::from(sdk_dir).join("bin"));
+    }
+    let program_files = env::var_os("ProgramFiles(x86)")
+        .map_or_else(|| PathBuf::from(r"C:\Program Files (x86)"), PathBuf::from);
+    bin_roots.push(program_files.join(Path::new(r"Windows Kits\10\bin")));
+
+    for bin_root in bin_roots {
+        if let Some(path) = find_tool_in_sdk_root(&bin_root, host_arch, name) {
+            return Some(path);
+        }
+    }
+
+    // Fall back to PATH for SDKs installed in non-standard locations.
     if let Some(path) = env::var_os("PATH") {
         for dir in env::split_paths(&path) {
             let candidate = dir.join(name);
@@ -82,18 +130,10 @@ fn find_windows_sdk_tool(name: &str) -> Option<PathBuf> {
         }
     }
 
-    let host_arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else if cfg!(target_arch = "x86") {
-        "x86"
-    } else {
-        "x64"
-    };
+    None
+}
 
-    let program_files = env::var_os("ProgramFiles(x86)")
-        .map_or_else(|| PathBuf::from(r"C:\Program Files (x86)"), PathBuf::from);
-    let bin_root = program_files.join(Path::new(r"Windows Kits\10\bin"));
-
+fn find_tool_in_sdk_root(bin_root: &Path, host_arch: &str, name: &str) -> Option<PathBuf> {
     let mut versions: Vec<PathBuf> = std::fs::read_dir(bin_root)
         .ok()?
         .filter_map(|entry| entry.ok())
@@ -104,7 +144,7 @@ fn find_windows_sdk_tool(name: &str) -> Option<PathBuf> {
     versions.reverse();
 
     for version in versions {
-        for arch in [host_arch, "x64", "x86"] {
+        for arch in compatible_tool_arches(host_arch) {
             let candidate = version.join(arch).join(name);
             if candidate.is_file() {
                 return Some(candidate);
@@ -113,4 +153,29 @@ fn find_windows_sdk_tool(name: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Returns the SDK tool architecture directories that can run on this host,
+/// most preferred first.
+fn compatible_tool_arches(host_arch: &str) -> &'static [&'static str] {
+    match host_arch {
+        // Windows on ARM can run x64 and x86 binaries under emulation.
+        "arm64" => &["arm64", "x64", "x86"],
+        // x64 Windows can run x86 binaries.
+        "x64" => &["x64", "x86"],
+        _ => &["x86"],
+    }
+}
+
+/// Returns the host architecture used by the Windows SDK tool directories.
+///
+/// Build scripts are compiled for the host, so `std::env::consts::ARCH` is the
+/// host architecture. `CARGO_CFG_TARGET_ARCH` is the cross-compilation target
+/// and must not be used to choose an executable tool.
+fn host_tool_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86" => "x86",
+        _ => "x64",
+    }
 }

@@ -251,11 +251,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Set up MSVC ARM64 environment
+      - name: Set up MSVC ARM64 cross-compilation environment
         if: matrix.target == 'aarch64-pc-windows-msvc'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: arm64
+          # `arm64` selects ARM64-hosted tools, which the x64 runner cannot
+          # execute (Windows error 216). Use x64-hosted cross tools instead.
+          arch: amd64_arm64
 
       - name: Install GNU cross linker
         if: matrix.toolchain == 'aarch64-gnu' || matrix.toolchain == 'armv7-gnu'
