@@ -307,7 +307,15 @@ jobs:
           name: web-dist
           path: hodeco-ui/dist
 
-      - name: Build backend
+      - name: Build backend (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        # Run outside Git Bash: its /usr/bin/link.exe would shadow MSVC's
+        # link.exe, and the ARM64 linker is required for this target.
+        run: cargo build --release --locked --target $env:TARGET -p hodeco
+
+      - name: Build backend (Linux)
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           if [ "${{ matrix.toolchain }}" = "zig" ]; then

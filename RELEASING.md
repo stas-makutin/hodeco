@@ -203,3 +203,6 @@ Get-FileHash .\hodeco-0.1.0-windows-x86_64.zip -Algorithm SHA256
   compatible with the version of Windows you're running"): the MSVC environment
   is using ARM64-hosted tools on the x64 runner. Configure it with
   `arch: amd64_arm64` in `ilammy/msvc-dev-cmd`, not `arch: arm64`.
+- **Windows build invokes `/usr/bin/link`** ("missing operand after ..."): the
+  build ran under Git Bash, whose `link.exe` shadows the MSVC linker. Use
+  `shell: pwsh` for Windows build steps.
