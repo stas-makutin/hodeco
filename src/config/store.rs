@@ -1,11 +1,10 @@
-use super::{ConfigError, save};
-use hodeco_contract::config::Config;
+use super::{ConfigError, save, save_yaml};
+use hodeco_contract::config::{Config, ServiceConfig, ServicesFile};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use tokio::sync::Mutex as AsyncMutex;
 
-/// Owns the effective configuration, including the service list, and
-/// serializes write-back operations.
+/// Owns the core configuration and serializes write-back operations.
 pub struct ConfigStore {
     path: Option<PathBuf>,
     config: Mutex<Config>,
@@ -36,8 +35,8 @@ impl ConfigStore {
         update(&mut config);
     }
 
-    /// Holds the write-back lock across a registry mutation, snapshot update,
-    /// and file save so concurrent API calls cannot overwrite one another.
+    /// Holds the write-back lock across a mutation, snapshot update, and file
+    /// save so concurrent API calls cannot overwrite one another.
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.mutation.lock().await
     }
@@ -60,6 +59,67 @@ impl ConfigStore {
     }
 }
 
+/// Owns the service catalog (`services.yaml`) independently from the core
+/// configuration. Service mutations also touch the runtime registry; the API
+/// holds this store's lock across both operations.
+pub struct ServicesStore {
+    path: Option<PathBuf>,
+    services: Mutex<Vec<ServiceConfig>>,
+    mutation: AsyncMutex<()>,
+}
+
+impl ServicesStore {
+    pub fn new(path: Option<PathBuf>, services: Vec<ServiceConfig>) -> Self {
+        Self {
+            path,
+            services: Mutex::new(services),
+            mutation: AsyncMutex::new(()),
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<ServiceConfig> {
+        self.services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn file(&self) -> ServicesFile {
+        ServicesFile {
+            services: self.snapshot(),
+        }
+    }
+
+    pub fn replace(&self, services: Vec<ServiceConfig>) {
+        *self
+            .services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = services;
+    }
+
+    pub fn update(&self, update: impl FnOnce(&mut Vec<ServiceConfig>)) {
+        let mut services = self
+            .services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        update(&mut services);
+    }
+
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.mutation.lock().await
+    }
+
+    pub async fn save(&self) -> Result<(), ConfigError> {
+        let Some(path) = self.path.clone() else {
+            return Ok(());
+        };
+        let file = self.file();
+        tokio::task::spawn_blocking(move || save_yaml(&path, &file))
+            .await
+            .map_err(|error| ConfigError::Task(error.to_string()))?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +136,21 @@ mod tests {
 
         store.replace(parse_str("httpServer:\n  port: 9002\n").unwrap());
         assert_eq!(store.snapshot().http_server.port, 9002);
+    }
+
+    #[test]
+    fn services_store_updates_snapshots() {
+        let store = ServicesStore::new(None, Vec::new());
+        assert!(store.snapshot().is_empty());
+        store.update(|services| {
+            services.push(ServiceConfig {
+                alias: Some("ZW".to_string()),
+                protocol: "zwave".to_string(),
+                transport: "serial".to_string(),
+                entry: "COM4".to_string(),
+                params: Default::default(),
+            });
+        });
+        assert_eq!(store.file().services.len(), 1);
     }
 }

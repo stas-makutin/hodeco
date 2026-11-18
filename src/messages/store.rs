@@ -22,8 +22,8 @@ pub fn service_entry_length(service: &ServiceKey) -> u64 {
 
 #[derive(Debug, Clone)]
 pub enum StoreEvent {
-    New(Message),
-    StateChanged(Message),
+    New { key: ServiceKey, message: Message },
+    StateChanged { key: ServiceKey, message: Message },
     Dropped { message_ids: Vec<Uuid> },
 }
 
@@ -208,20 +208,26 @@ impl MessageStore {
                 message_ids: dropped,
             });
         }
-        let _ = self.events.send(StoreEvent::New(message.clone()));
+        let _ = self.events.send(StoreEvent::New {
+            key: service.clone(),
+            message: message.clone(),
+        });
         message
     }
 
     pub fn update_state(&self, id: Uuid, state: MessageState) -> Option<Message> {
-        let message = {
+        let (key, message) = {
             let mut inner = self.inner.write();
             let position = inner.position(&id)?;
             let entry = inner.entries.get_mut(position)?;
             entry.message.state = state;
-            entry.message.clone()
+            (entry.key.clone(), entry.message.clone())
         };
 
-        let _ = self.events.send(StoreEvent::StateChanged(message.clone()));
+        let _ = self.events.send(StoreEvent::StateChanged {
+            key,
+            message: message.clone(),
+        });
         Some(message)
     }
 
@@ -769,8 +775,8 @@ mod tests {
                 StoreEvent::Dropped { message_ids } => {
                     dropped.extend(message_ids);
                 }
-                StoreEvent::New(_) => new_count += 1,
-                StoreEvent::StateChanged(_) => {}
+                StoreEvent::New { .. } => new_count += 1,
+                StoreEvent::StateChanged { .. } => {}
             }
         }
         assert_eq!(dropped.len(), 1);

@@ -17,6 +17,7 @@ without a gateway or a serial controller.
 | Z-Wave decoding, frame building, or definitions | `hodeco-codec/` |
 | HTTP routes, RPC handling, WebSocket behavior | `src/http/` |
 | Serial services, discovery, message storage, logging | `src/services/`, `src/messages/`, `src/logging/` |
+| Tasks, schedules, commands, run history, hooks | `src/automation/` |
 | A UI screen or widget | `hodeco-ui/src/app/views/`, `hodeco-ui/src/ui/` |
 
 ## Workspace layout

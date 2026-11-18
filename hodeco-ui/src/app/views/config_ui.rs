@@ -1,17 +1,16 @@
 //! Editable configuration draft and save state.
 
-use crate::ui::params::ParamEditor;
 use hodeco_contract::config::{
-    Archive, Config, CorruptPolicy, HttpServerConfig, LogConfig, MessageLogConfig, ServiceConfig,
+    Archive, Config, CorruptPolicy, HttpServerConfig, LogConfig, MessageLogConfig,
     StaticAssetsConfig,
 };
-use hodeco_contract::domain::ParamValues;
 use hodeco_contract::utils::{FileMode, HumanDuration, Size};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigUi {
     pub draft: Option<ConfigDraft>,
+    pub base: Option<Config>,
     pub dirty: bool,
     pub saving: bool,
     pub error: Option<String>,
@@ -22,6 +21,7 @@ pub struct ConfigUi {
 impl ConfigUi {
     pub fn load(&mut self, config: &Config) {
         self.draft = Some(ConfigDraft::from_config(config));
+        self.base = Some(config.clone());
         self.dirty = false;
         self.saving = false;
         self.error = None;
@@ -34,10 +34,11 @@ impl ConfigUi {
     }
 
     pub fn build(&mut self) -> Result<Config, String> {
+        let base = self.base.clone().unwrap_or_default();
         self.draft
             .as_mut()
             .ok_or_else(|| "configuration is not loaded".to_string())?
-            .build_config()
+            .build_config(base)
     }
 }
 
@@ -47,7 +48,6 @@ pub struct ConfigDraft {
     pub log: LogDraft,
     pub http_server: HttpDraft,
     pub message_log: MessageLogDraft,
-    pub services: Vec<ServiceDraft>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,18 +90,9 @@ pub struct MessageLogDraft {
     pub file: String,
     pub file_mode: String,
     pub auto_persist: String,
+    pub compaction_factor: String,
+    pub compact_interval: String,
     pub on_corrupt: CorruptPolicy,
-}
-
-#[derive(Debug, Clone)]
-pub struct ServiceDraft {
-    pub alias: String,
-    pub protocol: String,
-    pub transport: String,
-    pub entry: String,
-    pub params: ParamValues,
-    pub editor: Option<ParamEditor>,
-    pub editor_key: Option<(String, String)>,
 }
 
 impl ConfigDraft {
@@ -140,21 +131,10 @@ impl ConfigDraft {
                 file: config.message_log.file.display().to_string(),
                 file_mode: config.message_log.file_mode.to_string(),
                 auto_persist: config.message_log.auto_persist.to_string(),
+                compaction_factor: config.message_log.compaction_factor.to_string(),
+                compact_interval: config.message_log.compact_interval.to_string(),
                 on_corrupt: config.message_log.on_corrupt,
             },
-            services: config
-                .services
-                .iter()
-                .map(|service| ServiceDraft {
-                    alias: service.alias.clone().unwrap_or_default(),
-                    protocol: service.protocol.clone(),
-                    transport: service.transport.clone(),
-                    entry: service.entry.clone(),
-                    params: service.params.clone(),
-                    editor: None,
-                    editor_key: None,
-                })
-                .collect(),
         }
     }
 
@@ -162,37 +142,13 @@ impl ConfigDraft {
     /// Parsing is used so whitespace or equivalent duration/size spellings do
     /// not keep the form dirty. Invalid input counts as dirty.
     pub fn differs_from(&mut self, config: &Config) -> bool {
-        match self.build_config() {
+        match self.build_config(config.clone()) {
             Ok(built) => built != *config,
             Err(_) => true,
         }
     }
 
-    pub fn build_config(&mut self) -> Result<Config, String> {
-        let mut services = Vec::with_capacity(self.services.len());
-        for (index, service) in self.services.iter_mut().enumerate() {
-            let params = if let Some(editor) = &mut service.editor {
-                if service.editor_key.as_ref()
-                    == Some(&(service.protocol.clone(), service.transport.clone()))
-                {
-                    editor
-                        .collect()
-                        .map_err(|errors| format!("services[{index}]: {}", errors.join("; ")))?
-                } else {
-                    service.params.clone()
-                }
-            } else {
-                service.params.clone()
-            };
-            services.push(ServiceConfig {
-                alias: (!service.alias.trim().is_empty()).then(|| service.alias.trim().to_string()),
-                protocol: service.protocol.clone(),
-                transport: service.transport.clone(),
-                entry: service.entry.clone(),
-                params,
-            });
-        }
-
+    pub fn build_config(&mut self, base: Config) -> Result<Config, String> {
         Ok(Config {
             working_dir: PathBuf::from(&self.working_dir),
             log: LogConfig {
@@ -248,9 +204,21 @@ impl ConfigDraft {
                     &self.message_log.auto_persist,
                     "messageLog.autoPersist",
                 )?,
+                compaction_factor: self
+                    .message_log
+                    .compaction_factor
+                    .trim()
+                    .parse()
+                    .map_err(|error| format!("messageLog.compactionFactor: {error}"))?,
+                compact_interval: parse_duration(
+                    &self.message_log.compact_interval,
+                    "messageLog.compactInterval",
+                )?,
                 on_corrupt: self.message_log.on_corrupt,
             },
-            services,
+            files: base.files,
+            task_log: base.task_log,
+            task_engine: base.task_engine,
         })
     }
 }
@@ -298,7 +266,7 @@ mod tests {
     fn drafts_roundtrip_the_wire_configuration() {
         let config = Config::default();
         let mut draft = ConfigDraft::from_config(&config);
-        assert_eq!(draft.build_config().unwrap(), config);
+        assert_eq!(draft.build_config(config.clone()).unwrap(), config);
     }
 
     #[test]
@@ -313,23 +281,21 @@ mod tests {
 
     #[test]
     fn invalid_numbers_report_their_field() {
-        let mut draft = ConfigDraft::from_config(&Config::default());
+        let config = Config::default();
+        let mut draft = ConfigDraft::from_config(&config);
         draft.http_server.port = "not-a-port".to_string();
-        let error = draft.build_config().unwrap_err();
+        let error = draft.build_config(config).unwrap_err();
         assert!(error.contains("httpServer.port"), "{error}");
     }
 
     #[test]
-    fn service_overrides_roundtrip() {
+    fn non_editable_sections_are_preserved() {
         let mut config = Config::default();
-        config.services.push(ServiceConfig {
-            alias: Some("ZW".to_string()),
-            protocol: "zwave".to_string(),
-            transport: "serial".to_string(),
-            entry: "COM4".to_string(),
-            params: ParamValues::from([("baudRate".to_string(), serde_json::json!(57_600))]),
-        });
+        config.task_engine.max_chain_depth = 9;
+        config.files.tasks = PathBuf::from("custom-tasks.yaml");
         let mut draft = ConfigDraft::from_config(&config);
-        assert_eq!(draft.build_config().unwrap(), config);
+        let built = draft.build_config(config.clone()).unwrap();
+        assert_eq!(built.task_engine.max_chain_depth, 9);
+        assert_eq!(built.files.tasks, PathBuf::from("custom-tasks.yaml"));
     }
 }

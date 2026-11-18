@@ -461,6 +461,14 @@ pub fn labeled_value(ui: &mut Ui, theme: UiTheme, label: &str, value: &str) {
     ui.label(RichText::new(value).size(14.0));
 }
 
+/// A form control followed by a muted one-line description.
+pub fn field_with_note(ui: &mut Ui, theme: UiTheme, note: &str, add: impl FnOnce(&mut Ui)) {
+    ui.vertical(|ui| {
+        add(ui);
+        ui.label(RichText::new(note).small().color(palette(theme).muted));
+    });
+}
+
 pub fn copy_button(ui: &mut Ui, value: &str) -> bool {
     copy_with_feedback(ui, value, "Copy")
 }

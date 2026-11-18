@@ -57,7 +57,8 @@ After the process starts:
 1. `GET http://127.0.0.1:8180/api/health` should return healthy.
 2. The UI should load at `http://127.0.0.1:8180/`.
 3. The server log should report the listening address.
-4. Add your Z-Wave serial service, either in the UI or in `config.yaml`:
+4. Add your Z-Wave serial service, either in the UI or in `services.yaml`
+   (next to `config.yaml`):
 
    ```yaml
    services:

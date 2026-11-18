@@ -303,6 +303,8 @@ fn notification(event: Event) -> Notification {
         Event::ServiceStateChanged { service, status } => {
             Notification::ServiceStateChanged(ServiceStateChangedNotification { service, status })
         }
+        Event::TaskRunStarted(notification) => Notification::TaskRunStarted(notification),
+        Event::TaskRunFinished(notification) => Notification::TaskRunFinished(notification),
     }
 }
 

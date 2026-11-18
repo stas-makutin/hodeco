@@ -354,9 +354,25 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                     duration_row(
                         ui,
                         theme,
-                        "Auto persist",
+                        "Flush interval",
                         &mut draft.message_log.auto_persist,
                         config.message_log.auto_persist,
+                        &mut changed,
+                    );
+                    text_row(
+                        ui,
+                        theme,
+                        "Compaction factor",
+                        &mut draft.message_log.compaction_factor,
+                        config.message_log.compaction_factor.to_string(),
+                        &mut changed,
+                    );
+                    duration_row(
+                        ui,
+                        theme,
+                        "Compact interval",
+                        &mut draft.message_log.compact_interval,
+                        config.message_log.compact_interval,
                         &mut changed,
                     );
                     ui.label(field_label(theme, "On corrupt"));

@@ -1,16 +1,19 @@
 use crate::app::{AppError, AppState};
+use crate::automation::engine::{self, FireError};
 use crate::http::{assets, rpc, ws};
 use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use hodeco_contract::api::{ApiError, ErrorCode, Response as ApiResponse};
+use hodeco_contract::domain::{HttpMethod, HttpRunTrigger, RunChain, RunTrigger};
+use hodeco_contract::utils::Base64Bytes;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
@@ -53,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rpc", post(rpc_handler))
         .route("/ws", get(websocket_handler))
         .route("/health", get(health))
+        .route("/hooks/{task}", get(hook_handler).post(hook_handler))
         .layer(DefaultBodyLimit::max(RPC_BODY_LIMIT))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -361,6 +365,93 @@ async fn websocket_handler(
 
 async fn health() -> impl IntoResponse {
     Json(json!({"status": "ok"}))
+}
+
+async fn hook_handler(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    method: axum::http::Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(task) = state.automation.task(&task_id) else {
+        return hook_error(StatusCode::NOT_FOUND, "taskNotFound");
+    };
+    let Some(trigger) = task.http_trigger() else {
+        return hook_error(StatusCode::NOT_FOUND, "hookNotFound");
+    };
+    let method = match method {
+        axum::http::Method::GET => HttpMethod::Get,
+        axum::http::Method::POST => HttpMethod::Post,
+        _ => return hook_error(StatusCode::METHOD_NOT_ALLOWED, "methodNotAllowed"),
+    };
+    if !trigger.allows(method) {
+        return hook_error(StatusCode::METHOD_NOT_ALLOWED, "methodNotAllowed");
+    }
+    if let Some(expected) = &trigger.secret {
+        let provided = headers
+            .get("x-hodeco-secret")
+            .and_then(|value| value.to_str().ok());
+        if !provided.is_some_and(|provided| secret_matches(expected, provided)) {
+            return hook_error(StatusCode::UNAUTHORIZED, "invalidSecret");
+        }
+    }
+    if body.len() > state.config.task_engine.max_trigger_payload_size.as_bytes() as usize {
+        return hook_error(StatusCode::PAYLOAD_TOO_LARGE, "payloadTooLarge");
+    }
+
+    let mut metadata_headers = std::collections::BTreeMap::new();
+    for name in ["user-agent", "content-type", "x-forwarded-for", "x-real-ip"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            metadata_headers.insert(name.to_string(), value.to_string());
+        }
+    }
+    let trigger_record = RunTrigger::Http(HttpRunTrigger {
+        id: trigger.id.clone(),
+        method,
+        path: uri.path().to_string(),
+        query: uri.query().map(str::to_string),
+        remote: None,
+        headers: metadata_headers,
+        payload: (!body.is_empty()).then(|| Base64Bytes::from(body.as_ref())),
+    });
+    let chain = RunChain {
+        chain_id: uuid::Uuid::new_v4(),
+        parent_run_id: None,
+        depth: 0,
+    };
+    match engine::fire(&state, &task, trigger_record, chain, false).await {
+        Ok(run_id) => (StatusCode::ACCEPTED, Json(json!({"runId": run_id}))).into_response(),
+        Err(FireError::TaskDisabled) => hook_error(StatusCode::CONFLICT, "taskDisabled"),
+        Err(FireError::TaskBusy) => hook_error(StatusCode::CONFLICT, "taskBusy"),
+        Err(FireError::TaskLimitExceeded) => {
+            hook_error(StatusCode::TOO_MANY_REQUESTS, "taskLimitExceeded")
+        }
+        Err(FireError::PayloadTooLarge) => {
+            hook_error(StatusCode::PAYLOAD_TOO_LARGE, "payloadTooLarge")
+        }
+        Err(FireError::TaskNotFound | FireError::TriggerNotFound) => {
+            hook_error(StatusCode::NOT_FOUND, "hookNotFound")
+        }
+    }
+}
+
+fn hook_error(status: StatusCode, code: &'static str) -> Response {
+    (status, Json(json!({"error": code}))).into_response()
+}
+
+fn secret_matches(expected: &str, provided: &str) -> bool {
+    let expected = expected.as_bytes();
+    let provided = provided.as_bytes();
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut difference = 0_u8;
+    for (left, right) in expected.iter().zip(provided) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 fn json_response(body: Vec<u8>) -> Response {

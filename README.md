@@ -11,8 +11,8 @@ typed JSON-RPC API, live WebSocket stream, and searchable message history.
 That means no more fighting over the serial port: connect the controller once,
 then let every local client share the same devices, state, and history. hodeco
 is built to run on a small always-on machine — a Raspberry Pi, a mini-PC, a
-Windows box — and to stay out of the way: one binary, one optional YAML file, no
-external database, no cloud account.
+Windows box — and to stay out of the way: one binary, a small set of YAML files,
+no external database, no cloud account.
 
 > **Trusted networks only.** Authentication and TLS are not implemented, and the
 > default bind address is `127.0.0.1`. If you expose it beyond your LAN, put it
@@ -23,7 +23,8 @@ external database, no cloud account.
 [How it fits together](#how-it-fits-together) · [API tour](#a-tour-of-the-api) ·
 [Message builder](#message-builder) · [Configuration](#configuration) ·
 [Running as a service](#running-as-a-service) · [Build and test](#build-and-test) ·
-[Releases](#releases) · [Documentation](#documentation) · [License](#license)
+[Releases](#releases) · [Changelog](CHANGELOG.md) · [Documentation](#documentation) ·
+[License](#license)
 
 ## What you get
 
@@ -43,8 +44,11 @@ external database, no cloud account.
   metadata, IDs, or masked payload expressions, inspect parsed Z-Wave frames,
   and build outgoing frames with typed controls, packed bit fields, signed or
   unsigned integer widths, TX options, and a per-send TTL override.
+- **Automation included.** Tasks run commands and send messages on schedules,
+  messages, HTTP hooks, or manual triggers; next rules chain tasks, and every run
+  is recorded in per-task history. Commands and schedules are reusable catalogs.
 - **Operations included.** Rotating logs with optional ZIP archives, file-backed
-  message persistence, a Windows service host, and a systemd installer.
+  message and task persistence, a Windows service host, and a systemd installer.
 - **Portable releases.** Windows x64/ARM64, Linux x64/ARM64/ARMv7, and fully
   static musl builds. Windows builds use the static CRT.
 
@@ -196,8 +200,9 @@ the connection with `1013`. Reconnect, resubscribe, and resynchronize with the
 list methods.
 
 The included UI is an egui app compiled to WASM. It covers services, discovery,
-message history, configuration, server details, and a console, plus a protocol
-builder and a demo/fixture mode that works without a gateway. The browser
+message history, tasks/schedules/commands/runs, configuration, server details,
+and a console, plus a protocol builder and a demo/fixture mode that works without
+a gateway. The browser
 connects to `ws(s)://<page-host>/api/ws` by default; use `?server=` only for a
 remote gateway.
 
@@ -242,9 +247,11 @@ The configuration file is optional. These are the platform defaults:
 | Message log | `<exe_dir>\messages.log` | `/var/lib/hodeco/messages.log` |
 | Static assets | `<exe_dir>\site` | `/usr/share/hodeco/site` |
 
-A complete configuration looks like this:
+Configuration is split into five sibling files. `config.yaml` holds the core
+settings and points at the catalogs; the catalog files live next to it.
 
 ```yaml
+# config.yaml
 workingDir: /var/lib/hodeco
 
 log:
@@ -277,9 +284,35 @@ messageLog:
   maxSize: 10 MiB
   file: /var/lib/hodeco/messages.log
   fileMode: "0644"
-  autoPersist: 6 h
+  autoPersist: 60 s
+  compactionFactor: 2.0
+  compactInterval: 30 d
   onCorrupt: ignore  # ignore or fail
 
+files:
+  services: services.yaml
+  tasks: tasks.yaml
+  schedules: schedules.yaml
+  commands: commands.yaml
+
+taskLog:
+  dir: tasks
+  maxSize: 100 KiB
+  maxRows: 1000
+  fileMode: "0640"
+  compactionFactor: 2.0
+  compactInterval: 30 d
+  onCorrupt: ignore
+
+taskEngine:
+  maxTriggerPayloadSize: 16 KiB
+  maxConcurrentRuns: 32
+  maxChainDepth: 16
+  maxFanOut: 16
+```
+
+```yaml
+# services.yaml
 services:
   - alias: ZW
     protocol: zwave
@@ -291,18 +324,59 @@ services:
       outgoingMaxTTL: 10 s
 ```
 
+```yaml
+# commands.yaml
+commands:
+  - id: meter
+    name: Meter poll
+    executable: /usr/local/bin/meter-poll
+    args: ["--json"]
+    timeout: 10s
+    description: Read the meter value
+```
+
+```yaml
+# schedules.yaml
+location: [52.52, 13.405, 34]
+timezone: Europe/Berlin
+
+schedules:
+  - id: before-sunset
+    name: Before sunset
+    on:
+      at: "sunset - 15m"
+      days: [mon, tue, wed, thu, fri]
+```
+
+```yaml
+# tasks.yaml
+tasks:
+  - id: evening-lights
+    name: Evening lights
+    triggers:
+      - id: sunset
+        type: schedule
+        schedule: before-sunset
+    actions:
+      - id: meter
+        command: meter
+        output: capture
+```
+
 `outgoingMaxTTL` bounds how long a queued outgoing message may wait; `0 s`
 disables the TTL. The builder's **Override TTL** sends an explicit per-message
 value without changing the service configuration.
 
-Relative paths are resolved after the configured `workingDir` is created and
-entered. Unknown fields are rejected. Service aliases and keys must be unique.
-Outside changes to the file require a manual restart; there is no file watcher.
+Relative core paths are resolved after the configured `workingDir` is created
+and entered. Catalog paths in `files` are resolved against the directory that
+contains `config.yaml`. Unknown fields are rejected. Service aliases and keys,
+task/schedule/command IDs, and trigger/action IDs must be unique. Outside
+changes to any file require a manual restart; there is no file watcher.
 
-The `services.add`, `services.remove`, and `services.alias` RPC methods rewrite
-the config file. The service account must be able to write it for write-back to
-succeed. Use `--config` with a writable path if the default config must remain
-read-only.
+The service, task, schedule, and command RPC methods rewrite the relevant file
+atomically. The service account must be able to write those files for write-back
+to succeed. See [`CHANGELOG.md`](CHANGELOG.md) for the 0.2.0 configuration and
+message-log incompatibilities.
 
 ## Running as a service
 
@@ -376,6 +450,7 @@ includes `SHA256SUMS` and generated release notes. See
 The [wiki](../../wiki) is the operator and integrator manual:
 
 - [Getting Started](wiki/Getting-Started.md) — run a release or build from source.
+- [Changelog](CHANGELOG.md) — release history and breaking changes.
 - [Configuration](wiki/Configuration.md) — full config reference and paths.
 - [HTTP API](wiki/HTTP-API.md) — endpoints, RPC methods, and static assets.
 - [WebSocket](wiki/WebSocket.md) — subscriptions, notifications, and backpressure.

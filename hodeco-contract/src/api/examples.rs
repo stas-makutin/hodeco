@@ -6,14 +6,17 @@
 
 use super::Method;
 use super::payloads::{
+    CommandsAddParams, CommandsGetParams, CommandsRemoveParams, CommandsUpdateParams,
     ConfigUpdateParams, DiscoveryCancelParams, DiscoveryGetParams, DiscoveryStartParams,
     EventTopic, EventsSubscribeParams, EventsUnsubscribeParams, MessagesGetParams,
-    MessagesListParams, ProtocolInfoParams, ProtocolParamsParams, ServicesAddParams,
-    ServicesAliasParams, ServicesParamsParams, ServicesRemoveParams, ServicesSendParams,
-    ServicesStatusParams,
+    MessagesListParams, ProtocolInfoParams, ProtocolParamsParams, SchedulesAddParams,
+    SchedulesGetParams, SchedulesPreviewParams, SchedulesRemoveParams, SchedulesUpdateParams,
+    ServicesAddParams, ServicesAliasParams, ServicesParamsParams, ServicesRemoveParams,
+    ServicesSendParams, ServicesStatusParams, TasksAddParams, TasksFireParams, TasksGetParams,
+    TasksHistoryParams, TasksPurgeHistoryParams, TasksRemoveParams, TasksUpdateParams,
 };
 use crate::config::Config;
-use crate::domain::ServiceRef;
+use crate::domain::{CommandDefinition, ScheduleDefinition, ServiceRef, TaskDefinition};
 use crate::utils::{Base64Bytes, HumanDuration};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -90,6 +93,95 @@ pub fn example_params(method: Method) -> Value {
             ttl: Some(HumanDuration::from_std(Duration::from_secs(10))),
         }),
         Method::MessagesGet => encode(MessagesGetParams { id: Uuid::nil() }),
+        Method::TasksList => json!({}),
+        Method::TasksGet => encode(TasksGetParams {
+            task_id: "evening-lights".to_string(),
+            run_id: Uuid::nil(),
+        }),
+        Method::TasksAdd => encode(TasksAddParams {
+            task: TaskDefinition {
+                id: "evening-lights".to_string(),
+                name: "Evening lights".to_string(),
+                ..TaskDefinition::default()
+            },
+        }),
+        Method::TasksUpdate => encode(TasksUpdateParams {
+            task_id: "evening-lights".to_string(),
+            task: TaskDefinition {
+                id: "evening-lights".to_string(),
+                name: "Evening lights".to_string(),
+                ..TaskDefinition::default()
+            },
+        }),
+        Method::TasksRemove => encode(TasksRemoveParams {
+            task_id: "evening-lights".to_string(),
+        }),
+        Method::TasksFire => encode(TasksFireParams {
+            task_id: "evening-lights".to_string(),
+            payload: Some(Base64Bytes::from(vec![1, 2, 3])),
+            ..TasksFireParams::default()
+        }),
+        Method::TasksHistory => encode(TasksHistoryParams {
+            limit: Some(50),
+            ..TasksHistoryParams::default()
+        }),
+        Method::TasksPurgeHistory => encode(TasksPurgeHistoryParams {
+            task_id: "evening-lights".to_string(),
+        }),
+        Method::SchedulesList => json!({}),
+        Method::SchedulesGet => encode(SchedulesGetParams {
+            schedule_id: "before-sunset".to_string(),
+        }),
+        Method::SchedulesAdd => encode(SchedulesAddParams {
+            schedule: ScheduleDefinition {
+                id: "before-sunset".to_string(),
+                name: "Before sunset".to_string(),
+                ..ScheduleDefinition::default()
+            },
+        }),
+        Method::SchedulesUpdate => encode(SchedulesUpdateParams {
+            schedule_id: "before-sunset".to_string(),
+            schedule: ScheduleDefinition {
+                id: "before-sunset".to_string(),
+                name: "Before sunset".to_string(),
+                ..ScheduleDefinition::default()
+            },
+        }),
+        Method::SchedulesRemove => encode(SchedulesRemoveParams {
+            schedule_id: "before-sunset".to_string(),
+        }),
+        Method::SchedulesPreview => encode(SchedulesPreviewParams {
+            schedule: ScheduleDefinition {
+                id: "before-sunset".to_string(),
+                name: "Before sunset".to_string(),
+                ..ScheduleDefinition::default()
+            },
+            limit: Some(20),
+        }),
+        Method::CommandsList => json!({}),
+        Method::CommandsGet => encode(CommandsGetParams {
+            command_id: "meter".to_string(),
+        }),
+        Method::CommandsAdd => encode(CommandsAddParams {
+            command: CommandDefinition {
+                id: "meter".to_string(),
+                name: "Meter poll".to_string(),
+                executable: std::path::PathBuf::from("/usr/local/bin/meter-poll"),
+                ..CommandDefinition::default()
+            },
+        }),
+        Method::CommandsUpdate => encode(CommandsUpdateParams {
+            command_id: "meter".to_string(),
+            command: CommandDefinition {
+                id: "meter".to_string(),
+                name: "Meter poll".to_string(),
+                executable: std::path::PathBuf::from("/usr/local/bin/meter-poll"),
+                ..CommandDefinition::default()
+            },
+        }),
+        Method::CommandsRemove => encode(CommandsRemoveParams {
+            command_id: "meter".to_string(),
+        }),
         Method::EventsSubscribe => encode(EventsSubscribeParams {
             topics: vec![EventTopic::Messages],
         }),

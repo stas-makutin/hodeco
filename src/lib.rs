@@ -1,4 +1,5 @@
 pub mod app;
+pub mod automation;
 pub mod command_line;
 pub mod config;
 pub mod console_runner;

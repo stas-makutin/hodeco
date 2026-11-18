@@ -43,7 +43,8 @@ UI. It runs on pushes to `master` or `main`; update the branch filter in
 
 ## Release checklist
 
-1. Update both workspace versions listed above.
+1. Update both workspace versions listed above and add the release notes to
+   `CHANGELOG.md`.
 2. Refresh the lock files and run the local checks:
 
    ```sh
@@ -101,6 +102,7 @@ hodeco(.exe)
 site/                     # raw web assets plus .br and .gz sidecars
 config.yaml               # Linux archives only; portable relative paths
 README.md
+CHANGELOG.md
 LICENSE-MIT
 LICENSE-APACHE
 THIRD-PARTY-LICENSES.md

@@ -1,8 +1,8 @@
 use crate::app;
 use crate::command_line::CommandLine;
 use crate::config;
+use crate::config::ConfigBundle;
 use crate::logging::{self, ServiceLogLevel, ServiceLogger};
-use hodeco_contract::config::Config;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -13,8 +13,9 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
         Some(config) => config,
         None => return,
     };
-    let config = loaded.config;
-    let config_path = loaded.config_path;
+    let config = loaded.bundle.config.clone();
+    let services_count = loaded.bundle.services.services.len();
+    let config_path = loaded.config_path.clone();
 
     if let Err(error) = config::prepare_working_directory(&config) {
         logger(ServiceLogLevel::Error, &format!("{error}"));
@@ -49,7 +50,7 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
 
     info!(
         http = %format!("{}:{}", config.http_server.bind, config.http_server.port),
-        services = config.services.len(),
+        services = services_count,
         "configuration loaded"
     );
     info!("service started");
@@ -71,7 +72,7 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
         }
     };
 
-    match runtime.block_on(app::run(config, config_path, cancel_token)) {
+    match runtime.block_on(app::run(loaded.bundle, config_path, cancel_token)) {
         Ok(()) => info!("service stopped"),
         Err(error) => {
             error!(error = %error, "service failed");
@@ -83,7 +84,7 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
 }
 
 struct LoadedConfig {
-    config: Config,
+    bundle: ConfigBundle,
     config_path: PathBuf,
     default_config_missing: Option<PathBuf>,
 }
@@ -101,9 +102,9 @@ fn load_config(command_line: &CommandLine, logger: ServiceLogger) -> Option<Load
                     return None;
                 }
             };
-            match config::load(&path) {
-                Ok(config) => Some(LoadedConfig {
-                    config,
+            match config::load_bundle(&path) {
+                Ok(bundle) => Some(LoadedConfig {
+                    bundle,
                     config_path: path,
                     default_config_missing: None,
                 }),
@@ -129,9 +130,9 @@ fn load_config(command_line: &CommandLine, logger: ServiceLogger) -> Option<Load
                 }
             };
             if path.exists() {
-                match config::load(&path) {
-                    Ok(config) => Some(LoadedConfig {
-                        config,
+                match config::load_bundle(&path) {
+                    Ok(bundle) => Some(LoadedConfig {
+                        bundle,
                         config_path: path,
                         default_config_missing: None,
                     }),
@@ -141,13 +142,19 @@ fn load_config(command_line: &CommandLine, logger: ServiceLogger) -> Option<Load
                     }
                 }
             } else {
-                let config = Config::default();
+                let config = hodeco_contract::config::Config::default();
                 if let Err(error) = config::validate(&config) {
                     logger(ServiceLogLevel::Error, &format!("{error}"));
                     return None;
                 }
                 Some(LoadedConfig {
-                    config,
+                    bundle: ConfigBundle {
+                        config,
+                        services: hodeco_contract::config::ServicesFile::default(),
+                        tasks: hodeco_contract::config::TasksFile::default(),
+                        schedules: hodeco_contract::config::SchedulesFile::default(),
+                        commands: hodeco_contract::config::CommandsFile::default(),
+                    },
                     config_path: path.clone(),
                     default_config_missing: Some(path),
                 })

@@ -1,6 +1,9 @@
-use super::validate::validate;
-use hodeco_contract::config::Config;
+use super::ConfigBundle;
+use super::validate::{validate, validate_bundle};
+use hodeco_contract::config::{CommandsFile, Config, SchedulesFile, ServicesFile, TasksFile};
 use hodeco_contract::utils::FileMode;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -8,6 +11,12 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("failed to parse configuration: {0}")]
     Parse(#[from] serde_yaml_ng::Error),
+    #[error("failed to parse configuration file '{path}': {source}")]
+    ParseFile {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml_ng::Error,
+    },
     #[error("failed to serialize configuration: {0}")]
     Serialize(serde_yaml_ng::Error),
     #[error("invalid configuration: {0}")]
@@ -86,12 +95,83 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     Ok(config)
 }
 
+/// Loads the core configuration and the four sibling catalogs.
+///
+/// Missing catalog files are treated as empty. A malformed core file, catalog,
+/// or cross-file reference fails startup with a path-specific error.
+pub fn load_bundle(path: &Path) -> Result<ConfigBundle, ConfigError> {
+    let config = load(path)?;
+    let base = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let services: ServicesFile = read_optional_yaml(&base.join(&config.files.services))?;
+    let tasks: TasksFile = read_optional_yaml(&base.join(&config.files.tasks))?;
+    let schedules: SchedulesFile = read_optional_yaml(&base.join(&config.files.schedules))?;
+    let commands: CommandsFile = read_optional_yaml(&base.join(&config.files.commands))?;
+
+    let bundle = ConfigBundle {
+        config,
+        services,
+        tasks,
+        schedules,
+        commands,
+    };
+    validate_bundle(&bundle)?;
+    Ok(bundle)
+}
+
+pub fn read_optional_yaml<T>(path: &Path) -> Result<T, ConfigError>
+where
+    T: DeserializeOwned + Default,
+{
+    match std::fs::read_to_string(path) {
+        Ok(input) => serde_yaml_ng::from_str(&input).map_err(|source| ConfigError::ParseFile {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(source) => Err(ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+pub fn read_yaml<T>(path: &Path) -> Result<T, ConfigError>
+where
+    T: DeserializeOwned,
+{
+    let input = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_yaml_ng::from_str(&input).map_err(|source| ConfigError::ParseFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 /// Writes the configuration atomically through a temporary file in the same
 /// directory. Comments and formatting from the original file are not
 /// preserved.
 pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
     validate(config)?;
     let output = to_yaml_string(config)?;
+    write_yaml_atomic(path, &output)
+}
+
+/// Writes any catalog or core file atomically.
+pub fn save_yaml<T>(path: &Path, value: &T) -> Result<(), ConfigError>
+where
+    T: Serialize,
+{
+    let output = serde_yaml_ng::to_string(value).map_err(ConfigError::Serialize)?;
+    write_yaml_atomic(path, &output)
+}
+
+fn write_yaml_atomic(path: &Path, output: &str) -> Result<(), ConfigError> {
     let file_name = path.file_name().ok_or_else(|| ConfigError::Write {
         path: path.to_path_buf(),
         source: std::io::Error::new(
@@ -103,6 +183,10 @@ pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let temporary = parent.join(format!(
         ".{}.{}.tmp",
         file_name.to_string_lossy(),
@@ -128,6 +212,29 @@ pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
     }
 
     Ok(())
+}
+
+/// Resolves the four catalog paths against the core configuration directory.
+pub fn catalog_path(config_path: &Path, config: &Config) -> CatalogPaths {
+    let base = config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    CatalogPaths {
+        services: base.join(&config.files.services),
+        tasks: base.join(&config.files.tasks),
+        schedules: base.join(&config.files.schedules),
+        commands: base.join(&config.files.commands),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogPaths {
+    pub services: PathBuf,
+    pub tasks: PathBuf,
+    pub schedules: PathBuf,
+    pub commands: PathBuf,
 }
 
 #[cfg(unix)]
@@ -228,6 +335,8 @@ pub fn prepare_runtime_directories(config: &Config) -> Result<Vec<String>, Confi
         ensure_directory(parent, None)?;
     }
 
+    ensure_directory(&config.task_log.dir, None)?;
+
     let static_assets = &config.http_server.static_assets;
     let mut warnings = Vec::new();
     if static_assets.dir.is_dir() {
@@ -313,9 +422,11 @@ mod tests {
         );
         assert_eq!(
             config.message_log.auto_persist,
-            HumanDuration::from_std(Duration::from_secs(6 * 60 * 60))
+            HumanDuration::from_std(Duration::from_secs(60))
         );
-        assert!(config.services.is_empty());
+        assert_eq!(config.files.services, PathBuf::from("services.yaml"));
+        assert_eq!(config.task_log.max_rows, 1_000);
+        assert_eq!(config.task_engine.max_concurrent_runs, 32);
     }
 
     #[test]
@@ -337,15 +448,8 @@ httpServer:
     spaFallback: true
 messageLog:
   maxSize: 10 MiB
-  autoPersist: 6 h
+  autoPersist: 60 s
   onCorrupt: fail
-services:
-  - alias: ZW
-    protocol: zwave
-    transport: serial
-    entry: COM3
-    params:
-      baudRate: 115200
 "#;
 
         let config = parse_str(yaml).unwrap();
@@ -359,12 +463,48 @@ services:
         assert_eq!(config.http_server.port, 9000);
         assert!(config.http_server.static_assets.spa_fallback);
         assert_eq!(config.message_log.on_corrupt, CorruptPolicy::Fail);
-        assert_eq!(config.services.len(), 1);
-        assert_eq!(config.services[0].alias.as_deref(), Some("ZW"));
-        assert_eq!(
-            config.services[0].params.get("baudRate"),
-            Some(&serde_json::json!(115200))
-        );
+    }
+
+    #[test]
+    fn rejects_the_old_services_key() {
+        let error = parse_str("services:\n  - protocol: zwave\n").unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn loads_sibling_catalogs() {
+        let dir = std::env::temp_dir().join(format!("hodeco-bundle-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.yaml");
+        std::fs::write(&config_path, "{}").unwrap();
+        std::fs::write(
+            dir.join("services.yaml"),
+            "services:\n  - alias: ZW\n    protocol: zwave\n    transport: serial\n    entry: COM4\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("commands.yaml"),
+            "commands:\n  - id: meter\n    name: Meter\n    executable: meter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("schedules.yaml"),
+            "timezone: UTC\nschedules:\n  - id: morning\n    name: Morning\n    on:\n      at: \"09:00\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tasks.yaml"),
+            "tasks:\n  - id: test\n    name: Test\n    actions:\n      - id: poll\n        command: meter\n",
+        )
+        .unwrap();
+
+        let bundle = load_bundle(&config_path).unwrap();
+        assert_eq!(bundle.services.services.len(), 1);
+        assert_eq!(bundle.commands.commands.len(), 1);
+        assert_eq!(bundle.schedules.schedules.len(), 1);
+        assert_eq!(bundle.tasks.tasks.len(), 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -552,15 +692,8 @@ log:
 httpServer:
   port: 9000
 messageLog:
-  autoPersist: 6 h
+  autoPersist: 60 s
   onCorrupt: fail
-services:
-  - alias: ZW
-    protocol: zwave
-    transport: serial
-    entry: COM3
-    params:
-      baudRate: 115200
 "#,
         )
         .unwrap();

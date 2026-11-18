@@ -45,6 +45,44 @@ pub enum Method {
     MessagesGet,
     #[serde(rename = "messages.list")]
     MessagesList,
+    #[serde(rename = "tasks.list")]
+    TasksList,
+    #[serde(rename = "tasks.get")]
+    TasksGet,
+    #[serde(rename = "tasks.add")]
+    TasksAdd,
+    #[serde(rename = "tasks.update")]
+    TasksUpdate,
+    #[serde(rename = "tasks.remove")]
+    TasksRemove,
+    #[serde(rename = "tasks.fire")]
+    TasksFire,
+    #[serde(rename = "tasks.history")]
+    TasksHistory,
+    #[serde(rename = "tasks.purgeHistory")]
+    TasksPurgeHistory,
+    #[serde(rename = "schedules.list")]
+    SchedulesList,
+    #[serde(rename = "schedules.get")]
+    SchedulesGet,
+    #[serde(rename = "schedules.add")]
+    SchedulesAdd,
+    #[serde(rename = "schedules.update")]
+    SchedulesUpdate,
+    #[serde(rename = "schedules.remove")]
+    SchedulesRemove,
+    #[serde(rename = "schedules.preview")]
+    SchedulesPreview,
+    #[serde(rename = "commands.list")]
+    CommandsList,
+    #[serde(rename = "commands.get")]
+    CommandsGet,
+    #[serde(rename = "commands.add")]
+    CommandsAdd,
+    #[serde(rename = "commands.update")]
+    CommandsUpdate,
+    #[serde(rename = "commands.remove")]
+    CommandsRemove,
     #[serde(rename = "events.subscribe")]
     EventsSubscribe,
     #[serde(rename = "events.unsubscribe")]
@@ -52,7 +90,7 @@ pub enum Method {
 }
 
 impl Method {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 41] = [
         Self::SystemRestart,
         Self::ServerInfo,
         Self::ConfigGet,
@@ -73,6 +111,25 @@ impl Method {
         Self::ServicesSend,
         Self::MessagesGet,
         Self::MessagesList,
+        Self::TasksList,
+        Self::TasksGet,
+        Self::TasksAdd,
+        Self::TasksUpdate,
+        Self::TasksRemove,
+        Self::TasksFire,
+        Self::TasksHistory,
+        Self::TasksPurgeHistory,
+        Self::SchedulesList,
+        Self::SchedulesGet,
+        Self::SchedulesAdd,
+        Self::SchedulesUpdate,
+        Self::SchedulesRemove,
+        Self::SchedulesPreview,
+        Self::CommandsList,
+        Self::CommandsGet,
+        Self::CommandsAdd,
+        Self::CommandsUpdate,
+        Self::CommandsRemove,
         Self::EventsSubscribe,
         Self::EventsUnsubscribe,
     ];
@@ -99,6 +156,25 @@ impl Method {
             Self::ServicesSend => "services.send",
             Self::MessagesGet => "messages.get",
             Self::MessagesList => "messages.list",
+            Self::TasksList => "tasks.list",
+            Self::TasksGet => "tasks.get",
+            Self::TasksAdd => "tasks.add",
+            Self::TasksUpdate => "tasks.update",
+            Self::TasksRemove => "tasks.remove",
+            Self::TasksFire => "tasks.fire",
+            Self::TasksHistory => "tasks.history",
+            Self::TasksPurgeHistory => "tasks.purgeHistory",
+            Self::SchedulesList => "schedules.list",
+            Self::SchedulesGet => "schedules.get",
+            Self::SchedulesAdd => "schedules.add",
+            Self::SchedulesUpdate => "schedules.update",
+            Self::SchedulesRemove => "schedules.remove",
+            Self::SchedulesPreview => "schedules.preview",
+            Self::CommandsList => "commands.list",
+            Self::CommandsGet => "commands.get",
+            Self::CommandsAdd => "commands.add",
+            Self::CommandsUpdate => "commands.update",
+            Self::CommandsRemove => "commands.remove",
             Self::EventsSubscribe => "events.subscribe",
             Self::EventsUnsubscribe => "events.unsubscribe",
         }

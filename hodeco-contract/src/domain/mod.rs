@@ -1,11 +1,15 @@
+pub mod command;
 pub mod discovery;
 pub mod message;
 pub mod params;
 pub mod payload;
 pub mod protocol;
+pub mod schedule;
 pub mod service;
+pub mod task;
 pub mod transport;
 
+pub use command::*;
 pub use discovery::{DiscoveryEntry, DiscoveryInfo, DiscoveryState};
 pub use message::{Message, MessageDirection, MessageOrder, MessageState};
 pub use params::{
@@ -17,5 +21,7 @@ pub use payload::{
     PayloadExpr, PayloadExprError, PayloadGroup, PayloadLeaf, PayloadOffset, PayloadOp,
 };
 pub use protocol::ProtocolInfo;
+pub use schedule::*;
 pub use service::{ServiceInfo, ServiceKey, ServiceRef, ServiceState, ServiceStatus};
+pub use task::*;
 pub use transport::TransportInfo;

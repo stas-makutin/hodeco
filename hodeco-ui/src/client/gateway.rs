@@ -13,8 +13,8 @@ use std::time::Duration;
 use web_time::Instant;
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const BOOTSTRAP_REQUESTS: usize = 5;
-const SUBSCRIBED_TOPICS: [&str; 3] = ["messages", "discovery", "services"];
+const BOOTSTRAP_REQUESTS: usize = 8;
+const SUBSCRIBED_TOPICS: [&str; 4] = ["messages", "discovery", "services", "tasks"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -99,6 +99,39 @@ pub enum RequestTag {
         protocol: String,
         transport: String,
     },
+    TasksList,
+    TaskAdd,
+    TaskUpdate,
+    TaskRemove {
+        task_id: String,
+    },
+    TaskFire,
+    TaskPurgeHistory {
+        task_id: String,
+    },
+    TaskHistory {
+        generation: u64,
+        append: bool,
+    },
+    TaskRunGet {
+        task_id: String,
+        run_id: uuid::Uuid,
+    },
+    SchedulesList,
+    ScheduleAdd,
+    ScheduleUpdate,
+    ScheduleRemove {
+        schedule_id: String,
+    },
+    SchedulePreview {
+        generation: u64,
+    },
+    CommandsList,
+    CommandAdd,
+    CommandUpdate,
+    CommandRemove {
+        command_id: String,
+    },
     RawConsole,
 }
 
@@ -119,6 +152,9 @@ impl RequestTag {
                 | Self::TransportList
                 | Self::Config
                 | Self::ServiceList
+                | Self::TasksList
+                | Self::SchedulesList
+                | Self::CommandsList
         )
     }
 
@@ -134,6 +170,17 @@ impl RequestTag {
                 | Self::ServiceSend
                 | Self::DiscoveryStart
                 | Self::DiscoveryCancel
+                | Self::TaskAdd
+                | Self::TaskUpdate
+                | Self::TaskRemove { .. }
+                | Self::TaskFire
+                | Self::TaskPurgeHistory { .. }
+                | Self::ScheduleAdd
+                | Self::ScheduleUpdate
+                | Self::ScheduleRemove { .. }
+                | Self::CommandAdd
+                | Self::CommandUpdate
+                | Self::CommandRemove { .. }
                 | Self::RawConsole
         )
     }
@@ -366,6 +413,19 @@ impl Gateway {
         self.send_tagged(
             RequestTag::ServiceList,
             Method::ServicesList,
+            json!({}),
+            now,
+        )?;
+        self.send_tagged(RequestTag::TasksList, Method::TasksList, json!({}), now)?;
+        self.send_tagged(
+            RequestTag::SchedulesList,
+            Method::SchedulesList,
+            json!({}),
+            now,
+        )?;
+        self.send_tagged(
+            RequestTag::CommandsList,
+            Method::CommandsList,
             json!({}),
             now,
         )?;

@@ -21,6 +21,17 @@ pub enum ErrorCode {
     DiscoveryNotFound,
     DiscoveryBusy,
     MessageNotFound,
+    TaskNotFound,
+    TaskDisabled,
+    TaskBusy,
+    TaskLimitExceeded,
+    TriggerNotFound,
+    ScheduleNotFound,
+    ScheduleInUse,
+    CommandNotFound,
+    CommandInUse,
+    PayloadTooLarge,
+    RunNotFound,
     ServerShuttingDown,
 }
 

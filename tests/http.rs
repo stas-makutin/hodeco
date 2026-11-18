@@ -10,14 +10,17 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use hodeco::app::AppState;
-use hodeco::config::ConfigStore;
+use hodeco::automation::history::HistoryStore;
+use hodeco::automation::runtime::TaskRuntime;
+use hodeco::automation::store::{AutomationSnapshot, AutomationStore};
+use hodeco::config::{CatalogPaths, ConfigStore, ServicesStore};
 use hodeco::events::{self, Event};
 use hodeco::http;
 use hodeco::messages::MessageStore;
 use hodeco::services::ServiceError;
 use hodeco::services::discovery::{DiscoveryBackend, DiscoveryRegistry};
 use hodeco::services::registry::ServiceRegistry;
-use hodeco_contract::config::Config;
+use hodeco_contract::config::{Config, ServicesFile, TaskLogConfig};
 use hodeco_contract::domain::{DiscoveryEntry, MessageState, ParamValues, ServiceKey};
 use hodeco_contract::utils::HumanDuration;
 use http_body_util::BodyExt;
@@ -49,10 +52,18 @@ fn app(config: Config) -> (AppState, CancellationToken) {
 }
 
 fn app_with_config_path(config: Config, path: PathBuf) -> (AppState, CancellationToken) {
-    app_with_config_store(ConfigStore::new(Some(path), config))
+    let services_path = hodeco::config::catalog_path(&path, &config).services;
+    app_with_state(ConfigStore::new(Some(path), config), Some(services_path))
 }
 
 fn app_with_config_store(config_store: ConfigStore) -> (AppState, CancellationToken) {
+    app_with_state(config_store, None)
+}
+
+fn app_with_state(
+    config_store: ConfigStore,
+    services_path: Option<PathBuf>,
+) -> (AppState, CancellationToken) {
     let cancel = CancellationToken::new();
     let store = Arc::new(MessageStore::new(1024 * 1024));
     let registry = Arc::new(ServiceRegistry::with_defaults(store.clone(), &cancel));
@@ -61,9 +72,33 @@ fn app_with_config_store(config_store: ConfigStore) -> (AppState, CancellationTo
     let (resync, _) = tokio::sync::broadcast::channel(1);
     let config = config_store.snapshot();
     let ws_limit = config.http_server.max_connections.max(1) as usize;
+    let services_store = Arc::new(ServicesStore::new(services_path, Vec::new()));
+    let catalog_dir = std::env::temp_dir().join(format!("hodeco-http-{}", uuid::Uuid::new_v4()));
+    let automation = Arc::new(AutomationStore::new(
+        AutomationSnapshot {
+            tasks: Default::default(),
+            schedules: Default::default(),
+            commands: Default::default(),
+            location: None,
+            timezone: None,
+        },
+        CatalogPaths {
+            services: catalog_dir.join("services.yaml"),
+            tasks: catalog_dir.join("tasks.yaml"),
+            schedules: catalog_dir.join("schedules.yaml"),
+            commands: catalog_dir.join("commands.yaml"),
+        },
+    ));
+    let history_dir = catalog_dir.join("history");
+    let history = Arc::new(HistoryStore::new(TaskLogConfig::default(), history_dir));
+    let runtime = Arc::new(TaskRuntime::new(config.task_engine.max_concurrent_runs));
     let state = AppState {
         config: Arc::new(config),
         config_store: Arc::new(config_store),
+        services_store,
+        automation,
+        runtime,
+        history,
         registry,
         discovery,
         store,
@@ -626,13 +661,17 @@ async fn service_mutations_are_written_to_the_configuration_file() {
     assert_eq!(status, StatusCode::OK);
     assert!(body_json(&body)["error"].is_null());
 
-    let saved = hodeco::config::load(&path).unwrap();
+    let services_path = dir.path().join("services.yaml");
+    let saved: ServicesFile = hodeco::config::read_yaml(&services_path).unwrap();
     assert_eq!(saved.services.len(), 1);
     assert_eq!(saved.services[0].alias.as_deref(), Some("ZW"));
     assert_eq!(saved.services[0].entry, "COM99");
 
-    let (status, _headers, body) =
-        send(&state, rpc_request(r#"{"id":"2","method":"config.get"}"#)).await;
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"services.list"}"#),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body_json(&body)["result"]["services"][0]["alias"],
@@ -649,7 +688,7 @@ async fn service_mutations_are_written_to_the_configuration_file() {
     assert_eq!(status, StatusCode::OK);
     assert!(body_json(&body)["error"].is_null());
 
-    let saved = hodeco::config::load(&path).unwrap();
+    let saved: ServicesFile = hodeco::config::read_yaml(&services_path).unwrap();
     assert_eq!(saved.services[0].alias.as_deref(), Some("NEW"));
 
     let (status, _headers, body) = send(
@@ -662,7 +701,7 @@ async fn service_mutations_are_written_to_the_configuration_file() {
     assert_eq!(status, StatusCode::OK);
     assert!(body_json(&body)["error"].is_null());
 
-    let saved = hodeco::config::load(&path).unwrap();
+    let saved: ServicesFile = hodeco::config::read_yaml(&services_path).unwrap();
     assert!(saved.services.is_empty());
 }
 
@@ -794,19 +833,18 @@ async fn config_update_preserves_configured_services() {
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&body);
     assert!(body["error"].is_null(), "{body}");
-    let services = body["result"]["config"]["services"]
-        .as_array()
-        .expect("services array");
-    assert_eq!(services.len(), 1);
-    assert_eq!(services[0]["entry"], "COM98");
+    // Services are managed through services.* and are not part of config.get.
+    assert!(body["result"]["config"]["services"].is_null());
     // The service was added through services.add, so it is already live and
     // must not be reported as restart-required.
     assert_eq!(body["result"]["restartRequired"], json!(["log"]));
 
     let saved = hodeco::config::load(&path).unwrap();
     assert_eq!(saved.log.file, "updated.log");
-    assert_eq!(saved.services.len(), 1);
-    assert_eq!(saved.services[0].entry, "COM98");
+    let services: ServicesFile =
+        hodeco::config::read_yaml(&dir.path().join("services.yaml")).unwrap();
+    assert_eq!(services.services.len(), 1);
+    assert_eq!(services.services[0].entry, "COM98");
 }
 
 #[tokio::test]
@@ -837,7 +875,7 @@ async fn updates_service_parameter_overrides_and_writes_them_back() {
     assert!(body["error"].is_null(), "{body}");
     assert_eq!(body["result"]["service"]["params"]["baudRate"], 9600);
 
-    let saved = hodeco::config::load(&path).unwrap();
+    let saved: ServicesFile = hodeco::config::read_yaml(&dir.path().join("services.yaml")).unwrap();
     assert_eq!(saved.services[0].params.get("baudRate"), Some(&json!(9600)));
 
     let (status, _headers, body) = send(
@@ -852,14 +890,17 @@ async fn updates_service_parameter_overrides_and_writes_them_back() {
     assert!(body["error"].is_null(), "{body}");
     assert!(body["result"]["service"]["params"].is_null());
 
-    let saved = hodeco::config::load(&path).unwrap();
+    let saved: ServicesFile = hodeco::config::read_yaml(&dir.path().join("services.yaml")).unwrap();
     assert!(saved.services[0].params.is_empty());
 }
 
 #[tokio::test]
 async fn rolls_back_service_add_when_config_write_fails() {
     let dir = tempfile::tempdir().unwrap();
-    let (state, _cancel) = app_with_config_path(Config::default(), dir.path().to_path_buf());
+    let mut config = Config::default();
+    config.files.services = PathBuf::from("blocked.yaml");
+    std::fs::create_dir(dir.path().join("blocked.yaml")).unwrap();
+    let (state, _cancel) = app_with_config_path(config, dir.path().join("config.yaml"));
 
     let (status, _headers, body) = send(
         &state,
@@ -1212,4 +1253,491 @@ where
             other => panic!("unexpected websocket message: {other:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn task_crud_fire_and_history_round_trip() {
+    let (state, _cancel) = app(Config::default());
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"test-task","name":"Test task"}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(body["result"]["task"]["task"]["id"], "test-task");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"tasks.fire","params":{"taskId":"test-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    let run_id = body["result"]["runId"].as_str().unwrap().to_string();
+
+    let mut runs = Vec::new();
+    for _ in 0..40 {
+        let (status, _headers, body) = send(
+            &state,
+            rpc_request(
+                r#"{"id":"3","method":"tasks.history","params":{"taskIds":["test-task"]}}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        runs = body["result"]["runs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !runs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["trigger"]["type"], "manual");
+    assert_eq!(runs[0]["outcome"], "succeeded");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(format!(
+            r#"{{"id":"4","method":"tasks.get","params":{{"taskId":"test-task","runId":"{run_id}"}}}}"#
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(body["result"]["run"]["summary"]["id"], run_id);
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"5","method":"tasks.update","params":{"taskId":"test-task","task":{"id":"test-task","name":"Test task","enabled":false}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null());
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"6","method":"tasks.fire","params":{"taskId":"test-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(&body)["error"]["code"], "taskDisabled");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"7","method":"tasks.remove","params":{"taskId":"test-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null());
+
+    let (status, _headers, body) =
+        send(&state, rpc_request(r#"{"id":"8","method":"tasks.list"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(&body)["result"]["tasks"], json!([]));
+}
+
+#[tokio::test]
+async fn http_hook_starts_a_task_and_checks_the_secret() {
+    let (state, _cancel) = app(Config::default());
+    let task = hodeco_contract::domain::TaskDefinition {
+        id: "hook-task".to_string(),
+        name: "Hook task".to_string(),
+        triggers: vec![hodeco_contract::domain::TaskTrigger::Http(
+            hodeco_contract::domain::HttpTrigger {
+                id: "hook".to_string(),
+                methods: vec![hodeco_contract::domain::HttpMethod::Post],
+                secret: Some("s3cret".to_string()),
+            },
+        )],
+        ..Default::default()
+    };
+    let mut snapshot = state.automation.snapshot();
+    snapshot.tasks.insert(task.id.clone(), task);
+    state.automation.replace_snapshot(snapshot);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/hooks/hook-task")
+        .body(Body::from("hello"))
+        .unwrap();
+    let (status, _headers, _body) = send(&state, request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/hooks/hook-task")
+        .header("x-hodeco-secret", "s3cret")
+        .body(Body::from("hello"))
+        .unwrap();
+    let (status, _headers, body) = send(&state, request).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body_json(&body)["runId"].is_string());
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/hooks/hook-task")
+        .header("x-hodeco-secret", "s3cret")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _headers, _body) = send(&state, request).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let request = Request::builder()
+        .uri("/api/hooks/missing")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _headers, _body) = send(&state, request).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn schedule_crud_and_preview_round_trip() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"schedules.add","params":{"schedule":{"id":"morning","name":"Morning","timezone":"UTC","on":{"at":"09:00"}}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"schedules.list"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert_eq!(body["result"]["schedules"][0]["schedule"]["id"], "morning");
+    assert!(body["result"]["schedules"][0]["next"].is_object());
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"3","method":"schedules.preview","params":{"schedule":{"id":"morning","name":"Morning","timezone":"UTC","on":{"at":"09:00"}},"limit":3}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(body["result"]["occurrences"].as_array().unwrap().len(), 3);
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"4","method":"schedules.remove","params":{"scheduleId":"morning"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null());
+}
+
+#[tokio::test]
+async fn task_command_action_captures_output_and_history() {
+    let (state, _cancel) = app(Config::default());
+    #[cfg(windows)]
+    let (executable, args) = ("cmd", vec!["/C", "echo hello"]);
+    #[cfg(not(windows))]
+    let (executable, args) = ("sh", vec!["-c", "echo hello"]);
+
+    let command = json!({
+        "command": {
+            "id": "echo",
+            "name": "Echo",
+            "executable": executable,
+            "args": args,
+            "timeout": "5s"
+        }
+    });
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(json!({"id": "1", "method": "commands.add", "params": command}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let task = json!({
+        "task": {
+            "id": "echo-task",
+            "name": "Echo task",
+            "actions": [{"id": "run", "command": "echo", "output": "capture"}]
+        }
+    });
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(json!({"id": "2", "method": "tasks.add", "params": task}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"3","method":"tasks.fire","params":{"taskId":"echo-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null());
+
+    let mut run = Value::Null;
+    for _ in 0..80 {
+        let (status, _headers, body) = send(
+            &state,
+            rpc_request(
+                r#"{"id":"4","method":"tasks.history","params":{"taskIds":["echo-task"]}}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        if let Some(first) = body["result"]["runs"]
+            .as_array()
+            .and_then(|runs| runs.first())
+        {
+            let run_id = first["id"].as_str().unwrap();
+            let (status, _headers, body) = send(
+                &state,
+                rpc_request(
+                    json!({
+                        "id": "5",
+                        "method": "tasks.get",
+                        "params": {"taskId": "echo-task", "runId": run_id}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let body = body_json(&body);
+            if body["error"].is_null() {
+                run = body["result"]["run"].clone();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(run["summary"]["outcome"], "succeeded", "{run}");
+    assert_eq!(run["actions"][0]["status"], "succeeded", "{run}");
+    assert!(
+        run["actions"][0]["command"]["stdout"]
+            .as_str()
+            .unwrap_or("")
+            .contains("hello"),
+        "{run}"
+    );
+}
+
+#[tokio::test]
+async fn next_rule_starts_a_child_task_and_records_the_chain() {
+    let (state, _cancel) = app(Config::default());
+    for (id, body) in [
+        (
+            "1",
+            json!({
+                "id": "child",
+                "method": "tasks.add",
+                "params": {"task": {"id": "child-task", "name": "Child"}}
+            }),
+        ),
+        (
+            "2",
+            json!({
+                "id": "parent",
+                "method": "tasks.add",
+                "params": {"task": {
+                    "id": "parent-task",
+                    "name": "Parent",
+                    "next": [{"when": "always", "tasks": "child-task"}]
+                }}
+            }),
+        ),
+    ] {
+        let (status, _headers, response) = send(&state, rpc_request(body.to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body_json(&response)["error"].is_null(),
+            "{id}: {response:?}"
+        );
+    }
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"3","method":"tasks.fire","params":{"taskId":"parent-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null());
+
+    let mut parent = Value::Null;
+    for _ in 0..80 {
+        let (status, _headers, body) = send(
+            &state,
+            rpc_request(
+                r#"{"id":"4","method":"tasks.history","params":{"taskIds":["parent-task"]}}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        if let Some(first) = body["result"]["runs"]
+            .as_array()
+            .and_then(|runs| runs.first())
+        {
+            let run_id = first["id"].as_str().unwrap();
+            let (status, _headers, body) = send(
+                &state,
+                rpc_request(
+                    json!({
+                        "id": "5",
+                        "method": "tasks.get",
+                        "params": {"taskId": "parent-task", "runId": run_id}
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let body = body_json(&body);
+            if body["error"].is_null() {
+                parent = body["result"]["run"].clone();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(parent["summary"]["nextCount"], 1, "{parent}");
+    assert_eq!(parent["nextTasks"][0]["taskId"], "child-task", "{parent}");
+    assert_eq!(parent["nextTasks"][0]["rule"], "always", "{parent}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"6","method":"tasks.history","params":{"taskIds":["child-task"]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert_eq!(body["result"]["runs"][0]["trigger"]["type"], "task");
+}
+
+#[tokio::test]
+async fn scheduler_fires_a_second_interval_schedule() {
+    let (state, _cancel) = app(Config::default());
+    let from = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+    let schedule = json!({
+        "schedule": {
+            "id": "tick",
+            "name": "Tick",
+            "timezone": "UTC",
+            "from": from,
+            "on": {"every": "1s"}
+        }
+    });
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(json!({"id":"1","method":"schedules.add","params":schedule}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let task = json!({
+        "task": {
+            "id": "tick-task",
+            "name": "Tick task",
+            "triggers": [{"id": "tick-trigger", "type": "schedule", "schedule": "tick"}]
+        }
+    });
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(json!({"id":"2","method":"tasks.add","params":task}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let scheduler_cancel = CancellationToken::new();
+    let scheduler = tokio::spawn(hodeco::automation::scheduler::run(
+        state.clone(),
+        scheduler_cancel.clone(),
+    ));
+
+    let mut seen = false;
+    for _ in 0..120 {
+        let (status, _headers, body) = send(
+            &state,
+            rpc_request(
+                r#"{"id":"3","method":"tasks.history","params":{"taskIds":["tick-task"]}}"#,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        if body["result"]["runs"]
+            .as_array()
+            .is_some_and(|runs| !runs.is_empty())
+        {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    scheduler_cancel.cancel();
+    scheduler.abort();
+    assert!(seen, "scheduler did not fire the interval schedule");
+}
+
+#[tokio::test]
+async fn task_history_can_be_disabled_with_max_rows_zero() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"no-history","name":"No history","history":{"maxRows":0,"maxSize":"0 B"}}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"tasks.fire","params":{"taskId":"no-history"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null());
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"3","method":"tasks.history","params":{"taskIds":["no-history"]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(&body)["result"]["runs"], json!([]));
+
+    let (status, _headers, body) =
+        send(&state, rpc_request(r#"{"id":"4","method":"tasks.list"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body_json(&body)["result"]["tasks"][0]["lastRun"].is_object(),
+        "runtime last run should still be visible"
+    );
 }

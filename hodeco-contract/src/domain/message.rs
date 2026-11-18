@@ -1,11 +1,13 @@
 use super::service::{ServiceKey, ServiceRef};
 use crate::utils::Base64Bytes;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "u8", try_from = "u8")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(into = "u8")]
 #[repr(u8)]
 pub enum MessageState {
     Incoming = 0,
@@ -35,6 +37,74 @@ impl TryFrom<u8> for MessageState {
             5 => Ok(Self::OutgoingTimedOut),
             other => Err(format!("invalid message state code {other}")),
         }
+    }
+}
+
+impl MessageState {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Incoming => "incoming",
+            Self::Outgoing => "outgoing",
+            Self::OutgoingPending => "outgoingPending",
+            Self::OutgoingFailed => "outgoingFailed",
+            Self::OutgoingRejected => "outgoingRejected",
+            Self::OutgoingTimedOut => "outgoingTimedOut",
+        }
+    }
+
+    fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "incoming" => Some(Self::Incoming),
+            "outgoing" => Some(Self::Outgoing),
+            "outgoingPending" => Some(Self::OutgoingPending),
+            "outgoingFailed" => Some(Self::OutgoingFailed),
+            "outgoingRejected" => Some(Self::OutgoingRejected),
+            "outgoingTimedOut" => Some(Self::OutgoingTimedOut),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StateVisitor;
+
+        impl Visitor<'_> for StateVisitor {
+            type Value = MessageState;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a message state code or name")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = u8::try_from(value).map_err(E::custom)?;
+                MessageState::try_from(value).map_err(E::custom)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = u8::try_from(value).map_err(E::custom)?;
+                MessageState::try_from(value).map_err(E::custom)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                MessageState::from_name(value)
+                    .ok_or_else(|| de::Error::custom(format!("unknown message state '{value}'")))
+            }
+        }
+
+        deserializer.deserialize_any(StateVisitor)
     }
 }
 
@@ -78,8 +148,8 @@ impl TryFrom<u8> for MessageOrder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "u8", try_from = "u8")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(into = "u8")]
 #[repr(u8)]
 pub enum MessageDirection {
     Incoming = 0,
@@ -101,6 +171,54 @@ impl TryFrom<u8> for MessageDirection {
             1 => Ok(Self::Outgoing),
             other => Err(format!("invalid message direction code {other}")),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageDirection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DirectionVisitor;
+
+        impl Visitor<'_> for DirectionVisitor {
+            type Value = MessageDirection;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a message direction code or name")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = u8::try_from(value).map_err(E::custom)?;
+                MessageDirection::try_from(value).map_err(E::custom)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = u8::try_from(value).map_err(E::custom)?;
+                MessageDirection::try_from(value).map_err(E::custom)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "incoming" => Ok(MessageDirection::Incoming),
+                    "outgoing" => Ok(MessageDirection::Outgoing),
+                    other => Err(de::Error::custom(format!(
+                        "unknown message direction '{other}'"
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(DirectionVisitor)
     }
 }
 

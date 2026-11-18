@@ -41,6 +41,7 @@ hodeco(.exe)
 site/                     # raw web assets plus .br and .gz sidecars
 config.yaml               # Linux archives only; portable relative paths
 README.md
+CHANGELOG.md
 LICENSE-MIT
 LICENSE-APACHE
 THIRD-PARTY-LICENSES.md

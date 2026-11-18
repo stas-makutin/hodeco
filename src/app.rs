@@ -1,4 +1,9 @@
-use crate::config::ConfigStore;
+use crate::automation::engine;
+use crate::automation::history::HistoryStore;
+use crate::automation::runtime::TaskRuntime;
+use crate::automation::scheduler;
+use crate::automation::store::{AutomationSnapshot, AutomationStore};
+use crate::config::{ConfigBundle, ConfigStore, ServicesStore, catalog_path};
 use crate::events::{self, Event};
 use crate::http;
 use crate::messages::{MessageStore, persist};
@@ -8,10 +13,11 @@ use crate::services::zwave::StatusEvent;
 use chrono::{DateTime, Utc};
 use hodeco_contract::config::{Config, CorruptPolicy, MessageLogConfig};
 use hodeco_contract::domain::{ServiceKey, ServiceRef};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, broadcast};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +33,10 @@ pub type AppError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub struct AppState {
     pub config: Arc<Config>,
     pub config_store: Arc<ConfigStore>,
+    pub services_store: Arc<ServicesStore>,
+    pub automation: Arc<AutomationStore>,
+    pub runtime: Arc<TaskRuntime>,
+    pub history: Arc<HistoryStore>,
     pub registry: Arc<ServiceRegistry>,
     pub discovery: Arc<DiscoveryRegistry>,
     pub store: Arc<MessageStore>,
@@ -56,6 +66,7 @@ impl AppState {
 struct Gateway {
     state: AppState,
     status_events: broadcast::Receiver<StatusEvent>,
+    writer: persist::LogWriter,
 }
 
 impl Gateway {
@@ -63,22 +74,32 @@ impl Gateway {
         let Gateway {
             state,
             mut status_events,
+            mut writer,
         } = self;
 
         let mut store_events = state.store.subscribe();
         let mut discovery_events = state.discovery.subscribe();
-        let persistence = tokio::spawn(auto_persist(
-            state.config.message_log.clone(),
-            state.store.clone(),
-            cancel.clone(),
-        ));
+        let mut flush = tokio::time::interval(state.config.message_log.auto_persist.as_std());
+        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        flush.tick().await;
+        let mut last_compact = Instant::now();
 
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
+                _ = flush.tick() => {
+                    if let Err(error) = writer.flush() {
+                        warn!(error = %error, "unable to flush the message log");
+                    }
+                    maybe_compact_messages(&state, &mut writer, &mut last_compact).await;
+                }
                 event = store_events.recv() => {
                     match event {
                         Ok(event) => {
+                            if let Err(error) = writer.append(&event) {
+                                warn!(error = %error, "unable to append to the message log");
+                            }
+                            engine::handle_store_event(&state, &event).await;
                             let _ = state.events.send(Event::from(event));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -118,9 +139,9 @@ impl Gateway {
             }
         }
 
-        // Wait for an in-flight automatic save before shutting services down and
-        // writing the final snapshot, so two writers never target the log file.
-        let _ = persistence.await;
+        if let Err(error) = writer.flush() {
+            warn!(error = %error, "unable to flush the message log during shutdown");
+        }
         state.registry.shutdown().await;
         state.discovery.shutdown().await;
         persist_messages(&state.config.message_log, &state.store).await;
@@ -128,29 +149,84 @@ impl Gateway {
     }
 }
 
-async fn auto_persist(
-    message_log: MessageLogConfig,
-    store: Arc<MessageStore>,
-    cancel: CancellationToken,
+async fn maybe_compact_messages(
+    state: &AppState,
+    writer: &mut persist::LogWriter,
+    last_compact: &mut Instant,
 ) {
-    let mut ticker = tokio::time::interval(message_log.auto_persist.as_std());
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await;
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = ticker.tick() => persist_messages(&message_log, &store).await,
+    let config = &state.config.message_log;
+    let threshold = (config.max_size.as_bytes() as f64 * config.compaction_factor.max(1.0)) as u64;
+    let by_size = writer.size() > threshold;
+    let by_age = last_compact.elapsed() >= config.compact_interval.as_std();
+    if !by_size && !by_age {
+        return;
+    }
+    if let Err(error) = writer.flush() {
+        warn!(error = %error, "unable to flush the message log before compaction");
+        return;
+    }
+    let path = config.file.clone();
+    let file_mode = config.file_mode;
+    let store = state.store.clone();
+    let result =
+        tokio::task::spawn_blocking(move || persist::save(&path, &store, Some(file_mode))).await;
+    match result {
+        Ok(Ok(())) => {
+            match persist::LogWriter::open(&config.file, Some(config.file_mode), config.on_corrupt)
+            {
+                Ok(fresh) => {
+                    *writer = fresh;
+                    *last_compact = Instant::now();
+                    info!("message log compacted");
+                }
+                Err(error) => {
+                    warn!(error = %error, "unable to reopen the message log after compaction")
+                }
+            }
         }
+        Ok(Err(error)) => warn!(error = %error, "unable to compact the message log"),
+        Err(error) => warn!(error = %error, "message log compaction task failed"),
     }
 }
 
 pub async fn run(
-    config: Config,
+    bundle: ConfigBundle,
     config_path: PathBuf,
     cancel_token: CancellationToken,
 ) -> Result<(), AppError> {
-    let config_store = Arc::new(ConfigStore::new(Some(config_path), config.clone()));
+    let ConfigBundle {
+        config,
+        services,
+        tasks,
+        schedules,
+        commands,
+    } = bundle;
+    let paths = catalog_path(&config_path, &config);
+    let config_store = Arc::new(ConfigStore::new(Some(config_path.clone()), config.clone()));
+    let services_store = Arc::new(ServicesStore::new(
+        Some(paths.services.clone()),
+        services.services,
+    ));
+    let automation_snapshot = AutomationSnapshot {
+        tasks: tasks
+            .tasks
+            .into_iter()
+            .map(|task| (task.id.clone(), task))
+            .collect::<BTreeMap<_, _>>(),
+        schedules: schedules
+            .schedules
+            .into_iter()
+            .map(|schedule| (schedule.id.clone(), schedule))
+            .collect::<BTreeMap<_, _>>(),
+        commands: commands
+            .commands
+            .into_iter()
+            .map(|command| (command.id.clone(), command))
+            .collect::<BTreeMap<_, _>>(),
+        location: schedules.location,
+        timezone: schedules.timezone,
+    };
+    let automation = Arc::new(AutomationStore::new(automation_snapshot, paths));
     let config = Arc::new(config);
     let store = Arc::new(MessageStore::new(config.message_log.max_size.as_bytes()));
     let message_log = config.message_log.clone();
@@ -158,17 +234,47 @@ pub async fn run(
     tokio::task::spawn_blocking(move || load_message_log(&message_log, &load_store))
         .await
         .map_err(|error| -> AppError { Box::new(error) })??;
+    let writer = persist::LogWriter::open(
+        &config.message_log.file,
+        Some(config.message_log.file_mode),
+        config.message_log.on_corrupt,
+    )
+    .map_err(|error| -> AppError { Box::new(error) })?;
+
+    let history = Arc::new(HistoryStore::new(
+        config.task_log.clone(),
+        config.task_log.dir.clone(),
+    ));
+    let task_ids = automation.snapshot().task_ids();
+    let load_history = history.clone();
+    let report = tokio::task::spawn_blocking(move || load_history.load(&task_ids))
+        .await
+        .map_err(|error| -> AppError { Box::new(error) })?
+        .map_err(|error| -> AppError { Box::new(error) })?;
+    for path in &report.orphans_removed {
+        warn!(path = %path.display(), "removed orphan task history file");
+    }
+    for (path, error) in &report.corrupt {
+        warn!(path = %path.display(), error = %error, "ignored corrupt task history file");
+    }
+
     let (events, _) = events::channel();
     let (resync, _) = broadcast::channel(1);
     let registry = Arc::new(ServiceRegistry::with_defaults(store.clone(), &cancel_token));
     let status_events = registry.subscribe_status();
     let discovery = Arc::new(DiscoveryRegistry::with_defaults(&cancel_token));
+    let runtime = Arc::new(TaskRuntime::new(config.task_engine.max_concurrent_runs));
+    runtime.seed_history_time(history.latest_time());
     let ws_limits = Arc::new(Semaphore::new(
         config.http_server.max_connections.max(1) as usize
     ));
     let state = AppState {
         config: config.clone(),
         config_store,
+        services_store: services_store.clone(),
+        automation,
+        runtime,
+        history,
         registry: registry.clone(),
         discovery: discovery.clone(),
         store: store.clone(),
@@ -180,7 +286,7 @@ pub async fn run(
         started_at: Utc::now(),
     };
 
-    for service in &config.services {
+    for service in &services_store.snapshot() {
         let key = ServiceKey {
             protocol: service.protocol.clone(),
             transport: service.transport.clone(),
@@ -209,15 +315,20 @@ pub async fn run(
         Gateway {
             state: state.clone(),
             status_events,
+            writer,
         }
         .run(gateway_cancel.clone()),
     );
+
+    let scheduler_cancel = cancel_token.child_token();
+    let mut scheduler = tokio::spawn(scheduler::run(state.clone(), scheduler_cancel.clone()));
 
     let http_cancel = cancel_token.child_token();
     let mut http = tokio::spawn(http::serve(state.clone(), http_cancel.clone()));
 
     let mut gateway_done = false;
     let mut http_done = false;
+    let mut scheduler_done = false;
     let mut early_error = None;
 
     tokio::select! {
@@ -230,17 +341,35 @@ pub async fn run(
             http_done = true;
             early_error = Some(task_error("http server", result));
         }
+        result = &mut scheduler => {
+            scheduler_done = true;
+            early_error = Some(match result {
+                Ok(()) => "scheduler stopped unexpectedly".to_string().into(),
+                Err(error) => Box::new(error),
+            });
+        }
     }
 
     state.shutting_down.store(true, Ordering::SeqCst);
     http_cancel.cancel();
     gateway_cancel.cancel();
+    scheduler_cancel.cancel();
 
     if !http_done {
         shutdown_task("http server", &mut http).await;
     }
     if !gateway_done {
         shutdown_task("gateway", &mut gateway).await;
+    }
+    if !scheduler_done {
+        match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut scheduler).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(error = %error, "scheduler task failed during shutdown"),
+            Err(_) => {
+                warn!("scheduler shutdown timed out");
+                scheduler.abort();
+            }
+        }
     }
 
     if cancel_token.is_cancelled() {

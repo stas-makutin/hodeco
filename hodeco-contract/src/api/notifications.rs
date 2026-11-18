@@ -1,4 +1,5 @@
-use crate::domain::{DiscoveryInfo, Message, ServiceRef, ServiceStatus};
+use crate::api::payloads::TaskRunNotification;
+use crate::domain::{DiscoveryInfo, Message, RunSummary, ServiceRef, ServiceStatus};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -16,16 +17,22 @@ pub enum NotificationMethod {
     MessageStateChanged,
     #[serde(rename = "events.serviceStateChanged")]
     ServiceStateChanged,
+    #[serde(rename = "events.taskRunStarted")]
+    TaskRunStarted,
+    #[serde(rename = "events.taskRunFinished")]
+    TaskRunFinished,
 }
 
 impl NotificationMethod {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::DiscoveryStarted,
         Self::DiscoveryFinished,
         Self::MessageNew,
         Self::MessageDropped,
         Self::MessageStateChanged,
         Self::ServiceStateChanged,
+        Self::TaskRunStarted,
+        Self::TaskRunFinished,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -36,6 +43,8 @@ impl NotificationMethod {
             Self::MessageDropped => "events.messageDropped",
             Self::MessageStateChanged => "events.messageStateChanged",
             Self::ServiceStateChanged => "events.serviceStateChanged",
+            Self::TaskRunStarted => "events.taskRunStarted",
+            Self::TaskRunFinished => "events.taskRunFinished",
         }
     }
 }
@@ -55,6 +64,10 @@ pub enum Notification {
     MessageStateChanged(MessageNotification),
     #[serde(rename = "events.serviceStateChanged")]
     ServiceStateChanged(ServiceStateChangedNotification),
+    #[serde(rename = "events.taskRunStarted")]
+    TaskRunStarted(TaskRunNotification),
+    #[serde(rename = "events.taskRunFinished")]
+    TaskRunFinished(TaskRunFinishedNotification),
 }
 
 impl Notification {
@@ -66,6 +79,8 @@ impl Notification {
             Self::MessageDropped(_) => NotificationMethod::MessageDropped,
             Self::MessageStateChanged(_) => NotificationMethod::MessageStateChanged,
             Self::ServiceStateChanged(_) => NotificationMethod::ServiceStateChanged,
+            Self::TaskRunStarted(_) => NotificationMethod::TaskRunStarted,
+            Self::TaskRunFinished(_) => NotificationMethod::TaskRunFinished,
         }
     }
 }
@@ -93,6 +108,12 @@ pub struct MessageDroppedNotification {
 pub struct ServiceStateChangedNotification {
     pub service: ServiceRef,
     pub status: ServiceStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TaskRunFinishedNotification {
+    pub run: RunSummary,
 }
 
 #[cfg(test)]

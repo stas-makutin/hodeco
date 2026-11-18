@@ -1,7 +1,9 @@
 use crate::config::Config;
 use crate::domain::{
-    DiscoveryInfo, Message, MessageDirection, MessageOrder, MessageState, ParamDef, PayloadExpr,
-    ProtocolInfo, ServiceInfo, ServiceRef, ServiceStatus, TransportInfo,
+    CommandDefinition, CommandInfo, DiscoveryInfo, Location, Message, MessageDirection,
+    MessageOrder, MessageState, ParamDef, PayloadExpr, ProtocolInfo, RunOutcome, RunSummary,
+    ScheduleDefinition, ScheduleInfo, ScheduleOccurrence, ServiceInfo, ServiceRef, ServiceStatus,
+    TaskDefinition, TaskInfo, TaskRun, TransportInfo, TriggerRef, TriggerType,
 };
 use crate::utils::{Base64Bytes, HumanDuration};
 use chrono::{DateTime, Utc};
@@ -249,12 +251,266 @@ pub struct MessagesListResult {
     pub store_total: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksListResult {
+    pub tasks: Vec<TaskInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksGetParams {
+    pub task_id: String,
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksGetResult {
+    pub run: TaskRun,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksAddParams {
+    pub task: TaskDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksAddResult {
+    pub task: TaskInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksUpdateParams {
+    pub task_id: String,
+    pub task: TaskDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksUpdateResult {
+    pub task: TaskInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksRemoveParams {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksFireParams {
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Base64Bytes>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksFireResult {
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksHistoryParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<TriggerType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcomes: Vec<RunOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub order: MessageOrder,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Cursor returned by the previous page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<MessageTimeRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TaskStoreTotal {
+    pub task_id: String,
+    pub rows: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksHistoryResult {
+    pub runs: Vec<RunSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<MessageTimeRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub store_totals: Vec<TaskStoreTotal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksPurgeHistoryParams {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TaskRunNotification {
+    pub run_id: Uuid,
+    pub task_id: String,
+    pub trigger: TriggerRef,
+    pub started_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Schedules
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesListResult {
+    pub schedules: Vec<ScheduleInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesGetParams {
+    pub schedule_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesGetResult {
+    pub schedule: ScheduleInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesAddParams {
+    pub schedule: ScheduleDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesAddResult {
+    pub schedule: ScheduleInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesUpdateParams {
+    pub schedule_id: String,
+    pub schedule: ScheduleDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesUpdateResult {
+    pub schedule: ScheduleInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesRemoveParams {
+    pub schedule_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesPreviewParams {
+    pub schedule: ScheduleDefinition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesPreviewResult {
+    pub occurrences: Vec<ScheduleOccurrence>,
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsListResult {
+    pub commands: Vec<CommandInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsGetParams {
+    pub command_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsGetResult {
+    pub command: CommandInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsAddParams {
+    pub command: CommandDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsAddResult {
+    pub command: CommandInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsUpdateParams {
+    pub command_id: String,
+    pub command: CommandDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsUpdateResult {
+    pub command: CommandInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandsRemoveParams {
+    pub command_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EventTopic {
     Messages,
     Discovery,
     Services,
+    Tasks,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

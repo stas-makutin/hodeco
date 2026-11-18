@@ -20,17 +20,20 @@ use egui::{Align, Context, Layout, Margin, RichText, Ui};
 use hodeco_codec::filter;
 use hodeco_contract::api::notifications::Notification;
 use hodeco_contract::api::payloads::{
-    ConfigUpdateResult, DiscoveryGetResult, DiscoveryStartResult, MessageTimeRange,
-    MessagesGetResult, MessagesListResult, ProtocolParamsResult, ProtocolsListResult,
-    ServerInfoResult, ServicesAddResult, ServicesAliasResult, ServicesListResult,
-    ServicesParamsResult, ServicesSendResult, ServicesStatusResult, TransportsListResult,
+    CommandsAddResult, CommandsListResult, CommandsUpdateResult, ConfigUpdateResult,
+    DiscoveryGetResult, DiscoveryStartResult, MessageTimeRange, MessagesGetResult,
+    MessagesListResult, ProtocolParamsResult, ProtocolsListResult, SchedulesAddResult,
+    SchedulesListResult, SchedulesPreviewResult, SchedulesUpdateResult, ServerInfoResult,
+    ServicesAddResult, ServicesAliasResult, ServicesListResult, ServicesParamsResult,
+    ServicesSendResult, ServicesStatusResult, TasksAddResult, TasksFireResult, TasksHistoryResult,
+    TasksListResult, TasksUpdateResult, TransportsListResult,
 };
 use hodeco_contract::api::{ApiError, Method};
 use hodeco_contract::config::Config;
 use hodeco_contract::domain::{
-    DiscoveryInfo, DiscoveryState, Message, MessageDirection, MessageOrder, MessageState, ParamDef,
-    ParamValues, PayloadExpr, PayloadOffset, PayloadOp, ProtocolInfo, ServiceInfo, ServiceRef,
-    ServiceState, TransportInfo,
+    CommandDefinition, DiscoveryInfo, DiscoveryState, Message, MessageDirection, MessageOrder,
+    MessageState, ParamDef, ParamValues, PayloadExpr, PayloadOffset, PayloadOp, ProtocolInfo,
+    ScheduleDefinition, ServiceInfo, ServiceRef, ServiceState, TaskDefinition, TransportInfo,
 };
 use hodeco_contract::utils::{Base64Bytes, HumanDuration};
 use serde::de::DeserializeOwned;
@@ -50,8 +53,8 @@ use views::builder::{BuilderDialog, new_builder};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Services,
-    Discovery,
     Messages,
+    Tasks,
     Configuration,
     Server,
     Console,
@@ -60,8 +63,8 @@ pub enum Tab {
 impl Tab {
     pub const ALL: [Self; 6] = [
         Self::Services,
-        Self::Discovery,
         Self::Messages,
+        Self::Tasks,
         Self::Configuration,
         Self::Server,
         Self::Console,
@@ -70,8 +73,8 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Services => "Services",
-            Self::Discovery => "Discovery",
             Self::Messages => "Messages",
+            Self::Tasks => "Tasks",
             Self::Configuration => "Configuration",
             Self::Server => "Server",
             Self::Console => "Console",
@@ -81,16 +84,50 @@ impl Tab {
     pub fn shortcut(self) -> egui::Key {
         match self {
             Self::Services => egui::Key::Num1,
-            Self::Discovery => egui::Key::Num2,
-            Self::Messages => egui::Key::Num3,
+            Self::Messages => egui::Key::Num2,
+            Self::Tasks => egui::Key::Num3,
             Self::Configuration => egui::Key::Num4,
             Self::Server => egui::Key::Num5,
             Self::Console => egui::Key::Num6,
         }
     }
+}
 
-    pub fn is_secondary(self) -> bool {
-        matches!(self, Self::Configuration | Self::Server | Self::Console)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServicesTab {
+    Services,
+    Discovery,
+}
+
+impl ServicesTab {
+    pub const ALL: [Self; 2] = [Self::Services, Self::Discovery];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Services => "Services",
+            Self::Discovery => "Discovery",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TasksTab {
+    Tasks,
+    Schedules,
+    Commands,
+    Runs,
+}
+
+impl TasksTab {
+    pub const ALL: [Self; 4] = [Self::Tasks, Self::Schedules, Self::Commands, Self::Runs];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tasks => "Tasks",
+            Self::Schedules => "Schedules",
+            Self::Commands => "Commands",
+            Self::Runs => "Runs",
+        }
     }
 }
 
@@ -941,6 +978,8 @@ pub struct App {
     pub(crate) theme: UiTheme,
     applied_theme: Option<UiTheme>,
     pub(crate) tab: Tab,
+    pub(crate) services_tab: ServicesTab,
+    pub(crate) tasks_tab: TasksTab,
 
     pub(crate) server: Option<ServerInfoResult>,
     pub(crate) protocols: Vec<ProtocolInfo>,
@@ -950,6 +989,10 @@ pub struct App {
 
     pub(crate) messages: MessagesUi,
     pub(crate) discovery: DiscoveryUi,
+    pub(crate) tasks: views::tasks::TasksUi,
+    pub(crate) schedules: views::schedules::SchedulesUi,
+    pub(crate) commands: views::commands::CommandsUi,
+    pub(crate) runs: views::runs::RunsUi,
     pub(crate) console: ConsoleUi,
     pub(crate) config_ui: views::config_ui::ConfigUi,
     pub(crate) protocol_params: HashMap<(String, String), Vec<ParamDef>>,
@@ -989,6 +1032,8 @@ impl App {
             theme,
             applied_theme: Some(theme),
             tab: Tab::Services,
+            services_tab: ServicesTab::Services,
+            tasks_tab: TasksTab::Tasks,
             server: None,
             protocols: Vec::new(),
             transports: Vec::new(),
@@ -996,6 +1041,10 @@ impl App {
             config: None,
             messages: MessagesUi::default(),
             discovery: DiscoveryUi::default(),
+            tasks: views::tasks::TasksUi::default(),
+            schedules: views::schedules::SchedulesUi::default(),
+            commands: views::commands::CommandsUi::default(),
+            runs: views::runs::RunsUi::default(),
             console: ConsoleUi::default(),
             config_ui: views::config_ui::ConfigUi::default(),
             protocol_params: HashMap::new(),
@@ -1234,6 +1283,338 @@ impl App {
         self.config_ui.error = None;
     }
 
+    // -- automation actions ------------------------------------------------
+
+    pub(crate) fn request_tasks_tab(&mut self, tab: TasksTab) {
+        if tab == self.tasks_tab {
+            return;
+        }
+        if self.tasks_tab == TasksTab::Tasks && self.tasks.editor_dirty() {
+            if let Some(editor) = self.tasks.editor.as_mut() {
+                editor.error =
+                    Some("Save or discard the task changes before leaving the editor.".to_string());
+            }
+            return;
+        }
+        if self.tasks_tab == TasksTab::Schedules
+            && self
+                .schedules
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.is_dirty())
+        {
+            if let Some(editor) = self.schedules.editor.as_mut() {
+                editor.error = Some(
+                    "Save or discard the schedule changes before leaving the editor.".to_string(),
+                );
+            }
+            return;
+        }
+        self.tasks_tab = tab;
+        if tab == TasksTab::Runs && self.runs.runs.is_empty() && !self.runs.loading {
+            self.refresh_runs();
+        }
+    }
+
+    pub(crate) fn refresh_tasks(&mut self) {
+        if self.rpc(RequestTag::TasksList, Method::TasksList, json!({})) {
+            self.tasks.loading = true;
+            self.tasks.error = None;
+        }
+    }
+
+    pub(crate) fn refresh_schedules(&mut self) {
+        if self.rpc(RequestTag::SchedulesList, Method::SchedulesList, json!({})) {
+            self.schedules.loading = true;
+            self.schedules.error = None;
+        }
+    }
+
+    pub(crate) fn refresh_commands(&mut self) {
+        if self.rpc(RequestTag::CommandsList, Method::CommandsList, json!({})) {
+            self.commands.loading = true;
+            self.commands.error = None;
+        }
+    }
+
+    pub(crate) fn open_task_editor(&mut self, task: Option<TaskDefinition>) {
+        let (task, is_new) = match task {
+            Some(task) => (task, false),
+            None => {
+                let mut task = TaskDefinition {
+                    name: "New task".to_string(),
+                    ..TaskDefinition::default()
+                };
+                task.id = hodeco_contract::utils::id_from_name("task", &task.name);
+                (task, true)
+            }
+        };
+        self.tasks.editor = Some(views::tasks::TaskEditor::new(task, is_new));
+    }
+
+    pub(crate) fn save_task(&mut self, task: TaskDefinition, is_new: bool) -> bool {
+        let params = if is_new {
+            json!({ "task": task })
+        } else {
+            json!({ "taskId": task.id, "task": task })
+        };
+        let method = if is_new {
+            Method::TasksAdd
+        } else {
+            Method::TasksUpdate
+        };
+        let tag = if is_new {
+            RequestTag::TaskAdd
+        } else {
+            RequestTag::TaskUpdate
+        };
+        self.rpc(tag, method, params)
+    }
+
+    pub(crate) fn set_task_enabled(&mut self, task: &TaskDefinition, enabled: bool) {
+        let mut updated = task.clone();
+        updated.enabled = enabled;
+        if self.rpc(
+            RequestTag::TaskUpdate,
+            Method::TasksUpdate,
+            json!({ "taskId": updated.id, "task": updated }),
+        ) {
+            self.refresh_tasks();
+        }
+    }
+
+    pub(crate) fn delete_task(&mut self, task_id: &str) {
+        if self.rpc(
+            RequestTag::TaskRemove {
+                task_id: task_id.to_string(),
+            },
+            Method::TasksRemove,
+            json!({ "taskId": task_id }),
+        ) {
+            self.tasks.confirm_delete = None;
+        }
+    }
+
+    pub(crate) fn fire_task(&mut self, task: &TaskDefinition) {
+        self.fire_task_with_payload(&task.id, (None, serde_json::Map::new()));
+    }
+
+    pub(crate) fn fire_task_with_payload(
+        &mut self,
+        task_id: &str,
+        (payload, metadata): (Option<Base64Bytes>, serde_json::Map<String, Value>),
+    ) {
+        self.tasks.firing = true;
+        let params = json!({
+            "taskId": task_id,
+            "payload": payload,
+            "metadata": metadata,
+        });
+        if !self.rpc(RequestTag::TaskFire, Method::TasksFire, params) {
+            self.tasks.firing = false;
+        }
+    }
+
+    pub(crate) fn purge_task_history(&mut self, task_id: &str) {
+        self.rpc(
+            RequestTag::TaskPurgeHistory {
+                task_id: task_id.to_string(),
+            },
+            Method::TasksPurgeHistory,
+            json!({ "taskId": task_id }),
+        );
+    }
+
+    pub(crate) fn open_schedule_editor(&mut self, schedule: Option<ScheduleDefinition>) {
+        let (schedule, is_new) = match schedule {
+            Some(schedule) => (schedule, false),
+            None => (
+                ScheduleDefinition {
+                    name: "New schedule".to_string(),
+                    on: Some(hodeco_contract::domain::ScheduleRule {
+                        at: hodeco_contract::domain::OneOrMany::One(
+                            hodeco_contract::domain::AtSpec::Text("09:00".to_string()),
+                        ),
+                        ..Default::default()
+                    }),
+                    ..ScheduleDefinition::default()
+                },
+                true,
+            ),
+        };
+        self.schedules.editor = Some(views::schedules::ScheduleEditor::new(schedule, is_new));
+    }
+
+    pub(crate) fn save_schedule(&mut self, schedule: ScheduleDefinition, is_new: bool) -> bool {
+        let params = if is_new {
+            json!({ "schedule": schedule })
+        } else {
+            json!({ "scheduleId": schedule.id, "schedule": schedule })
+        };
+        let method = if is_new {
+            Method::SchedulesAdd
+        } else {
+            Method::SchedulesUpdate
+        };
+        let tag = if is_new {
+            RequestTag::ScheduleAdd
+        } else {
+            RequestTag::ScheduleUpdate
+        };
+        self.rpc(tag, method, params)
+    }
+
+    pub(crate) fn delete_schedule(&mut self, schedule_id: &str) {
+        if self.rpc(
+            RequestTag::ScheduleRemove {
+                schedule_id: schedule_id.to_string(),
+            },
+            Method::SchedulesRemove,
+            json!({ "scheduleId": schedule_id }),
+        ) {
+            self.schedules.confirm_delete = None;
+        }
+    }
+
+    pub(crate) fn preview_schedule(
+        &mut self,
+        schedule: &ScheduleDefinition,
+        generation: u64,
+    ) -> bool {
+        let params = json!({ "schedule": schedule, "limit": 20 });
+        self.rpc(
+            RequestTag::SchedulePreview { generation },
+            Method::SchedulesPreview,
+            params,
+        )
+    }
+
+    pub(crate) fn open_command_editor(&mut self, command: Option<CommandDefinition>) {
+        let (command, is_new, used_by) = match command {
+            Some(command) => {
+                let used_by = self
+                    .commands
+                    .commands
+                    .iter()
+                    .find(|info| info.command.id == command.id)
+                    .map(|info| info.used_by.clone())
+                    .unwrap_or_default();
+                (command, false, used_by)
+            }
+            None => (
+                CommandDefinition {
+                    name: "New command".to_string(),
+                    ..CommandDefinition::default()
+                },
+                true,
+                Vec::new(),
+            ),
+        };
+        self.commands.editor = Some(views::commands::CommandEditor::new(
+            command, is_new, used_by,
+        ));
+    }
+
+    pub(crate) fn save_command(&mut self, command: CommandDefinition, is_new: bool) -> bool {
+        let params = if is_new {
+            json!({ "command": command })
+        } else {
+            json!({ "commandId": command.id, "command": command })
+        };
+        let method = if is_new {
+            Method::CommandsAdd
+        } else {
+            Method::CommandsUpdate
+        };
+        let tag = if is_new {
+            RequestTag::CommandAdd
+        } else {
+            RequestTag::CommandUpdate
+        };
+        self.rpc(tag, method, params)
+    }
+
+    pub(crate) fn delete_command(&mut self, command_id: &str) {
+        if self.rpc(
+            RequestTag::CommandRemove {
+                command_id: command_id.to_string(),
+            },
+            Method::CommandsRemove,
+            json!({ "commandId": command_id }),
+        ) {
+            self.commands.confirm_delete = None;
+        }
+    }
+
+    pub(crate) fn refresh_runs(&mut self) {
+        self.runs.generation = self.runs.generation.wrapping_add(1);
+        let generation = self.runs.generation;
+        let params =
+            serde_json::to_value(views::runs::history_params(self)).unwrap_or_else(|_| json!({}));
+        if self.rpc(
+            RequestTag::TaskHistory {
+                generation,
+                append: false,
+            },
+            Method::TasksHistory,
+            params,
+        ) {
+            self.runs.loading = true;
+            self.runs.loading_more = false;
+            self.runs.next = None;
+            self.runs.error = None;
+        }
+    }
+
+    pub(crate) fn load_more_runs(&mut self) {
+        let Some(next) = self.runs.next.clone() else {
+            return;
+        };
+        self.runs.generation = self.runs.generation.wrapping_add(1);
+        let generation = self.runs.generation;
+        let mut params = views::runs::history_params(self);
+        params.next = Some(next);
+        let params = serde_json::to_value(params).unwrap_or_else(|_| json!({}));
+        if self.rpc(
+            RequestTag::TaskHistory {
+                generation,
+                append: true,
+            },
+            Method::TasksHistory,
+            params,
+        ) {
+            self.runs.loading_more = true;
+            self.runs.error = None;
+        }
+    }
+
+    pub(crate) fn select_run(&mut self, task_id: &str, run_id: Uuid) {
+        self.runs.selected = Some((task_id.to_string(), run_id));
+        self.runs.selected_index = self
+            .runs
+            .runs
+            .iter()
+            .position(|run| run.task_id == task_id && run.id == run_id);
+        self.runs.detail = None;
+        self.runs.detail_loading = true;
+        self.runs.detail_error = None;
+        if !self.rpc(
+            RequestTag::TaskRunGet {
+                task_id: task_id.to_string(),
+                run_id,
+            },
+            Method::TasksGet,
+            json!({ "taskId": task_id, "runId": run_id }),
+        ) {
+            self.runs.detail_loading = false;
+            self.runs.detail_error = Some("The gateway is not connected.".to_string());
+        }
+    }
+
+    pub(crate) fn open_runs_for_task(&mut self, task_id: &str) {
+        views::tasks::switch_to_runs(self, task_id);
+    }
+
     pub(crate) fn request_tab(&mut self, tab: Tab) {
         if tab == self.tab {
             return;
@@ -1247,6 +1628,31 @@ impl App {
             if dirty {
                 self.pending_tab = Some(tab);
                 self.dialog = Some(Dialog::ConfigDirty);
+                return;
+            }
+        }
+        if self.tab == Tab::Tasks && tab != Tab::Tasks {
+            if self.tasks_tab == TasksTab::Tasks && self.tasks.editor_dirty() {
+                if let Some(editor) = self.tasks.editor.as_mut() {
+                    editor.error = Some(
+                        "Save or discard the task changes before leaving the editor.".to_string(),
+                    );
+                }
+                return;
+            }
+            if self.tasks_tab == TasksTab::Schedules
+                && self
+                    .schedules
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.is_dirty())
+            {
+                if let Some(editor) = self.schedules.editor.as_mut() {
+                    editor.error = Some(
+                        "Save or discard the schedule changes before leaving the editor."
+                            .to_string(),
+                    );
+                }
                 return;
             }
         }
@@ -2173,6 +2579,7 @@ impl App {
                     self.toast(Tone::Success, "The gateway is back online.");
                 }
                 self.request_message_page(MessagePageKind::Refresh);
+                self.refresh_runs();
                 if self
                     .discovery
                     .current
@@ -2192,6 +2599,26 @@ impl App {
                 self.stale = self.last_sync.is_some();
                 self.messages.reset();
                 self.messages.loading = false;
+                self.tasks.tasks.clear();
+                self.tasks.loading = false;
+                self.tasks.error = None;
+                self.tasks.selected = None;
+                self.schedules.schedules.clear();
+                self.schedules.loading = false;
+                self.schedules.error = None;
+                self.schedules.selected = None;
+                self.commands.commands.clear();
+                self.commands.loading = false;
+                self.commands.error = None;
+                self.commands.selected = None;
+                self.runs.runs.clear();
+                self.runs.loading = false;
+                self.runs.loading_more = false;
+                self.runs.next = None;
+                self.runs.detail = None;
+                self.runs.selected = None;
+                self.runs.selected_index = None;
+                self.runs.pending_new = 0;
                 if let Some(Dialog::Message(dialog)) = &mut self.dialog
                     && dialog.loading
                 {
@@ -2288,6 +2715,303 @@ impl App {
                 Ok(list) => self.services = list.services,
                 Err(error) => self.toast(Tone::Error, error),
             },
+            RequestTag::TasksList => match parse_result::<TasksListResult>(result) {
+                Ok(list) => {
+                    self.tasks.loading = false;
+                    self.tasks.error = None;
+                    self.tasks.tasks = list.tasks;
+                    self.tasks
+                        .tasks
+                        .sort_by(|left, right| left.task.name.cmp(&right.task.name));
+                }
+                Err(error) => {
+                    self.tasks.loading = false;
+                    self.tasks.error = Some(error);
+                }
+            },
+            RequestTag::TaskAdd => match parse_result::<TasksAddResult>(result) {
+                Ok(added) => {
+                    self.tasks
+                        .tasks
+                        .retain(|info| info.task.id != added.task.task.id);
+                    self.tasks.tasks.push(added.task);
+                    self.tasks
+                        .tasks
+                        .sort_by(|left, right| left.task.name.cmp(&right.task.name));
+                    self.tasks.editor = None;
+                    self.toast(Tone::Success, "Task created.");
+                }
+                Err(error) => {
+                    if let Some(editor) = self.tasks.editor.as_mut() {
+                        editor.saving = false;
+                        editor.error = Some(error.clone());
+                    }
+                    self.toast(Tone::Error, error);
+                }
+            },
+            RequestTag::TaskUpdate => match parse_result::<TasksUpdateResult>(result) {
+                Ok(updated) => {
+                    self.tasks
+                        .tasks
+                        .retain(|info| info.task.id != updated.task.task.id);
+                    self.tasks.tasks.push(updated.task.clone());
+                    self.tasks
+                        .tasks
+                        .sort_by(|left, right| left.task.name.cmp(&right.task.name));
+                    if let Some(editor) = self.tasks.editor.as_mut() {
+                        editor.saving = false;
+                        editor.original = Some(updated.task.task.clone());
+                        editor.draft = updated.task.task;
+                        editor.error = None;
+                    }
+                    self.toast(Tone::Success, "Task saved.");
+                }
+                Err(error) => {
+                    if let Some(editor) = self.tasks.editor.as_mut() {
+                        editor.saving = false;
+                        editor.error = Some(error.clone());
+                    }
+                    self.toast(Tone::Error, error);
+                }
+            },
+            RequestTag::TaskRemove { task_id } => {
+                self.tasks.tasks.retain(|info| info.task.id != task_id);
+                if self
+                    .tasks
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.draft.id == task_id)
+                {
+                    self.tasks.editor = None;
+                }
+                self.tasks.confirm_delete = None;
+                if self.runs.filter_task.as_deref() == Some(task_id.as_str()) {
+                    self.runs.filter_task = None;
+                    self.refresh_runs();
+                }
+                self.toast(Tone::Success, "Task deleted.");
+            }
+            RequestTag::TaskFire => {
+                self.tasks.firing = false;
+                match parse_result::<TasksFireResult>(result) {
+                    Ok(_) => self.toast(Tone::Success, "Task started."),
+                    Err(error) => {
+                        if let Some(editor) = self.tasks.editor.as_mut()
+                            && let Some(dialog) = editor.run_now.as_mut()
+                        {
+                            dialog.sending = false;
+                            dialog.error = Some(error.clone());
+                        }
+                        self.toast(Tone::Error, error);
+                    }
+                }
+            }
+            RequestTag::TaskPurgeHistory { .. } => {
+                self.refresh_tasks();
+                self.refresh_runs();
+                self.toast(Tone::Success, "Task history purged.");
+            }
+            RequestTag::TaskHistory { generation, append } => {
+                if generation != self.runs.generation {
+                    return;
+                }
+                self.runs.loading = false;
+                self.runs.loading_more = false;
+                match parse_result::<TasksHistoryResult>(result) {
+                    Ok(history) => {
+                        if append {
+                            self.runs.runs.extend(history.runs);
+                        } else {
+                            self.runs.runs = history.runs;
+                        }
+                        self.runs.next = history.next;
+                        self.runs.selected_index =
+                            self.runs.selected.as_ref().and_then(|(task, run)| {
+                                self.runs.runs.iter().position(|candidate| {
+                                    candidate.task_id == *task && candidate.id == *run
+                                })
+                            });
+                        self.runs.error = None;
+                    }
+                    Err(error) => self.runs.error = Some(error),
+                }
+            }
+            RequestTag::TaskRunGet { .. } => {
+                self.runs.detail_loading = false;
+                match parse_result::<hodeco_contract::api::payloads::TasksGetResult>(result) {
+                    Ok(fetched) => {
+                        self.runs.detail = Some(fetched.run);
+                        self.runs.detail_error = None;
+                    }
+                    Err(error) => self.runs.detail_error = Some(error),
+                }
+            }
+            RequestTag::SchedulesList => match parse_result::<SchedulesListResult>(result) {
+                Ok(list) => {
+                    self.schedules.loading = false;
+                    self.schedules.error = None;
+                    self.schedules.schedules = list.schedules;
+                    self.schedules
+                        .schedules
+                        .sort_by(|left, right| left.schedule.name.cmp(&right.schedule.name));
+                }
+                Err(error) => {
+                    self.schedules.loading = false;
+                    self.schedules.error = Some(error);
+                }
+            },
+            RequestTag::ScheduleAdd => match parse_result::<SchedulesAddResult>(result) {
+                Ok(added) => {
+                    self.schedules
+                        .schedules
+                        .retain(|info| info.schedule.id != added.schedule.schedule.id);
+                    self.schedules.schedules.push(added.schedule);
+                    self.schedules
+                        .schedules
+                        .sort_by(|left, right| left.schedule.name.cmp(&right.schedule.name));
+                    self.schedules.editor = None;
+                    self.toast(Tone::Success, "Schedule created.");
+                }
+                Err(error) => {
+                    if let Some(editor) = self.schedules.editor.as_mut() {
+                        editor.saving = false;
+                        editor.error = Some(error.clone());
+                    }
+                    self.toast(Tone::Error, error);
+                }
+            },
+            RequestTag::ScheduleUpdate => match parse_result::<SchedulesUpdateResult>(result) {
+                Ok(updated) => {
+                    self.schedules
+                        .schedules
+                        .retain(|info| info.schedule.id != updated.schedule.schedule.id);
+                    self.schedules.schedules.push(updated.schedule.clone());
+                    self.schedules
+                        .schedules
+                        .sort_by(|left, right| left.schedule.name.cmp(&right.schedule.name));
+                    if let Some(editor) = self.schedules.editor.as_mut() {
+                        editor.saving = false;
+                        editor.original = Some(updated.schedule.schedule.clone());
+                        editor.draft = updated.schedule.schedule;
+                        editor.error = None;
+                    }
+                    self.refresh_tasks();
+                    self.toast(Tone::Success, "Schedule saved.");
+                }
+                Err(error) => {
+                    if let Some(editor) = self.schedules.editor.as_mut() {
+                        editor.saving = false;
+                        editor.error = Some(error.clone());
+                    }
+                    self.toast(Tone::Error, error);
+                }
+            },
+            RequestTag::ScheduleRemove { schedule_id } => {
+                self.schedules
+                    .schedules
+                    .retain(|info| info.schedule.id != schedule_id);
+                if self
+                    .schedules
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.draft.id == schedule_id)
+                {
+                    self.schedules.editor = None;
+                }
+                self.schedules.confirm_delete = None;
+                self.refresh_tasks();
+                self.toast(Tone::Success, "Schedule deleted.");
+            }
+            RequestTag::SchedulePreview { generation } => {
+                if let Some(editor) = self.schedules.editor.as_mut()
+                    && editor.preview_generation == generation
+                {
+                    editor.previewing = false;
+                    match parse_result::<SchedulesPreviewResult>(result) {
+                        Ok(preview) => {
+                            editor.preview = preview.occurrences;
+                            editor.preview_error = None;
+                        }
+                        Err(error) => editor.preview_error = Some(error),
+                    }
+                }
+            }
+            RequestTag::CommandsList => match parse_result::<CommandsListResult>(result) {
+                Ok(list) => {
+                    self.commands.loading = false;
+                    self.commands.error = None;
+                    self.commands.commands = list.commands;
+                    self.commands
+                        .commands
+                        .sort_by(|left, right| left.command.name.cmp(&right.command.name));
+                }
+                Err(error) => {
+                    self.commands.loading = false;
+                    self.commands.error = Some(error);
+                }
+            },
+            RequestTag::CommandAdd => match parse_result::<CommandsAddResult>(result) {
+                Ok(added) => {
+                    self.commands
+                        .commands
+                        .retain(|info| info.command.id != added.command.command.id);
+                    self.commands.commands.push(added.command);
+                    self.commands
+                        .commands
+                        .sort_by(|left, right| left.command.name.cmp(&right.command.name));
+                    self.commands.editor = None;
+                    self.toast(Tone::Success, "Command created.");
+                }
+                Err(error) => {
+                    if let Some(editor) = self.commands.editor.as_mut() {
+                        editor.saving = false;
+                        editor.error = Some(error.clone());
+                    }
+                    self.toast(Tone::Error, error);
+                }
+            },
+            RequestTag::CommandUpdate => match parse_result::<CommandsUpdateResult>(result) {
+                Ok(updated) => {
+                    self.commands
+                        .commands
+                        .retain(|info| info.command.id != updated.command.command.id);
+                    self.commands.commands.push(updated.command.clone());
+                    self.commands
+                        .commands
+                        .sort_by(|left, right| left.command.name.cmp(&right.command.name));
+                    if let Some(editor) = self.commands.editor.as_mut() {
+                        editor.saving = false;
+                        editor.original = Some(updated.command.command.clone());
+                        editor.draft = updated.command.command;
+                        editor.error = None;
+                    }
+                    self.refresh_tasks();
+                    self.toast(Tone::Success, "Command saved.");
+                }
+                Err(error) => {
+                    if let Some(editor) = self.commands.editor.as_mut() {
+                        editor.saving = false;
+                        editor.error = Some(error.clone());
+                    }
+                    self.toast(Tone::Error, error);
+                }
+            },
+            RequestTag::CommandRemove { command_id } => {
+                self.commands
+                    .commands
+                    .retain(|info| info.command.id != command_id);
+                if self
+                    .commands
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.draft.id == command_id)
+                {
+                    self.commands.editor = None;
+                }
+                self.commands.confirm_delete = None;
+                self.refresh_tasks();
+                self.toast(Tone::Success, "Command deleted.");
+            }
             RequestTag::MessagesPage { generation, kind } => {
                 if generation != self.messages.list_generation {
                     return;
@@ -2557,6 +3281,66 @@ impl App {
                 self.finish_console(ConsoleOutcome::Error(error));
             }
             RequestTag::ServiceSend => self.toast(Tone::Error, error.message),
+            RequestTag::TasksList => {
+                self.tasks.loading = false;
+                self.tasks.error = Some(error.message.clone());
+            }
+            RequestTag::TaskAdd | RequestTag::TaskUpdate => {
+                if let Some(editor) = self.tasks.editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(error.message.clone());
+                }
+                self.toast(Tone::Error, error.message);
+            }
+            RequestTag::TaskFire => {
+                self.tasks.firing = false;
+                if let Some(editor) = self.tasks.editor.as_mut()
+                    && let Some(dialog) = editor.run_now.as_mut()
+                {
+                    dialog.sending = false;
+                    dialog.error = Some(error.message.clone());
+                }
+                self.toast(Tone::Error, error.message);
+            }
+            RequestTag::TaskHistory { generation, .. } if *generation == self.runs.generation => {
+                self.runs.loading = false;
+                self.runs.loading_more = false;
+                self.runs.error = Some(error.message.clone());
+            }
+            RequestTag::TaskRunGet { .. } => {
+                self.runs.detail_loading = false;
+                self.runs.detail_error = Some(error.message.clone());
+            }
+            RequestTag::SchedulesList => {
+                self.schedules.loading = false;
+                self.schedules.error = Some(error.message.clone());
+            }
+            RequestTag::ScheduleAdd | RequestTag::ScheduleUpdate => {
+                if let Some(editor) = self.schedules.editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(error.message.clone());
+                }
+                self.toast(Tone::Error, error.message);
+            }
+            RequestTag::SchedulePreview { generation } => {
+                if let Some(editor) = self.schedules.editor.as_mut()
+                    && editor.preview_generation == *generation
+                {
+                    editor.previewing = false;
+                    editor.preview_error = Some(error.message.clone());
+                }
+            }
+            RequestTag::CommandsList => {
+                self.commands.loading = false;
+                self.commands.error = Some(error.message.clone());
+            }
+            RequestTag::CommandAdd | RequestTag::CommandUpdate => {
+                if let Some(editor) = self.commands.editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(error.message.clone());
+                }
+                self.toast(Tone::Error, error.message);
+            }
             _ => self.toast(Tone::Error, error.message),
         }
     }
@@ -2650,6 +3434,52 @@ impl App {
                 self.discovery.error = Some(format!("{label} timed out"));
                 self.discovery_poll_at = None;
             }
+            RequestTag::TasksList => {
+                self.tasks.loading = false;
+                self.tasks.error = Some(format!("{label} timed out"));
+            }
+            RequestTag::TaskAdd | RequestTag::TaskUpdate => {
+                if let Some(editor) = self.tasks.editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(format!("{label} timed out"));
+                }
+            }
+            RequestTag::TaskFire => self.tasks.firing = false,
+            RequestTag::TaskHistory { .. } => {
+                self.runs.loading = false;
+                self.runs.loading_more = false;
+                self.runs.error = Some(format!("{label} timed out"));
+            }
+            RequestTag::TaskRunGet { .. } => {
+                self.runs.detail_loading = false;
+                self.runs.detail_error = Some(format!("{label} timed out"));
+            }
+            RequestTag::SchedulesList => {
+                self.schedules.loading = false;
+                self.schedules.error = Some(format!("{label} timed out"));
+            }
+            RequestTag::ScheduleAdd | RequestTag::ScheduleUpdate => {
+                if let Some(editor) = self.schedules.editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(format!("{label} timed out"));
+                }
+            }
+            RequestTag::SchedulePreview { .. } => {
+                if let Some(editor) = self.schedules.editor.as_mut() {
+                    editor.previewing = false;
+                    editor.preview_error = Some(format!("{label} timed out"));
+                }
+            }
+            RequestTag::CommandsList => {
+                self.commands.loading = false;
+                self.commands.error = Some(format!("{label} timed out"));
+            }
+            RequestTag::CommandAdd | RequestTag::CommandUpdate => {
+                if let Some(editor) = self.commands.editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(format!("{label} timed out"));
+                }
+            }
             _ => {}
         }
         self.toast(Tone::Warning, format!("{label} timed out."));
@@ -2720,6 +3550,46 @@ impl App {
                 self.discovery.error = None;
                 self.upsert_discovery(update.discovery);
             }
+            Notification::TaskRunStarted(update) => {
+                if let Some(info) = self
+                    .tasks
+                    .tasks
+                    .iter_mut()
+                    .find(|info| info.task.id == update.task_id)
+                {
+                    info.running = true;
+                }
+            }
+            Notification::TaskRunFinished(update) => {
+                let task_id = update.run.task_id.clone();
+                let run_id = update.run.id;
+                if let Some(info) = self
+                    .tasks
+                    .tasks
+                    .iter_mut()
+                    .find(|info| info.task.id == task_id)
+                {
+                    info.running = false;
+                    info.last_run = Some(update.run.clone());
+                }
+                if self.runs.filter_matches(&update.run) {
+                    if self.runs.selected.is_none() {
+                        self.runs.runs.retain(|run| run.id != run_id);
+                        self.runs.runs.insert(0, update.run);
+                        self.runs.runs.truncate(500);
+                    } else {
+                        self.runs.pending_new += 1;
+                    }
+                }
+                if self
+                    .runs
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(task, run)| task == &task_id && *run == run_id)
+                {
+                    self.select_run(&task_id, run_id);
+                }
+            }
             Notification::DiscoveryFinished(update) => {
                 let state = update.discovery.state;
                 self.upsert_discovery(update.discovery);
@@ -2781,42 +3651,12 @@ impl App {
                             .color(palette.green),
                     );
                     ui.add_space(10.0);
-                    let narrow = ui.ctx().content_rect().width() < 1100.0;
-                    let primary = [Tab::Services, Tab::Discovery, Tab::Messages];
-                    for tab in primary {
+                    for tab in Tab::ALL {
                         if ui
                             .add(egui::Button::selectable(self.tab == tab, tab.label()))
                             .clicked()
                         {
                             self.request_tab(tab);
-                        }
-                    }
-                    if narrow {
-                        let secondary_active = self.tab.is_secondary();
-                        let more_text = if secondary_active {
-                            RichText::new("More *").color(palette.accent)
-                        } else {
-                            RichText::new("More")
-                        };
-                        ui.menu_button(more_text, |ui| {
-                            for tab in [Tab::Configuration, Tab::Server, Tab::Console] {
-                                if ui
-                                    .add(egui::Button::selectable(self.tab == tab, tab.label()))
-                                    .clicked()
-                                {
-                                    self.request_tab(tab);
-                                    ui.close();
-                                }
-                            }
-                        });
-                    } else {
-                        for tab in [Tab::Configuration, Tab::Server, Tab::Console] {
-                            if ui
-                                .add(egui::Button::selectable(self.tab == tab, tab.label()))
-                                .clicked()
-                            {
-                                self.request_tab(tab);
-                            }
                         }
                     }
 
@@ -3078,9 +3918,9 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             self.ui_banners(ui);
             match self.tab {
-                Tab::Services => self.ui_services(ui),
-                Tab::Discovery => self.ui_discovery(ui),
+                Tab::Services => self.ui_services_area(ui),
                 Tab::Messages => self.ui_messages(ui),
+                Tab::Tasks => self.ui_tasks_area(ui),
                 Tab::Configuration => self.ui_configuration(ui),
                 Tab::Server => self.ui_server(ui),
                 Tab::Console => self.ui_console(ui),
@@ -3224,6 +4064,23 @@ pub(crate) fn tag_label(tag: &RequestTag) -> String {
         RequestTag::DiscoveryGet => "discovery.get".to_string(),
         RequestTag::DiscoveryCancel => "discovery.cancel".to_string(),
         RequestTag::ProtocolParams { .. } => "protocols.params".to_string(),
+        RequestTag::TasksList => "tasks.list".to_string(),
+        RequestTag::TaskAdd => "tasks.add".to_string(),
+        RequestTag::TaskUpdate => "tasks.update".to_string(),
+        RequestTag::TaskRemove { .. } => "tasks.remove".to_string(),
+        RequestTag::TaskFire => "tasks.fire".to_string(),
+        RequestTag::TaskPurgeHistory { .. } => "tasks.purgeHistory".to_string(),
+        RequestTag::TaskHistory { .. } => "tasks.history".to_string(),
+        RequestTag::TaskRunGet { .. } => "tasks.get".to_string(),
+        RequestTag::SchedulesList => "schedules.list".to_string(),
+        RequestTag::ScheduleAdd => "schedules.add".to_string(),
+        RequestTag::ScheduleUpdate => "schedules.update".to_string(),
+        RequestTag::ScheduleRemove { .. } => "schedules.remove".to_string(),
+        RequestTag::SchedulePreview { .. } => "schedules.preview".to_string(),
+        RequestTag::CommandsList => "commands.list".to_string(),
+        RequestTag::CommandAdd => "commands.add".to_string(),
+        RequestTag::CommandUpdate => "commands.update".to_string(),
+        RequestTag::CommandRemove { .. } => "commands.remove".to_string(),
         RequestTag::RawConsole => "console request".to_string(),
     }
 }

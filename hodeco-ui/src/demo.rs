@@ -11,25 +11,37 @@ use hodeco_contract::api::notifications::{
     DiscoveryNotification, MessageNotification, Notification,
 };
 use hodeco_contract::api::payloads::{
-    ConfigUpdateParams, ConfigUpdateResult, DiscoveryCancelParams, DiscoveryGetParams,
-    DiscoveryGetResult, DiscoveryStartParams, DiscoveryStartResult, Empty, EventTopic,
-    EventsSubscribeParams, EventsUnsubscribeParams, MessageTimeRange, MessagesGetParams,
-    MessagesGetResult, MessagesListParams, MessagesListResult, ProtocolInfoParams,
-    ProtocolInfoResult, ProtocolParamsParams, ProtocolParamsResult, ProtocolsListResult,
-    ServerInfoResult, ServicesAddParams, ServicesAddResult, ServicesAliasParams,
-    ServicesAliasResult, ServicesListResult, ServicesParamsParams, ServicesParamsResult,
-    ServicesRemoveParams, ServicesSendParams, ServicesSendResult, ServicesStatusParams,
-    ServicesStatusResult, TransportsListResult,
+    CommandsAddParams, CommandsAddResult, CommandsGetParams, CommandsGetResult, CommandsListResult,
+    CommandsRemoveParams, CommandsUpdateParams, CommandsUpdateResult, ConfigUpdateParams,
+    ConfigUpdateResult, DiscoveryCancelParams, DiscoveryGetParams, DiscoveryGetResult,
+    DiscoveryStartParams, DiscoveryStartResult, Empty, EventTopic, EventsSubscribeParams,
+    EventsUnsubscribeParams, MessageTimeRange, MessagesGetParams, MessagesGetResult,
+    MessagesListParams, MessagesListResult, ProtocolInfoParams, ProtocolInfoResult,
+    ProtocolParamsParams, ProtocolParamsResult, ProtocolsListResult, SchedulesAddParams,
+    SchedulesAddResult, SchedulesGetParams, SchedulesGetResult, SchedulesListResult,
+    SchedulesPreviewParams, SchedulesPreviewResult, SchedulesRemoveParams, SchedulesUpdateParams,
+    SchedulesUpdateResult, ServerInfoResult, ServicesAddParams, ServicesAddResult,
+    ServicesAliasParams, ServicesAliasResult, ServicesListResult, ServicesParamsParams,
+    ServicesParamsResult, ServicesRemoveParams, ServicesSendParams, ServicesSendResult,
+    ServicesStatusParams, ServicesStatusResult, TaskStoreTotal, TasksAddParams, TasksAddResult,
+    TasksFireParams, TasksFireResult, TasksGetParams, TasksGetResult, TasksHistoryParams,
+    TasksHistoryResult, TasksListResult, TasksPurgeHistoryParams, TasksRemoveParams,
+    TasksUpdateParams, TasksUpdateResult, TransportsListResult,
 };
 use hodeco_contract::api::{ApiError, ErrorCode, Method, Request, Response};
 use hodeco_contract::catalog;
-use hodeco_contract::config::{Config, ServiceConfig};
+use hodeco_contract::config::Config;
 use hodeco_contract::domain::{
-    DiscoveryEntry, DiscoveryInfo, DiscoveryState, Message, MessageOrder, MessageState, ParamDef,
-    ParamType, ProtocolInfo, ServiceInfo, ServiceKey, ServiceRef, ServiceState, ServiceStatus,
-    TransportInfo,
+    ActionKind, ActionOutcome, AtSpec, CommandAction, CommandDefinition, CommandInfo,
+    DiscoveryEntry, DiscoveryInfo, DiscoveryState, Location, ManualRunTrigger, Message,
+    MessageAction, MessageActionPayload, MessageOrder, MessagePayload, MessageState, OneOrMany,
+    OutputMode, ParamDef, ParamType, ProtocolInfo, RunAction, RunChain, RunCommandAction,
+    RunOutcome, RunSummary, RunTrigger, ScheduleDefinition, ScheduleInfo, ScheduleOccurrence,
+    ScheduleRule, ScheduleTrigger, ServiceInfo, ServiceRef, ServiceState, ServiceStatus,
+    TaskAction, TaskDefinition, TaskInfo, TaskRun, TaskTrigger, TransportInfo, TriggerRef,
+    TriggerType,
 };
-use hodeco_contract::utils::Base64Bytes;
+use hodeco_contract::utils::{Base64Bytes, HumanDuration, id_from_name};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
@@ -52,6 +64,10 @@ pub struct DemoServer {
     started_at: DateTime<Utc>,
     ticks: u64,
     next_traffic: usize,
+    tasks: Vec<TaskInfo>,
+    schedules: Vec<ScheduleInfo>,
+    commands: Vec<CommandInfo>,
+    runs: Vec<TaskRun>,
 }
 
 impl Default for DemoServer {
@@ -239,19 +255,280 @@ impl DemoServer {
             last_time = message.time;
         }
 
-        let config = Config {
-            services: services
-                .iter()
-                .map(|service| ServiceConfig {
-                    alias: service.alias.clone(),
-                    protocol: service.protocol.clone(),
-                    transport: service.transport.clone(),
-                    entry: service.entry.clone(),
-                    params: service.params.clone(),
-                })
-                .collect(),
-            ..Config::default()
+        let config = Config::default();
+
+        let commands = vec![
+            CommandInfo {
+                command: CommandDefinition {
+                    id: "meter".to_string(),
+                    name: "Meter poll".to_string(),
+                    description: "Read the meter over the local bus".to_string(),
+                    executable: "/usr/local/bin/meter-poll".into(),
+                    args: vec!["--json".to_string()],
+                    timeout: HumanDuration::from_std(std::time::Duration::from_secs(10)),
+                    ..CommandDefinition::default()
+                },
+                used_by: vec!["evening-lights".to_string()],
+            },
+            CommandInfo {
+                command: CommandDefinition {
+                    id: "notify".to_string(),
+                    name: "Notify desktop".to_string(),
+                    description: "Send a desktop notification".to_string(),
+                    executable: "notify-send".into(),
+                    args: vec!["hodeco".to_string()],
+                    timeout: HumanDuration::from_std(std::time::Duration::from_secs(5)),
+                    ..CommandDefinition::default()
+                },
+                used_by: Vec::new(),
+            },
+        ];
+        let schedules = vec![
+            ScheduleInfo {
+                schedule: ScheduleDefinition {
+                    id: "before-sunset".to_string(),
+                    name: "Before sunset".to_string(),
+                    description: "Fifteen minutes before sunset on weekdays".to_string(),
+                    timezone: Some("Europe/Berlin".to_string()),
+                    location: Some(Location::new(52.52, 13.405, Some(34.0))),
+                    on: Some(ScheduleRule {
+                        at: OneOrMany::One(AtSpec::Text("sunset - 15m".to_string())),
+                        ..ScheduleRule::default()
+                    }),
+                    ..ScheduleDefinition::default()
+                },
+                next: Some(ScheduleOccurrence {
+                    at: now + TimeDelta::hours(2),
+                    local: (now + TimeDelta::hours(2))
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string(),
+                    kind: hodeco_contract::domain::OccurrenceKind::Scheduled,
+                    skipped: false,
+                    reason: None,
+                }),
+                used_by: vec!["evening-lights".to_string()],
+            },
+            ScheduleInfo {
+                schedule: ScheduleDefinition {
+                    id: "morning".to_string(),
+                    name: "Morning".to_string(),
+                    on: Some(ScheduleRule {
+                        at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
+                        days: vec![
+                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Mon),
+                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Tue),
+                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Wed),
+                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Thu),
+                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Fri),
+                        ],
+                        ..ScheduleRule::default()
+                    }),
+                    ..ScheduleDefinition::default()
+                },
+                next: Some(ScheduleOccurrence {
+                    at: now + TimeDelta::hours(14),
+                    local: (now + TimeDelta::hours(14))
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string(),
+                    kind: hodeco_contract::domain::OccurrenceKind::Scheduled,
+                    skipped: false,
+                    reason: None,
+                }),
+                used_by: Vec::new(),
+            },
+        ];
+        let evening = TaskDefinition {
+            id: "evening-lights".to_string(),
+            name: "Evening lights".to_string(),
+            description: "Turn on the porch lights before sunset".to_string(),
+            triggers: vec![TaskTrigger::Schedule(ScheduleTrigger {
+                id: "sunset".to_string(),
+                schedule: "before-sunset".to_string(),
+                max_runs: None,
+            })],
+            actions: vec![TaskAction {
+                id: "meter".to_string(),
+                kind: ActionKind::Command(CommandAction {
+                    command: "meter".to_string(),
+                    args: vec!["--once".to_string()],
+                    output: OutputMode::Capture,
+                }),
+            }],
+            ..TaskDefinition::default()
         };
+        let motion = TaskDefinition {
+            id: "porch-motion".to_string(),
+            name: "Porch motion".to_string(),
+            description: "Notify when the porch sensor reports motion".to_string(),
+            triggers: vec![TaskTrigger::Message(
+                hodeco_contract::domain::MessageTrigger {
+                    id: "motion".to_string(),
+                    states: vec![MessageState::Incoming],
+                    protocols: vec!["zwave".to_string()],
+                    ..hodeco_contract::domain::MessageTrigger::default()
+                },
+            )],
+            actions: vec![TaskAction {
+                id: "notify".to_string(),
+                kind: ActionKind::Message(MessageAction {
+                    message: MessageActionPayload {
+                        service: ServiceRef::Alias {
+                            alias: "ZW".to_string(),
+                        },
+                        payload: MessagePayload::Text {
+                            text: "Motion detected".to_string(),
+                        },
+                        ttl: None,
+                    },
+                }),
+            }],
+            ..TaskDefinition::default()
+        };
+        let winter = TaskDefinition {
+            id: "winter-lights".to_string(),
+            name: "Winter lights".to_string(),
+            description: "Seasonal lights; disabled outside winter".to_string(),
+            enabled: false,
+            triggers: vec![TaskTrigger::Schedule(ScheduleTrigger {
+                id: "winter-sunset".to_string(),
+                schedule: "before-sunset".to_string(),
+                max_runs: Some(120),
+            })],
+            ..TaskDefinition::default()
+        };
+        let now_summary = RunSummary {
+            id: Uuid::new_v4(),
+            task_id: evening.id.clone(),
+            time: now - TimeDelta::minutes(30),
+            started_at: now - TimeDelta::minutes(30),
+            finished_at: now - TimeDelta::minutes(30) + TimeDelta::milliseconds(420),
+            trigger: TriggerRef {
+                id: "sunset".to_string(),
+                kind: TriggerType::Schedule,
+            },
+            outcome: RunOutcome::Succeeded,
+            action_count: 1,
+            next_count: 0,
+            error: None,
+        };
+        let failed_summary = RunSummary {
+            id: Uuid::new_v4(),
+            task_id: motion.id.clone(),
+            time: now - TimeDelta::minutes(10),
+            started_at: now - TimeDelta::minutes(10),
+            finished_at: now - TimeDelta::minutes(10) + TimeDelta::milliseconds(80),
+            trigger: TriggerRef {
+                id: "motion".to_string(),
+                kind: TriggerType::Message,
+            },
+            outcome: RunOutcome::Failed,
+            action_count: 1,
+            next_count: 0,
+            error: Some("service is not ready".to_string()),
+        };
+        let runs = vec![
+            TaskRun {
+                summary: now_summary.clone(),
+                trigger: RunTrigger::Schedule(hodeco_contract::domain::ScheduleRunTrigger {
+                    id: "sunset".to_string(),
+                    schedule_id: "before-sunset".to_string(),
+                    occurrence_at: now - TimeDelta::minutes(30),
+                }),
+                actions: vec![RunAction {
+                    id: "meter".to_string(),
+                    started_at: now - TimeDelta::minutes(30),
+                    finished_at: now - TimeDelta::minutes(30) + TimeDelta::milliseconds(400),
+                    status: ActionOutcome::Succeeded,
+                    command: Some(RunCommandAction {
+                        command_id: "meter".to_string(),
+                        executable: "meter-poll".to_string(),
+                        args: vec!["--json".to_string(), "--once".to_string()],
+                        exit_code: Some(0),
+                        stdout: Some("{\"power\": 412}".to_string()),
+                        stderr: None,
+                        output_truncated: false,
+                    }),
+                    message: None,
+                    error: None,
+                }],
+                selector: None,
+                next_tasks: Vec::new(),
+                chain: RunChain {
+                    chain_id: Uuid::new_v4(),
+                    parent_run_id: None,
+                    depth: 0,
+                },
+                error: None,
+            },
+            TaskRun {
+                summary: failed_summary,
+                trigger: RunTrigger::Message(hodeco_contract::domain::MessageRunTrigger {
+                    id: "motion".to_string(),
+                    message_id: Uuid::new_v4(),
+                    time: now - TimeDelta::minutes(10),
+                    service: ServiceRef::Alias {
+                        alias: "ZW".to_string(),
+                    },
+                    protocol: "zwave".to_string(),
+                    transport: "serial".to_string(),
+                    entry: "COM4".to_string(),
+                    state: MessageState::Incoming,
+                    direction: hodeco_contract::domain::MessageDirection::Incoming,
+                    payload: Some(Base64Bytes::from(vec![1, 2, 3])),
+                }),
+                actions: vec![RunAction {
+                    id: "notify".to_string(),
+                    started_at: now - TimeDelta::minutes(10),
+                    finished_at: now - TimeDelta::minutes(10),
+                    status: ActionOutcome::Failed,
+                    command: None,
+                    message: None,
+                    error: Some("service is not ready".to_string()),
+                }],
+                selector: None,
+                next_tasks: Vec::new(),
+                chain: RunChain {
+                    chain_id: Uuid::new_v4(),
+                    parent_run_id: None,
+                    depth: 0,
+                },
+                error: Some(hodeco_contract::domain::RunError {
+                    stage: hodeco_contract::domain::RunStage::Actions,
+                    message: "service is not ready".to_string(),
+                }),
+            },
+        ];
+        let tasks = vec![
+            TaskInfo {
+                task: evening.clone(),
+                running: false,
+                last_run: Some(now_summary),
+                next: Some(hodeco_contract::domain::NextFire {
+                    at: now + TimeDelta::hours(2),
+                    trigger_id: "sunset".to_string(),
+                    trigger_type: TriggerType::Schedule,
+                    schedule_id: Some("before-sunset".to_string()),
+                }),
+                suppressed_runs: 0,
+                last_suppressed_reason: None,
+            },
+            TaskInfo {
+                task: motion,
+                running: false,
+                last_run: None,
+                next: None,
+                suppressed_runs: 2,
+                last_suppressed_reason: Some("taskBusy".to_string()),
+            },
+            TaskInfo {
+                task: winter,
+                running: false,
+                last_run: None,
+                next: None,
+                suppressed_runs: 0,
+                last_suppressed_reason: None,
+            },
+        ];
 
         Self {
             runtime_config: config.clone(),
@@ -266,6 +543,10 @@ impl DemoServer {
             started_at: now - TimeDelta::hours(2),
             ticks: 0,
             next_traffic: 0,
+            tasks,
+            schedules,
+            commands,
+            runs,
         }
     }
 
@@ -309,10 +590,7 @@ impl DemoServer {
             Method::ConfigGet => to_value(self.config()),
             Method::ConfigUpdate => {
                 let params: ConfigUpdateParams = parse(&request.params)?;
-                // Match the server: services are managed through services.*,
-                // so a config update must never replace them with a stale draft.
-                let mut config = params.config;
-                config.services = self.config.services.clone();
+                let config = params.config;
                 validate_demo_config(&config)?;
                 let restart_required = demo_restart_required(&self.runtime_config, &config);
                 self.config = config.clone();
@@ -456,13 +734,6 @@ impl DemoServer {
                     },
                     params: params.params,
                 };
-                self.config.services.push(ServiceConfig {
-                    alias: service.alias.clone(),
-                    protocol: service.protocol.clone(),
-                    transport: service.transport.clone(),
-                    entry: service.entry.clone(),
-                    params: service.params.clone(),
-                });
                 self.services.push(service.clone());
                 to_value(ServicesAddResult { service })
             }
@@ -478,15 +749,7 @@ impl DemoServer {
                         "service not found",
                     ));
                 };
-                let key = ServiceKey {
-                    protocol: self.services[index].protocol.clone(),
-                    transport: self.services[index].transport.clone(),
-                    entry: self.services[index].entry.clone(),
-                };
                 self.services.remove(index);
-                self.config
-                    .services
-                    .retain(|entry| !service_config_matches(entry, &key));
                 Ok(json!({}))
             }
             Method::ServicesAlias => {
@@ -518,20 +781,7 @@ impl DemoServer {
                         "service not found",
                     ));
                 };
-                let key = ServiceKey {
-                    protocol: service.protocol.clone(),
-                    transport: service.transport.clone(),
-                    entry: service.entry.clone(),
-                };
                 service.alias = requested;
-                if let Some(entry) = self
-                    .config
-                    .services
-                    .iter_mut()
-                    .find(|entry| service_config_matches(entry, &key))
-                {
-                    entry.alias = service.alias.clone();
-                }
                 to_value(ServicesAliasResult {
                     service: service.clone(),
                 })
@@ -564,20 +814,7 @@ impl DemoServer {
                         "service not found",
                     ));
                 };
-                let key = ServiceKey {
-                    protocol: service.protocol.clone(),
-                    transport: service.transport.clone(),
-                    entry: service.entry.clone(),
-                };
                 service.params = params.params.clone();
-                if let Some(entry) = self
-                    .config
-                    .services
-                    .iter_mut()
-                    .find(|entry| service_config_matches(entry, &key))
-                {
-                    entry.params = params.params;
-                }
                 to_value(ServicesParamsResult {
                     service: service.clone(),
                 })
@@ -682,6 +919,329 @@ impl DemoServer {
                     next,
                     store_total: self.messages.len() as u64,
                 })
+            }
+            Method::TasksList => to_value(TasksListResult {
+                tasks: self.tasks.clone(),
+            }),
+            Method::TasksGet => {
+                let params: TasksGetParams = parse(&request.params)?;
+                let Some(run) = self
+                    .runs
+                    .iter()
+                    .find(|run| {
+                        run.summary.task_id == params.task_id && run.summary.id == params.run_id
+                    })
+                    .cloned()
+                else {
+                    return Err(ApiError::new(ErrorCode::RunNotFound, "run not found"));
+                };
+                to_value(TasksGetResult { run })
+            }
+            Method::TasksAdd => {
+                let params: TasksAddParams = parse(&request.params)?;
+                let mut task = params.task;
+                if task.id.is_empty() {
+                    task.id = id_from_name("task", &task.name);
+                }
+                if self.tasks.iter().any(|info| info.task.id == task.id) {
+                    return Err(ApiError::new(
+                        ErrorCode::InvalidParams,
+                        "task already exists",
+                    ));
+                }
+                let info = TaskInfo {
+                    task,
+                    running: false,
+                    last_run: None,
+                    next: None,
+                    suppressed_runs: 0,
+                    last_suppressed_reason: None,
+                };
+                self.tasks.push(info.clone());
+                to_value(TasksAddResult { task: info })
+            }
+            Method::TasksUpdate => {
+                let params: TasksUpdateParams = parse(&request.params)?;
+                let Some(info) = self
+                    .tasks
+                    .iter_mut()
+                    .find(|info| info.task.id == params.task_id)
+                else {
+                    return Err(ApiError::new(ErrorCode::TaskNotFound, "task not found"));
+                };
+                let mut task = params.task;
+                task.id = params.task_id;
+                info.task = task;
+                to_value(TasksUpdateResult { task: info.clone() })
+            }
+            Method::TasksRemove => {
+                let params: TasksRemoveParams = parse(&request.params)?;
+                self.tasks.retain(|info| info.task.id != params.task_id);
+                self.runs
+                    .retain(|run| run.summary.task_id != params.task_id);
+                Ok(json!({}))
+            }
+            Method::TasksFire => {
+                let params: TasksFireParams = parse(&request.params)?;
+                let Some(index) = self
+                    .tasks
+                    .iter()
+                    .position(|info| info.task.id == params.task_id)
+                else {
+                    return Err(ApiError::new(ErrorCode::TaskNotFound, "task not found"));
+                };
+                if !self.tasks[index].task.enabled {
+                    return Err(ApiError::new(ErrorCode::TaskDisabled, "task is disabled"));
+                }
+                let task_id = self.tasks[index].task.id.clone();
+                let run_id = Uuid::new_v4();
+                let now = self.next_time(Utc::now());
+                let summary = RunSummary {
+                    id: run_id,
+                    task_id: task_id.clone(),
+                    time: now,
+                    started_at: now,
+                    finished_at: now + TimeDelta::milliseconds(30),
+                    trigger: TriggerRef {
+                        id: "manual".to_string(),
+                        kind: TriggerType::Manual,
+                    },
+                    outcome: RunOutcome::Succeeded,
+                    action_count: 0,
+                    next_count: 0,
+                    error: None,
+                };
+                self.runs.push(TaskRun {
+                    summary: summary.clone(),
+                    trigger: RunTrigger::Manual(ManualRunTrigger {
+                        id: "manual".to_string(),
+                        payload: params.payload,
+                        metadata: params.metadata,
+                    }),
+                    actions: Vec::new(),
+                    selector: None,
+                    next_tasks: Vec::new(),
+                    chain: RunChain {
+                        chain_id: Uuid::new_v4(),
+                        parent_run_id: None,
+                        depth: 0,
+                    },
+                    error: None,
+                });
+                self.tasks[index].last_run = Some(summary);
+                to_value(TasksFireResult { run_id })
+            }
+            Method::TasksHistory => {
+                let params: TasksHistoryParams = parse(&request.params)?;
+                let limit = params.limit.unwrap_or(50).clamp(1, 500) as usize;
+                let mut runs: Vec<RunSummary> = self
+                    .runs
+                    .iter()
+                    .map(|run| run.summary.clone())
+                    .filter(|run| {
+                        (params.task_ids.is_empty() || params.task_ids.contains(&run.task_id))
+                            && (params.trigger_ids.is_empty()
+                                || params.trigger_ids.contains(&run.trigger.id))
+                            && (params.types.is_empty() || params.types.contains(&run.trigger.kind))
+                            && (params.outcomes.is_empty()
+                                || params.outcomes.contains(&run.outcome))
+                            && params.from.is_none_or(|from| run.time >= from)
+                            && params.until.is_none_or(|until| run.time < until)
+                    })
+                    .collect();
+                runs.sort_by_key(|run| run.time);
+                if params.order == MessageOrder::NewestFirst {
+                    runs.reverse();
+                }
+                runs.truncate(limit);
+                let store_totals = self
+                    .tasks
+                    .iter()
+                    .filter(|info| {
+                        params.task_ids.is_empty() || params.task_ids.contains(&info.task.id)
+                    })
+                    .map(|info| TaskStoreTotal {
+                        task_id: info.task.id.clone(),
+                        rows: self
+                            .runs
+                            .iter()
+                            .filter(|run| run.summary.task_id == info.task.id)
+                            .count() as u64,
+                        bytes: 0,
+                    })
+                    .collect();
+                to_value(TasksHistoryResult {
+                    runs,
+                    next: None,
+                    store_totals,
+                })
+            }
+            Method::TasksPurgeHistory => {
+                let params: TasksPurgeHistoryParams = parse(&request.params)?;
+                self.runs
+                    .retain(|run| run.summary.task_id != params.task_id);
+                if let Some(info) = self
+                    .tasks
+                    .iter_mut()
+                    .find(|info| info.task.id == params.task_id)
+                {
+                    info.last_run = None;
+                }
+                Ok(json!({}))
+            }
+            Method::SchedulesList => to_value(SchedulesListResult {
+                schedules: self.schedules.clone(),
+                location: None,
+                timezone: Some("Europe/Berlin".to_string()),
+            }),
+            Method::SchedulesGet => {
+                let params: SchedulesGetParams = parse(&request.params)?;
+                let Some(schedule) = self
+                    .schedules
+                    .iter()
+                    .find(|info| info.schedule.id == params.schedule_id)
+                    .cloned()
+                else {
+                    return Err(ApiError::new(
+                        ErrorCode::ScheduleNotFound,
+                        "schedule not found",
+                    ));
+                };
+                to_value(SchedulesGetResult { schedule })
+            }
+            Method::SchedulesAdd => {
+                let params: SchedulesAddParams = parse(&request.params)?;
+                let mut schedule = params.schedule;
+                if schedule.id.is_empty() {
+                    schedule.id = id_from_name("schedule", &schedule.name);
+                }
+                let info = ScheduleInfo {
+                    schedule,
+                    next: None,
+                    used_by: Vec::new(),
+                };
+                self.schedules.push(info.clone());
+                to_value(SchedulesAddResult { schedule: info })
+            }
+            Method::SchedulesUpdate => {
+                let params: SchedulesUpdateParams = parse(&request.params)?;
+                let Some(info) = self
+                    .schedules
+                    .iter_mut()
+                    .find(|info| info.schedule.id == params.schedule_id)
+                else {
+                    return Err(ApiError::new(
+                        ErrorCode::ScheduleNotFound,
+                        "schedule not found",
+                    ));
+                };
+                let mut schedule = params.schedule;
+                schedule.id = params.schedule_id;
+                info.schedule = schedule;
+                to_value(SchedulesUpdateResult {
+                    schedule: info.clone(),
+                })
+            }
+            Method::SchedulesRemove => {
+                let params: SchedulesRemoveParams = parse(&request.params)?;
+                let used = self
+                    .tasks
+                    .iter()
+                    .any(|info| task_uses_schedule(&info.task, &params.schedule_id));
+                if used {
+                    return Err(ApiError::new(
+                        ErrorCode::ScheduleInUse,
+                        "schedule is used by tasks",
+                    ));
+                }
+                self.schedules
+                    .retain(|info| info.schedule.id != params.schedule_id);
+                Ok(json!({}))
+            }
+            Method::SchedulesPreview => {
+                let params: SchedulesPreviewParams = parse(&request.params)?;
+                let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+                let now = self.next_time(Utc::now());
+                let occurrences = (0..limit)
+                    .map(|index| {
+                        let at = now + TimeDelta::hours(index as i64 + 1);
+                        ScheduleOccurrence {
+                            at,
+                            local: at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                            kind: hodeco_contract::domain::OccurrenceKind::Scheduled,
+                            skipped: false,
+                            reason: None,
+                        }
+                    })
+                    .collect();
+                let _ = params.schedule;
+                to_value(SchedulesPreviewResult { occurrences })
+            }
+            Method::CommandsList => to_value(CommandsListResult {
+                commands: self.commands.clone(),
+            }),
+            Method::CommandsGet => {
+                let params: CommandsGetParams = parse(&request.params)?;
+                let Some(command) = self
+                    .commands
+                    .iter()
+                    .find(|info| info.command.id == params.command_id)
+                    .cloned()
+                else {
+                    return Err(ApiError::new(
+                        ErrorCode::CommandNotFound,
+                        "command not found",
+                    ));
+                };
+                to_value(CommandsGetResult { command })
+            }
+            Method::CommandsAdd => {
+                let params: CommandsAddParams = parse(&request.params)?;
+                let mut command = params.command;
+                if command.id.is_empty() {
+                    command.id = id_from_name("command", &command.name);
+                }
+                let info = CommandInfo {
+                    command,
+                    used_by: Vec::new(),
+                };
+                self.commands.push(info.clone());
+                to_value(CommandsAddResult { command: info })
+            }
+            Method::CommandsUpdate => {
+                let params: CommandsUpdateParams = parse(&request.params)?;
+                let Some(info) = self
+                    .commands
+                    .iter_mut()
+                    .find(|info| info.command.id == params.command_id)
+                else {
+                    return Err(ApiError::new(
+                        ErrorCode::CommandNotFound,
+                        "command not found",
+                    ));
+                };
+                let mut command = params.command;
+                command.id = params.command_id;
+                info.command = command;
+                to_value(CommandsUpdateResult {
+                    command: info.clone(),
+                })
+            }
+            Method::CommandsRemove => {
+                let params: CommandsRemoveParams = parse(&request.params)?;
+                let used = self
+                    .tasks
+                    .iter()
+                    .any(|info| task_uses_command(&info.task, &params.command_id));
+                if used {
+                    return Err(ApiError::new(
+                        ErrorCode::CommandInUse,
+                        "command is used by tasks",
+                    ));
+                }
+                self.commands
+                    .retain(|info| info.command.id != params.command_id);
+                Ok(json!({}))
             }
             Method::EventsSubscribe => {
                 let params: EventsSubscribeParams = parse(&request.params)?;
@@ -1006,10 +1566,25 @@ fn discovery_entries(protocol: &str) -> Vec<DiscoveryEntry> {
     }
 }
 
-fn service_config_matches(service: &ServiceConfig, key: &ServiceKey) -> bool {
-    service.protocol == key.protocol
-        && service.transport == key.transport
-        && service.entry == key.entry
+fn task_uses_schedule(task: &TaskDefinition, schedule_id: &str) -> bool {
+    task.triggers.iter().any(|trigger| {
+        matches!(
+            trigger,
+            TaskTrigger::Schedule(trigger) if trigger.schedule == schedule_id
+        )
+    })
+}
+
+fn task_uses_command(task: &TaskDefinition, command_id: &str) -> bool {
+    task.actions.iter().any(|action| {
+        matches!(
+            &action.kind,
+            ActionKind::Command(command) if command.command == command_id
+        )
+    }) || task
+        .next
+        .iter()
+        .any(|rule| rule.command.as_deref() == Some(command_id))
 }
 
 fn demo_restart_required(previous: &Config, next: &Config) -> Vec<String> {
@@ -1048,37 +1623,6 @@ fn validate_demo_config(config: &Config) -> Result<(), ApiError> {
     }
     if config.message_log.file.as_os_str().is_empty() {
         errors.push("messageLog.file must not be empty".to_string());
-    }
-    let mut aliases = std::collections::BTreeSet::new();
-    let mut keys = std::collections::BTreeSet::new();
-    for (index, service) in config.services.iter().enumerate() {
-        if service.protocol.trim().is_empty() {
-            errors.push(format!("services[{index}].protocol must not be empty"));
-        }
-        if service.transport.trim().is_empty() {
-            errors.push(format!("services[{index}].transport must not be empty"));
-        }
-        if service.entry.trim().is_empty() {
-            errors.push(format!("services[{index}].entry must not be empty"));
-        }
-        if let Some(alias) = &service.alias {
-            if alias.trim().is_empty() {
-                errors.push(format!("services[{index}].alias must not be empty"));
-            } else if !aliases.insert(alias.clone()) {
-                errors.push(format!("duplicate service alias '{alias}'"));
-            }
-        }
-        let key = (
-            service.protocol.clone(),
-            service.transport.clone(),
-            service.entry.clone(),
-        );
-        if !keys.insert(key.clone()) {
-            errors.push(format!(
-                "duplicate service key '{}:{}:{}'",
-                key.0, key.1, key.2
-            ));
-        }
     }
     if errors.is_empty() {
         Ok(())
@@ -1407,9 +1951,8 @@ mod tests {
             "45 s"
         );
         let service = server
-            .config()
             .services
-            .into_iter()
+            .iter()
             .find(|service| service.alias.as_deref() == Some("HTTP"))
             .expect("HTTP service");
         assert_eq!(service.params["readTimeout"], "45 s");
@@ -1431,32 +1974,16 @@ mod tests {
     }
 
     #[test]
-    fn config_update_ignores_service_changes() {
+    fn config_update_does_not_touch_services() {
         let mut server = DemoServer::new();
         let mut config = server.config();
-        config.services.clear();
         config.log.file = "updated.log".to_string();
 
         let response = parse_response(
             &server.handle(&request("1", "config.update", json!({"config": config})))[0],
         );
         assert!(response["error"].is_null());
-        assert_eq!(
-            response["result"]["config"]["services"]
-                .as_array()
-                .unwrap()
-                .len(),
-            4
-        );
         assert_eq!(response["result"]["restartRequired"], json!(["log"]));
-        assert_eq!(server.config().services.len(), 4);
-    }
-
-    #[test]
-    fn config_matches_the_service_list() {
-        let server = DemoServer::new();
-        let config = server.config();
-        assert_eq!(config.services.len(), 4);
-        assert_eq!(config.services[0].entry, "COM4");
+        assert_eq!(server.services.len(), 4);
     }
 }

@@ -17,13 +17,18 @@ HTTP RPC endpoint: a string `id`, a `method`, and an object of `params`.
 ```
 
 `events.unsubscribe` takes the same `topics` array. Valid topics are `messages`,
-`discovery`, and `services`.
+`discovery`, `services`, and `tasks`.
 
 | Topic | Notifications |
 | --- | --- |
 | `messages` | `events.messageNew`, `events.messageDropped`, `events.messageStateChanged` |
 | `discovery` | `events.discoveryStarted`, `events.discoveryFinished` |
 | `services` | `events.serviceStateChanged` |
+| `tasks` | `events.taskRunStarted`, `events.taskRunFinished` |
+
+`events.taskRunStarted` carries `{ runId, taskId, trigger, startedAt }`.
+`events.taskRunFinished` carries the run summary, including outcome, action and
+next counts, and the error; fetch `tasks.get` for full action output.
 
 `events.serviceStateChanged` reports runtime state only and never triggers a
 config reload. After reconnecting, refresh with `services.list` rather than
@@ -46,8 +51,8 @@ Treat `1013` as a resubscribe signal, not a fatal error.
 
 1. Reconnect to `/api/ws`.
 2. Send `events.subscribe` with the topics you need.
-3. Refresh state with the list methods (`services.list`, `messages.list`, and
-   discovery results if relevant).
+3. Refresh state with the list methods (`services.list`, `messages.list`,
+   `tasks.list`, and discovery results if relevant).
 4. Continue consuming notifications.
 
 This is exactly what the bundled UI does; keeping the same sequence in your own

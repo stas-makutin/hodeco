@@ -9,7 +9,7 @@ history. **Z-Wave is supported today; ZigBee is planned.**
 That means no more fighting over the serial port: connect the controller once,
 then let every local client share the same devices, state, and history. hodeco
 is meant to be the quiet piece of infrastructure on a Raspberry Pi, a mini-PC,
-or a Windows box: one process, one optional YAML file, and a browser.
+or a Windows box: one process, a small set of YAML files, and a browser.
 
 > **Trusted networks only.** Authentication and TLS are not implemented, and the
 > default bind address is `127.0.0.1`. If you need access from outside your LAN,
@@ -25,14 +25,14 @@ or a Windows box: one process, one optional YAML file, and a browser.
 - **Keeps the history.** Every frame is stored in a bounded, file-backed message
   log you can page through, filter by time or metadata, and search with masked
   payload expressions.
-- **Streams events.** Subscribe to `messages`, `discovery`, and `services` over
-  a WebSocket. Slow consumers get a clear `1013` close instead of silently
-  falling behind.
+- **Streams events.** Subscribe to `messages`, `discovery`, `services`, and
+  `tasks` over a WebSocket. Slow consumers get a clear `1013` close instead of
+  silently falling behind.
 - **Ships its own UI.** The egui admin and diagnostics app is compiled to WASM
   and served by the same process. It includes services, discovery, message
-  history, configuration, a console, a JSON-driven protocol builder with typed
-  fields and packed bit groups, TX options, a per-send TTL override, and a demo
-  mode that works without hardware.
+  history, tasks/schedules/commands/runs, configuration, a console, a
+  JSON-driven protocol builder with typed fields and packed bit groups, TX
+  options, a per-send TTL override, and a demo mode that works without hardware.
 - **Runs as a service.** Windows service and systemd integration are built in,
   including log and state directory handling.
 

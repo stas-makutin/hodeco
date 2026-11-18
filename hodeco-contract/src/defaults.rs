@@ -1,6 +1,6 @@
 use crate::config::{
-    Archive, Config, CorruptPolicy, HttpServerConfig, LogConfig, MessageLogConfig,
-    StaticAssetsConfig,
+    Archive, Config, CorruptPolicy, FileSetConfig, HttpServerConfig, LogConfig, MessageLogConfig,
+    StaticAssetsConfig, TaskEngineConfig, TaskLogConfig,
 };
 use crate::utils::{FileMode, HumanDuration, Size};
 use std::path::PathBuf;
@@ -37,7 +37,45 @@ impl Default for Config {
             log: LogConfig::default(),
             http_server: HttpServerConfig::default(),
             message_log: MessageLogConfig::default(),
-            services: Vec::new(),
+            files: FileSetConfig::default(),
+            task_log: TaskLogConfig::default(),
+            task_engine: TaskEngineConfig::default(),
+        }
+    }
+}
+
+impl Default for FileSetConfig {
+    fn default() -> Self {
+        Self {
+            services: PathBuf::from("services.yaml"),
+            tasks: PathBuf::from("tasks.yaml"),
+            schedules: PathBuf::from("schedules.yaml"),
+            commands: PathBuf::from("commands.yaml"),
+        }
+    }
+}
+
+impl Default for TaskLogConfig {
+    fn default() -> Self {
+        Self {
+            dir: PathBuf::from("tasks"),
+            max_size: Size::from_bytes(100 * 1024),
+            max_rows: 1_000,
+            file_mode: FileMode::new(0o640),
+            compaction_factor: 2.0,
+            compact_interval: HumanDuration::from_std(Duration::from_secs(30 * 24 * 60 * 60)),
+            on_corrupt: CorruptPolicy::Ignore,
+        }
+    }
+}
+
+impl Default for TaskEngineConfig {
+    fn default() -> Self {
+        Self {
+            max_trigger_payload_size: Size::from_bytes(16 * 1024),
+            max_concurrent_runs: 32,
+            max_chain_depth: 16,
+            max_fan_out: 16,
         }
     }
 }
@@ -91,7 +129,9 @@ impl Default for MessageLogConfig {
             max_size: Size::from_bytes(10 * 1024 * 1024),
             file: PathBuf::from(default_message_log_file()),
             file_mode: FileMode::new(0o644),
-            auto_persist: HumanDuration::from_std(Duration::from_secs(6 * 60 * 60)),
+            auto_persist: HumanDuration::from_std(Duration::from_secs(60)),
+            compaction_factor: 2.0,
+            compact_interval: HumanDuration::from_std(Duration::from_secs(30 * 24 * 60 * 60)),
             on_corrupt: CorruptPolicy::Ignore,
         }
     }

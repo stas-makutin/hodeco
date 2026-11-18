@@ -1,5 +1,7 @@
 use crate::messages::StoreEvent;
 use crate::services::discovery::DiscoveryEvent;
+use hodeco_contract::api::notifications::TaskRunFinishedNotification;
+use hodeco_contract::api::payloads::TaskRunNotification;
 use hodeco_contract::domain::{DiscoveryInfo, Message, ServiceRef, ServiceStatus};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -12,16 +14,18 @@ pub enum Topic {
     Messages,
     Discovery,
     Services,
+    Tasks,
 }
 
 impl Topic {
-    pub const ALL: [Self; 3] = [Self::Messages, Self::Discovery, Self::Services];
+    pub const ALL: [Self; 4] = [Self::Messages, Self::Discovery, Self::Services, Self::Tasks];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Messages => "messages",
             Self::Discovery => "discovery",
             Self::Services => "services",
+            Self::Tasks => "tasks",
         }
     }
 }
@@ -60,6 +64,8 @@ pub enum Event {
         service: ServiceRef,
         status: ServiceStatus,
     },
+    TaskRunStarted(TaskRunNotification),
+    TaskRunFinished(TaskRunFinishedNotification),
 }
 
 impl Event {
@@ -70,6 +76,7 @@ impl Event {
                 Topic::Messages
             }
             Self::ServiceStateChanged { .. } => Topic::Services,
+            Self::TaskRunStarted(_) | Self::TaskRunFinished(_) => Topic::Tasks,
         }
     }
 }
@@ -77,8 +84,8 @@ impl Event {
 impl From<StoreEvent> for Event {
     fn from(event: StoreEvent) -> Self {
         match event {
-            StoreEvent::New(message) => Self::MessageNew(message),
-            StoreEvent::StateChanged(message) => Self::MessageStateChanged(message),
+            StoreEvent::New { message, .. } => Self::MessageNew(message),
+            StoreEvent::StateChanged { message, .. } => Self::MessageStateChanged(message),
             StoreEvent::Dropped { message_ids } => Self::MessageDropped { message_ids },
         }
     }
@@ -125,12 +132,25 @@ mod tests {
 
     #[test]
     fn maps_store_events() {
+        let key = hodeco_contract::domain::ServiceKey {
+            protocol: "zwave".to_string(),
+            transport: "serial".to_string(),
+            entry: "COM4".to_string(),
+        };
         assert_eq!(
-            Event::from(StoreEvent::New(message())).topic(),
+            Event::from(StoreEvent::New {
+                key: key.clone(),
+                message: message()
+            })
+            .topic(),
             Topic::Messages
         );
         assert_eq!(
-            Event::from(StoreEvent::StateChanged(message())).topic(),
+            Event::from(StoreEvent::StateChanged {
+                key,
+                message: message()
+            })
+            .topic(),
             Topic::Messages
         );
         assert_eq!(

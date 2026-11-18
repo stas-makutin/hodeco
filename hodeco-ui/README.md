@@ -16,11 +16,13 @@ Current build includes:
 - Same-origin web default: the browser connects to
   `ws(s)://<page-host>/api/ws`.
 - Bundled demo/fixture mode, usable without a gateway.
-- App shell, horizontal tabs, responsive `More` menu, theme switch, banners,
-  toasts, and reconnect handling.
-- Services, discovery, messages, configuration, server, and console views.
-  Service and discovery parameter editors use the same `ParamDef` metadata as
-  the gateway and send explicit overrides only.
+- App shell, top-level tabs, theme switch, banners, toasts, and reconnect
+  handling.
+- Services (Services/Discovery), Messages, Tasks (Tasks/Schedules/Commands/
+  Runs), Configuration, Server, and Console views. Service and discovery
+  parameter editors use the same `ParamDef` metadata as the gateway and send
+  explicit overrides only. The task list mirrors the Services table style and
+  uses text row actions.
 - Store-wide Find (F3 / Shift+F3) over the current Filters result set, with
   ASCII, UTF-8, UTF-16 LE/BE, or Binary hex payload predicates. Filters are a
   separate OR-of-AND payload condition list plus state, protocol, transport,
@@ -194,11 +196,11 @@ query parameters. It does not introduce a UI web server.
 ## Current limitations and deferred items
 
 Configuration and service parameters are editable. `config.update` validates
-and atomically writes the complete config, persists only, and never restarts
-the gateway automatically. Restart-scoped config sections are reported until
-the gateway is restarted. Services are managed separately: `services.add`,
-`services.remove`, `services.alias`, and `services.params` apply immediately and
-write the config back without a restart. `services.params` stores explicit
+and atomically writes the core config, persists only, and never restarts the
+gateway automatically. Restart-scoped config sections are reported until the
+gateway is restarted. Services, tasks, schedules, and commands are managed
+separately: their RPC methods apply immediately and write the relevant catalog
+file without a restart. `services.params` stores explicit
 overrides and restarts only the affected service. The parameter editor
 shows every effective value, keeps Save disabled until the override set changes,
 writes only values that differ from the definition default, and shows

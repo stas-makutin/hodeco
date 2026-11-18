@@ -1,29 +1,42 @@
 use crate::app::AppState;
-use crate::config::{ConfigError, restart_required, validate};
+use crate::automation::engine::{self, FireError};
+use crate::automation::schedule::{self, ScheduleContext};
+use crate::config::{
+    ConfigError, restart_required, validate, validate_command, validate_schedule, validate_task,
+    validate_task_id,
+};
 use crate::events::Topic;
 use crate::messages::MessageFilter;
 use crate::services::{ServiceError, catalog};
 use hodeco_contract::api::envelope::empty_object;
 use hodeco_contract::api::payloads::{
-    ConfigUpdateParams, ConfigUpdateResult, DiscoveryCancelParams, DiscoveryGetParams,
-    DiscoveryGetResult, DiscoveryStartParams, DiscoveryStartResult, Empty, EventTopic,
-    EventsSubscribeParams, EventsUnsubscribeParams, MessagesGetParams, MessagesGetResult,
-    MessagesListParams, MessagesListResult, ProtocolInfoParams, ProtocolInfoResult,
-    ProtocolParamsParams, ProtocolParamsResult, ProtocolsListResult, ServerInfoResult,
-    ServicesAddParams, ServicesAddResult, ServicesAliasParams, ServicesAliasResult,
-    ServicesListResult, ServicesParamsParams, ServicesParamsResult, ServicesRemoveParams,
-    ServicesSendParams, ServicesSendResult, ServicesStatusParams, ServicesStatusResult,
-    TransportsListResult,
+    CommandsAddParams, CommandsAddResult, CommandsGetParams, CommandsGetResult, CommandsListResult,
+    CommandsRemoveParams, CommandsUpdateParams, CommandsUpdateResult, ConfigUpdateParams,
+    ConfigUpdateResult, DiscoveryCancelParams, DiscoveryGetParams, DiscoveryGetResult,
+    DiscoveryStartParams, DiscoveryStartResult, Empty, EventTopic, EventsSubscribeParams,
+    EventsUnsubscribeParams, MessagesGetParams, MessagesGetResult, MessagesListParams,
+    MessagesListResult, ProtocolInfoParams, ProtocolInfoResult, ProtocolParamsParams,
+    ProtocolParamsResult, ProtocolsListResult, SchedulesAddParams, SchedulesAddResult,
+    SchedulesGetParams, SchedulesGetResult, SchedulesListResult, SchedulesPreviewParams,
+    SchedulesPreviewResult, SchedulesRemoveParams, SchedulesUpdateParams, SchedulesUpdateResult,
+    ServerInfoResult, ServicesAddParams, ServicesAddResult, ServicesAliasParams,
+    ServicesAliasResult, ServicesListResult, ServicesParamsParams, ServicesParamsResult,
+    ServicesRemoveParams, ServicesSendParams, ServicesSendResult, ServicesStatusParams,
+    ServicesStatusResult, TasksAddParams, TasksAddResult, TasksFireParams, TasksFireResult,
+    TasksGetParams, TasksGetResult, TasksHistoryParams, TasksListResult, TasksPurgeHistoryParams,
+    TasksRemoveParams, TasksUpdateParams, TasksUpdateResult, TransportsListResult,
 };
 use hodeco_contract::api::{ApiError, ErrorCode, Method, Response};
-use hodeco_contract::config::ServiceConfig;
+use hodeco_contract::config::{SchedulesFile, ServiceConfig};
 use hodeco_contract::domain::{
     MessageDirection, MessageState, ParamValues, PayloadExpr, ServiceKey, ServiceRef,
+    TaskDefinition,
 };
+use hodeco_contract::utils::{generated_id, id_from_name};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use tracing::warn;
 
 pub const PROTOCOL_VERSION: &str = "1.0";
@@ -125,10 +138,7 @@ async fn dispatch(
             let params: ConfigUpdateParams = parse_params(method, params)?;
             let _guard = state.config_store.lock().await;
             let previous = state.config_store.snapshot();
-            let mut config = params.config;
-            // Services have their own runtime API. A general configuration
-            // update must never replace them with a stale draft.
-            config.services = previous.services.clone();
+            let config = params.config;
             validate(&config).map_err(config_validation_error)?;
             let restart_required = restart_required(state.config.as_ref(), &config)
                 .into_iter()
@@ -205,14 +215,14 @@ async fn dispatch(
                 entry: params.entry,
             };
             let values = ParamValues::from(params.params);
-            let _guard = state.config_store.lock().await;
-            let previous = state.config_store.snapshot();
+            let _guard = state.services_store.lock().await;
+            let previous = state.services_store.snapshot();
             let service = state
                 .registry
                 .add(key.clone(), &values, params.alias)
                 .map_err(service_error)?;
-            state.config_store.update(|config| {
-                config.services.push(ServiceConfig {
+            state.services_store.update(|services| {
+                services.push(ServiceConfig {
                     alias: service.alias.clone(),
                     protocol: key.protocol.clone(),
                     transport: key.transport.clone(),
@@ -220,10 +230,10 @@ async fn dispatch(
                     params: values.clone(),
                 });
             });
-            if let Err(error) = state.config_store.save().await {
-                state.config_store.replace(previous);
+            if let Err(error) = state.services_store.save().await {
+                state.services_store.replace(previous);
                 if let Err(error) = state.registry.remove(&ServiceRef::from(&key)).await {
-                    warn!(error = %error, "failed to roll back service after config write failure");
+                    warn!(error = %error, "failed to roll back service after services write failure");
                 }
                 return Err(config_write_error(error));
             }
@@ -231,29 +241,35 @@ async fn dispatch(
         }
         Method::ServicesRemove => {
             let params: ServicesRemoveParams = parse_params(method, params)?;
-            let _guard = state.config_store.lock().await;
+            let _guard = state.services_store.lock().await;
             let key = state
                 .registry
                 .resolve(&params.service)
                 .map_err(|error| service_ref_error(error, &params.service))?;
+            let used_by = tasks_using_service(state, &params.service, &key);
+            if !used_by.is_empty() {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    "the service is referenced by tasks",
+                )
+                .with_details(json!({"usedBy": used_by})));
+            }
             let service_info = state.registry.info(&params.service).ok();
-            let previous = state.config_store.snapshot();
+            let previous = state.services_store.snapshot();
             state
                 .registry
                 .remove(&params.service)
                 .await
                 .map_err(|error| service_ref_error(error, &params.service))?;
-            state.config_store.update(|config| {
-                config
-                    .services
-                    .retain(|service| !service_config_matches(service, &key));
+            state.services_store.update(|services| {
+                services.retain(|service| !service_config_matches(service, &key));
             });
-            if let Err(error) = state.config_store.save().await {
-                state.config_store.replace(previous);
+            if let Err(error) = state.services_store.save().await {
+                state.services_store.replace(previous);
                 if let Some(info) = service_info
                     && let Err(error) = state.registry.add(key, &info.params, info.alias)
                 {
-                    warn!(error = %error, "failed to roll back service removal after config write failure");
+                    warn!(error = %error, "failed to roll back service removal after services write failure");
                 }
                 return Err(config_write_error(error));
             }
@@ -261,7 +277,7 @@ async fn dispatch(
         }
         Method::ServicesAlias => {
             let params: ServicesAliasParams = parse_params(method, params)?;
-            let _guard = state.config_store.lock().await;
+            let _guard = state.services_store.lock().await;
             let key = state
                 .registry
                 .resolve(&params.service)
@@ -271,25 +287,47 @@ async fn dispatch(
                 .info(&params.service)
                 .ok()
                 .and_then(|info| info.alias);
-            let previous = state.config_store.snapshot();
+            if let Some(old_alias) = &old_alias
+                && params.alias.as_deref() != Some(old_alias.as_str())
+                && !tasks_using_service(
+                    state,
+                    &ServiceRef::Alias {
+                        alias: old_alias.clone(),
+                    },
+                    &key,
+                )
+                .is_empty()
+            {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    "the service alias is referenced by tasks",
+                )
+                .with_details(json!({"usedBy": tasks_using_service(
+                    state,
+                    &ServiceRef::Alias {
+                        alias: old_alias.clone(),
+                    },
+                    &key,
+                )})));
+            }
+            let previous = state.services_store.snapshot();
             let service = state
                 .registry
                 .alias(&params.service, params.alias)
                 .map_err(|error| service_ref_error(error, &params.service))?;
             let new_alias = service.alias.clone();
-            state.config_store.update(|config| {
-                if let Some(entry) = config
-                    .services
+            state.services_store.update(|services| {
+                if let Some(entry) = services
                     .iter_mut()
                     .find(|entry| service_config_matches(entry, &key))
                 {
                     entry.alias = new_alias;
                 }
             });
-            if let Err(error) = state.config_store.save().await {
-                state.config_store.replace(previous);
+            if let Err(error) = state.services_store.save().await {
+                state.services_store.replace(previous);
                 if let Err(error) = state.registry.alias(&ServiceRef::from(&key), old_alias) {
-                    warn!(error = %error, "failed to roll back service alias after config write failure");
+                    warn!(error = %error, "failed to roll back service alias after services write failure");
                 }
                 return Err(config_write_error(error));
             }
@@ -306,36 +344,35 @@ async fn dispatch(
         Method::ServicesParams => {
             let params: ServicesParamsParams = parse_params(method, params)?;
             let values = ParamValues::from(params.params);
-            let _guard = state.config_store.lock().await;
+            let _guard = state.services_store.lock().await;
             let key = state
                 .registry
                 .resolve(&params.service)
                 .map_err(|error| service_ref_error(error, &params.service))?;
             let previous_info = state.registry.info(&params.service).ok();
-            let previous = state.config_store.snapshot();
+            let previous = state.services_store.snapshot();
             let service = state
                 .registry
                 .update_params(&params.service, &values)
                 .await
                 .map_err(|error| service_ref_error(error, &params.service))?;
-            state.config_store.update(|config| {
-                if let Some(entry) = config
-                    .services
+            state.services_store.update(|services| {
+                if let Some(entry) = services
                     .iter_mut()
                     .find(|entry| service_config_matches(entry, &key))
                 {
                     entry.params = values.clone();
                 }
             });
-            if let Err(error) = state.config_store.save().await {
-                state.config_store.replace(previous);
+            if let Err(error) = state.services_store.save().await {
+                state.services_store.replace(previous);
                 if let Some(info) = previous_info
                     && let Err(error) = state
                         .registry
                         .update_params(&params.service, &info.params)
                         .await
                 {
-                    warn!(error = %error, "failed to roll back service parameters after config write failure");
+                    warn!(error = %error, "failed to roll back service parameters after services write failure");
                 }
                 return Err(config_write_error(error));
             }
@@ -394,6 +431,434 @@ async fn dispatch(
                 next: page.next,
                 store_total: page.store_total,
             })
+        }
+        Method::TasksList => {
+            let snapshot = state.automation.snapshot();
+            let tasks = snapshot
+                .tasks
+                .values()
+                .map(|task| engine::task_info(state, task))
+                .collect();
+            ok(TasksListResult { tasks })
+        }
+        Method::TasksGet => {
+            let params: TasksGetParams = parse_params(method, params)?;
+            let run = state
+                .history
+                .get(&params.task_id, params.run_id)
+                .ok_or_else(|| {
+                    ApiError::new(ErrorCode::RunNotFound, "run not found").with_details(json!({
+                        "taskId": params.task_id,
+                        "runId": params.run_id,
+                    }))
+                })?;
+            ok(TasksGetResult { run })
+        }
+        Method::TasksAdd => {
+            let params: TasksAddParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            let mut task = params.task;
+            if task.id.is_empty() {
+                task.id = unique_id("task", &task.name, snapshot.tasks.keys());
+            }
+            validate_task_id(&task.id).map_err(validation_error)?;
+            if snapshot.tasks.contains_key(&task.id) {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    format!("task '{}' already exists", task.id),
+                ));
+            }
+            let services = service_refs(state);
+            let others: Vec<&TaskDefinition> = snapshot.tasks.values().collect();
+            validate_task(
+                &task,
+                &others,
+                &snapshot.schedule_ids(),
+                &snapshot.command_ids(),
+                &services,
+            )
+            .map_err(validation_error)?;
+            state.automation.update_tasks(|tasks| {
+                tasks.insert(task.id.clone(), task.clone());
+            });
+            if let Err(error) = state.automation.save_tasks().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            state.runtime.wake_scheduler();
+            ok(TasksAddResult {
+                task: engine::task_info(state, &task),
+            })
+        }
+        Method::TasksUpdate => {
+            let params: TasksUpdateParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            let Some(previous) = snapshot.tasks.get(&params.task_id).cloned() else {
+                return Err(task_not_found(&params.task_id));
+            };
+            let mut task = params.task;
+            if !task.id.is_empty() && task.id != params.task_id {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    "a task ID cannot be changed",
+                ));
+            }
+            task.id = params.task_id.clone();
+            let services = service_refs(state);
+            let all_tasks: Vec<&TaskDefinition> = snapshot.tasks.values().collect();
+            validate_task(
+                &task,
+                &all_tasks,
+                &snapshot.schedule_ids(),
+                &snapshot.command_ids(),
+                &services,
+            )
+            .map_err(validation_error)?;
+            let was_enabled = previous.enabled;
+            state.automation.update_tasks(|tasks| {
+                tasks.insert(task.id.clone(), task.clone());
+            });
+            if let Err(error) = state.automation.save_tasks().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            if !was_enabled && task.enabled {
+                state.runtime.reset_suppressed(&task.id);
+                state.runtime.reset_rate(&task.id);
+                state.runtime.reset_trigger_runs(&task.id);
+            }
+            state.runtime.wake_scheduler();
+            ok(TasksUpdateResult {
+                task: engine::task_info(state, &task),
+            })
+        }
+        Method::TasksRemove => {
+            let params: TasksRemoveParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            if !snapshot.tasks.contains_key(&params.task_id) {
+                return Err(task_not_found(&params.task_id));
+            }
+            if state.runtime.running(&params.task_id) {
+                return Err(ApiError::new(
+                    ErrorCode::TaskBusy,
+                    "the task is running; wait for it to finish before deleting it",
+                ));
+            }
+            state.automation.update_tasks(|tasks| {
+                tasks.remove(&params.task_id);
+            });
+            if let Err(error) = state.automation.save_tasks().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            state.runtime.forget_task(&params.task_id);
+            if let Err(error) = state.history.remove_task(&params.task_id) {
+                warn!(error = %error, task = %params.task_id, "unable to remove task history");
+            }
+            state.runtime.wake_scheduler();
+            ok(Empty::default())
+        }
+        Method::TasksFire => {
+            let params: TasksFireParams = parse_params(method, params)?;
+            let run_id = engine::fire_manual(
+                state,
+                &params.task_id,
+                params.trigger_id,
+                params.payload,
+                params.metadata,
+            )
+            .await
+            .map_err(fire_error)?;
+            ok(TasksFireResult { run_id })
+        }
+        Method::TasksHistory => {
+            let params: TasksHistoryParams = parse_params(method, params)?;
+            ok(state.history.list(&params))
+        }
+        Method::TasksPurgeHistory => {
+            let params: TasksPurgeHistoryParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            if !state
+                .automation
+                .snapshot()
+                .tasks
+                .contains_key(&params.task_id)
+            {
+                return Err(task_not_found(&params.task_id));
+            }
+            if state.runtime.running(&params.task_id) {
+                return Err(ApiError::new(
+                    ErrorCode::TaskBusy,
+                    "the task is running; wait for it to finish before purging history",
+                ));
+            }
+            state
+                .history
+                .purge(&params.task_id)
+                .map_err(history_error)?;
+            state.runtime.reset_rate(&params.task_id);
+            state.runtime.reset_trigger_runs(&params.task_id);
+            state.runtime.wake_scheduler();
+            ok(Empty::default())
+        }
+        Method::SchedulesList => {
+            let snapshot = state.automation.snapshot();
+            let context = schedule_context(&snapshot);
+            let schedules = snapshot
+                .schedules
+                .values()
+                .map(|schedule| {
+                    let next =
+                        schedule::next_occurrence(schedule, context, chrono::Utc::now(), true)
+                            .ok()
+                            .flatten();
+                    snapshot.schedule_info(schedule, next)
+                })
+                .collect();
+            ok(SchedulesListResult {
+                schedules,
+                location: snapshot.location,
+                timezone: snapshot.timezone.clone(),
+            })
+        }
+        Method::SchedulesGet => {
+            let params: SchedulesGetParams = parse_params(method, params)?;
+            let snapshot = state.automation.snapshot();
+            let Some(schedule) = snapshot.schedules.get(&params.schedule_id) else {
+                return Err(schedule_not_found(&params.schedule_id));
+            };
+            let context = schedule_context(&snapshot);
+            let next = schedule::next_occurrence(schedule, context, chrono::Utc::now(), true)
+                .ok()
+                .flatten();
+            ok(SchedulesGetResult {
+                schedule: snapshot.schedule_info(schedule, next),
+            })
+        }
+        Method::SchedulesAdd => {
+            let params: SchedulesAddParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            let mut schedule = params.schedule;
+            if schedule.id.is_empty() {
+                schedule.id = unique_id("schedule", &schedule.name, snapshot.schedules.keys());
+            }
+            validate_task_id(&schedule.id).map_err(validation_error)?;
+            if snapshot.schedules.contains_key(&schedule.id) {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    format!("schedule '{}' already exists", schedule.id),
+                ));
+            }
+            let defaults = schedule_defaults(&snapshot);
+            validate_schedule(&schedule, &defaults).map_err(validation_error)?;
+            state.automation.update_schedules(|schedules| {
+                schedules.insert(schedule.id.clone(), schedule.clone());
+            });
+            if let Err(error) = state.automation.save_schedules().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            state.runtime.wake_scheduler();
+            let next = schedule::next_occurrence(
+                &schedule,
+                schedule_context(&state.automation.snapshot()),
+                chrono::Utc::now(),
+                true,
+            )
+            .ok()
+            .flatten();
+            let snapshot = state.automation.snapshot();
+            ok(SchedulesAddResult {
+                schedule: snapshot.schedule_info(&schedule, next),
+            })
+        }
+        Method::SchedulesUpdate => {
+            let params: SchedulesUpdateParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            if !snapshot.schedules.contains_key(&params.schedule_id) {
+                return Err(schedule_not_found(&params.schedule_id));
+            }
+            let mut schedule = params.schedule;
+            if !schedule.id.is_empty() && schedule.id != params.schedule_id {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    "a schedule ID cannot be changed",
+                ));
+            }
+            schedule.id = params.schedule_id.clone();
+            let defaults = schedule_defaults(&snapshot);
+            validate_schedule(&schedule, &defaults).map_err(validation_error)?;
+            state.automation.update_schedules(|schedules| {
+                schedules.insert(schedule.id.clone(), schedule.clone());
+            });
+            if let Err(error) = state.automation.save_schedules().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            state.runtime.wake_scheduler();
+            let snapshot = state.automation.snapshot();
+            let next = schedule::next_occurrence(
+                &schedule,
+                schedule_context(&snapshot),
+                chrono::Utc::now(),
+                true,
+            )
+            .ok()
+            .flatten();
+            ok(SchedulesUpdateResult {
+                schedule: snapshot.schedule_info(&schedule, next),
+            })
+        }
+        Method::SchedulesRemove => {
+            let params: SchedulesRemoveParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            if !snapshot.schedules.contains_key(&params.schedule_id) {
+                return Err(schedule_not_found(&params.schedule_id));
+            }
+            let used_by = snapshot.used_by_schedule(&params.schedule_id);
+            if !used_by.is_empty() {
+                return Err(ApiError::new(
+                    ErrorCode::ScheduleInUse,
+                    format!("schedule '{}' is used by tasks", params.schedule_id),
+                )
+                .with_details(json!({
+                    "scheduleId": params.schedule_id,
+                    "usedBy": used_by,
+                })));
+            }
+            state.automation.update_schedules(|schedules| {
+                schedules.remove(&params.schedule_id);
+            });
+            if let Err(error) = state.automation.save_schedules().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            state.runtime.wake_scheduler();
+            ok(Empty::default())
+        }
+        Method::SchedulesPreview => {
+            let params: SchedulesPreviewParams = parse_params(method, params)?;
+            let snapshot = state.automation.snapshot();
+            let defaults = schedule_defaults(&snapshot);
+            validate_schedule(&params.schedule, &defaults).map_err(validation_error)?;
+            let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+            let occurrences = schedule::preview(
+                &params.schedule,
+                schedule_context(&snapshot),
+                chrono::Utc::now(),
+                limit,
+                true,
+            )
+            .map_err(validation_error)?;
+            ok(SchedulesPreviewResult { occurrences })
+        }
+        Method::CommandsList => {
+            let snapshot = state.automation.snapshot();
+            let commands = snapshot
+                .commands
+                .values()
+                .map(|command| snapshot.command_info(command))
+                .collect();
+            ok(CommandsListResult { commands })
+        }
+        Method::CommandsGet => {
+            let params: CommandsGetParams = parse_params(method, params)?;
+            let snapshot = state.automation.snapshot();
+            let Some(command) = snapshot.commands.get(&params.command_id) else {
+                return Err(command_not_found(&params.command_id));
+            };
+            ok(CommandsGetResult {
+                command: snapshot.command_info(command),
+            })
+        }
+        Method::CommandsAdd => {
+            let params: CommandsAddParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            let mut command = params.command;
+            if command.id.is_empty() {
+                command.id = unique_id("command", &command.name, snapshot.commands.keys());
+            }
+            validate_task_id(&command.id).map_err(validation_error)?;
+            if snapshot.commands.contains_key(&command.id) {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    format!("command '{}' already exists", command.id),
+                ));
+            }
+            validate_command(&command).map_err(validation_error)?;
+            state.automation.update_commands(|commands| {
+                commands.insert(command.id.clone(), command.clone());
+            });
+            if let Err(error) = state.automation.save_commands().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            let snapshot = state.automation.snapshot();
+            ok(CommandsAddResult {
+                command: snapshot.command_info(&command),
+            })
+        }
+        Method::CommandsUpdate => {
+            let params: CommandsUpdateParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            if !snapshot.commands.contains_key(&params.command_id) {
+                return Err(command_not_found(&params.command_id));
+            }
+            let mut command = params.command;
+            if !command.id.is_empty() && command.id != params.command_id {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidParams,
+                    "a command ID cannot be changed",
+                ));
+            }
+            command.id = params.command_id.clone();
+            validate_command(&command).map_err(validation_error)?;
+            state.automation.update_commands(|commands| {
+                commands.insert(command.id.clone(), command.clone());
+            });
+            if let Err(error) = state.automation.save_commands().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            let snapshot = state.automation.snapshot();
+            ok(CommandsUpdateResult {
+                command: snapshot.command_info(&command),
+            })
+        }
+        Method::CommandsRemove => {
+            let params: CommandsRemoveParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            if !snapshot.commands.contains_key(&params.command_id) {
+                return Err(command_not_found(&params.command_id));
+            }
+            let used_by = snapshot.used_by_command(&params.command_id);
+            if !used_by.is_empty() {
+                return Err(ApiError::new(
+                    ErrorCode::CommandInUse,
+                    format!("command '{}' is used by tasks", params.command_id),
+                )
+                .with_details(json!({
+                    "commandId": params.command_id,
+                    "usedBy": used_by,
+                })));
+            }
+            state.automation.update_commands(|commands| {
+                commands.remove(&params.command_id);
+            });
+            if let Err(error) = state.automation.save_commands().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            ok(Empty::default())
         }
         Method::EventsSubscribe => {
             let params: EventsSubscribeParams = parse_params(method, params)?;
@@ -473,7 +938,156 @@ fn topic_from_api(topic: EventTopic) -> Topic {
         EventTopic::Messages => Topic::Messages,
         EventTopic::Discovery => Topic::Discovery,
         EventTopic::Services => Topic::Services,
+        EventTopic::Tasks => Topic::Tasks,
     }
+}
+
+fn tasks_using_service(state: &AppState, reference: &ServiceRef, key: &ServiceKey) -> Vec<String> {
+    let snapshot = state.automation.snapshot();
+    snapshot
+        .tasks
+        .values()
+        .filter(|task| {
+            task.triggers.iter().any(|trigger| match trigger {
+                hodeco_contract::domain::TaskTrigger::Message(trigger) => trigger
+                    .services
+                    .iter()
+                    .any(|service| service_reference_matches(service, reference, key)),
+                _ => false,
+            }) || task.actions.iter().any(|action| match &action.kind {
+                hodeco_contract::domain::ActionKind::Message(action) => {
+                    service_reference_matches(&action.message.service, reference, key)
+                }
+                hodeco_contract::domain::ActionKind::Command(_) => false,
+            })
+        })
+        .map(|task| task.id.clone())
+        .collect()
+}
+
+fn service_reference_matches(
+    service: &ServiceRef,
+    reference: &ServiceRef,
+    key: &ServiceKey,
+) -> bool {
+    match service {
+        ServiceRef::Alias { alias } => match reference {
+            ServiceRef::Alias { alias: reference } => alias == reference,
+            ServiceRef::Key {
+                protocol,
+                transport,
+                entry,
+            } => protocol == &key.protocol && transport == &key.transport && entry == &key.entry,
+        },
+        ServiceRef::Key {
+            protocol,
+            transport,
+            entry,
+        } => protocol == &key.protocol && transport == &key.transport && entry == &key.entry,
+    }
+}
+
+fn service_refs(state: &AppState) -> BTreeSet<ServiceRef> {
+    let mut refs = BTreeSet::new();
+    for service in state.services_store.snapshot() {
+        refs.insert(ServiceRef::Key {
+            protocol: service.protocol,
+            transport: service.transport,
+            entry: service.entry,
+        });
+        if let Some(alias) = service.alias {
+            refs.insert(ServiceRef::Alias { alias });
+        }
+    }
+    refs
+}
+
+fn schedule_defaults(snapshot: &crate::automation::AutomationSnapshot) -> SchedulesFile {
+    SchedulesFile {
+        location: snapshot.location,
+        timezone: snapshot.timezone.clone(),
+        schedules: Vec::new(),
+    }
+}
+
+fn schedule_context(snapshot: &crate::automation::AutomationSnapshot) -> ScheduleContext {
+    ScheduleContext {
+        default_location: snapshot.location,
+        default_timezone: snapshot
+            .timezone
+            .as_deref()
+            .and_then(|timezone| timezone.parse().ok()),
+    }
+}
+
+fn unique_id<'a>(prefix: &str, name: &str, existing: impl Iterator<Item = &'a String>) -> String {
+    let existing: BTreeSet<&str> = existing.map(String::as_str).collect();
+    let base = id_from_name(prefix, name);
+    if !existing.contains(base.as_str()) {
+        return base;
+    }
+    loop {
+        let candidate = generated_id(prefix);
+        if !existing.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+}
+
+fn validation_error(message: String) -> ApiError {
+    let errors: Vec<String> = message.split("; ").map(str::to_string).collect();
+    ApiError::new(ErrorCode::ConfigInvalid, message.clone()).with_details(json!({"errors": errors}))
+}
+
+fn task_not_found(task_id: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::TaskNotFound,
+        format!("task '{task_id}' not found"),
+    )
+    .with_details(json!({"taskId": task_id}))
+}
+
+fn schedule_not_found(schedule_id: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::ScheduleNotFound,
+        format!("schedule '{schedule_id}' not found"),
+    )
+    .with_details(json!({"scheduleId": schedule_id}))
+}
+
+fn command_not_found(command_id: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::CommandNotFound,
+        format!("command '{command_id}' not found"),
+    )
+    .with_details(json!({"commandId": command_id}))
+}
+
+fn fire_error(error: FireError) -> ApiError {
+    let code = match error {
+        FireError::TaskNotFound => ErrorCode::TaskNotFound,
+        FireError::TaskDisabled => ErrorCode::TaskDisabled,
+        FireError::TaskBusy => ErrorCode::TaskBusy,
+        FireError::TaskLimitExceeded => ErrorCode::TaskLimitExceeded,
+        FireError::TriggerNotFound => ErrorCode::TriggerNotFound,
+        FireError::PayloadTooLarge => ErrorCode::PayloadTooLarge,
+    };
+    ApiError::new(code, error.reason())
+}
+
+fn history_error(error: crate::automation::history::HistoryError) -> ApiError {
+    ApiError::new(
+        ErrorCode::InternalError,
+        format!("task history operation failed: {error}"),
+    )
+}
+
+fn catalog_write_error(error: ConfigError) -> ApiError {
+    warn!(error = %error, "failed to write an automation catalog");
+    ApiError::new(
+        ErrorCode::ConfigWriteFailed,
+        format!("failed to write the catalog: {error}"),
+    )
 }
 
 fn service_error(error: ServiceError) -> ApiError {

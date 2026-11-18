@@ -1037,7 +1037,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 match events.recv().await.unwrap() {
-                    StoreEvent::New(_) | StoreEvent::StateChanged(_) => break,
+                    StoreEvent::New { .. } | StoreEvent::StateChanged { .. } => break,
                     StoreEvent::Dropped { .. } => {}
                 }
             }

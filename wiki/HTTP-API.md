@@ -57,6 +57,12 @@ The method names live in `hodeco-contract`:
 - Services: `services.list`, `services.add`, `services.remove`,
   `services.alias`, `services.status`, `services.params`, `services.send`
 - Messages: `messages.get`, `messages.list`
+- Tasks: `tasks.list`, `tasks.get`, `tasks.add`, `tasks.update`,
+  `tasks.remove`, `tasks.fire`, `tasks.history`, `tasks.purgeHistory`
+- Schedules: `schedules.list`, `schedules.get`, `schedules.add`,
+  `schedules.update`, `schedules.remove`, `schedules.preview`
+- Commands: `commands.list`, `commands.get`, `commands.add`,
+  `commands.update`, `commands.remove`
 - Events: `events.subscribe`, `events.unsubscribe`
 
 `server.info` returns the crate version (shown as `version`), the independent
@@ -65,6 +71,13 @@ The method names live in `hodeco-contract`:
 `messages.list` is the workhorse: timestamp-bounded paging, metadata and ID
 filters, and protocol-neutral masked `PayloadExpr` trees evaluated by the
 gateway, not the browser. `messages.get` fetches one message by ID.
+
+Task automation is exposed through the same envelope. HTTP hooks are the one
+non-RPC endpoint: `GET|POST /api/hooks/{task}` starts the task's HTTP trigger and
+returns `202` with a `runId`. Send the optional shared secret in
+`X-Hodeco-Secret`. `401` means a bad secret, `409` means disabled or busy, `413`
+means the payload is too large, and `429` means a rate or concurrency limit.
+See [Tasks](Tasks) and [Schedules](Schedules).
 
 `services.send` takes a service reference, a base64 `payload`, and an optional
 `ttl` duration such as `"500 ms"` or `"10 s"`. Omit `ttl` to inherit the

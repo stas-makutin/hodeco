@@ -335,7 +335,7 @@ jobs:
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
           Copy-Item "target/$env:TARGET/release/hodeco.exe" "$stage/hodeco.exe"
           Copy-Item "hodeco-ui/dist/*" "$stage/site" -Recurse -Force
-          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-LICENSES.md $stage
+          Copy-Item README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-LICENSES.md $stage
           Copy-Item "hodeco-ui/THIRD-PARTY-LICENSES.md" `
             "$stage/THIRD-PARTY-LICENSES-UI.md"
           Compress-Archive -Path $stage `
@@ -352,7 +352,7 @@ jobs:
           mkdir -p "$stage/site" artifacts
           install -m 0755 "target/${TARGET}/release/hodeco" "$stage/hodeco"
           cp -a hodeco-ui/dist/. "$stage/site/"
-          cp README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md "$stage/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md "$stage/"
           cp hodeco-ui/THIRD-PARTY-LICENSES.md "$stage/THIRD-PARTY-LICENSES-UI.md"
           cp packaging/portable-config.yaml "$stage/config.yaml"
           find "$stage" -type d -exec chmod 0755 {} +
@@ -379,7 +379,7 @@ jobs:
             pkgroot/usr/share/doc/hodeco
           install -m 0755 "target/${TARGET}/release/hodeco" pkgroot/usr/bin/hodeco
           cp -a hodeco-ui/dist/. pkgroot/usr/share/hodeco/site/
-          cp README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md \
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md \
             pkgroot/usr/share/doc/hodeco/
           cp hodeco-ui/THIRD-PARTY-LICENSES.md \
             pkgroot/usr/share/doc/hodeco/THIRD-PARTY-LICENSES-UI.md
