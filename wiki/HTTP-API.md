@@ -1,14 +1,15 @@
 # HTTP API
 
 The API is deliberately small: one RPC endpoint, one WebSocket, one health
-check, and the static UI. Everything the browser does goes through the same
-routes available to your own scripts.
+check, task hooks, and the static UI. Everything the browser does goes through
+the same routes available to your own scripts.
 
 | Route | Purpose |
 | --- | --- |
 | `POST /api/rpc` | JSON-RPC-style request/response. |
 | `GET /api/ws` | WebSocket for RPC calls and live notifications. |
 | `GET /api/health` | Health check. |
+| `GET/POST /api/hooks/{task}` | Starts a task's HTTP trigger. |
 | `GET /*` | Static frontend assets. |
 
 RPC requests use `application/json`. The request body limit is 512 KiB and is
@@ -33,7 +34,7 @@ A successful response looks like:
 {
   "id": "1",
   "result": {
-    "version": "0.1.0",
+    "version": "0.2.0",
     "protocolVersion": "1.0",
     "startedAt": "2026-01-01T12:00:00Z"
   }
@@ -57,10 +58,12 @@ The method names live in `hodeco-contract`:
 - Services: `services.list`, `services.add`, `services.remove`,
   `services.alias`, `services.status`, `services.params`, `services.send`
 - Messages: `messages.get`, `messages.list`
-- Tasks: `tasks.list`, `tasks.get`, `tasks.add`, `tasks.update`,
-  `tasks.remove`, `tasks.fire`, `tasks.history`, `tasks.purgeHistory`
+- Tasks: `tasks.list`, `tasks.get`, `tasks.getRun`, `tasks.add`,
+  `tasks.update`, `tasks.remove`, `tasks.fire`, `tasks.cancelRun`,
+  `tasks.runFeed`, `tasks.history`, `tasks.purgeHistory`
 - Schedules: `schedules.list`, `schedules.get`, `schedules.add`,
-  `schedules.update`, `schedules.remove`, `schedules.preview`
+  `schedules.update`, `schedules.remove`, `schedules.preview`,
+  `schedules.setDefaults`, `schedules.solarPreview`
 - Commands: `commands.list`, `commands.get`, `commands.add`,
   `commands.update`, `commands.remove`
 - Events: `events.subscribe`, `events.unsubscribe`
@@ -78,6 +81,14 @@ returns `202` with a `runId`. Send the optional shared secret in
 `X-Hodeco-Secret`. `401` means a bad secret, `409` means disabled or busy, `413`
 means the payload is too large, and `429` means a rate or concurrency limit.
 See [Tasks](Tasks) and [Schedules](Schedules).
+
+`tasks.runFeed` reads the volatile in-memory recent-run buffer; `tasks.history`
+reads persistent per-task history files. Both use the `messages.list` paging shape:
+inclusive `from`, exclusive `until`, `order`, `limit`, and a complete `next`
+bound pair returned by the server. Neither request takes a `next` field. Both
+accept `taskIds`, `triggerIds`, `types`, and `outcomes` filters; the service
+applies them before paging. `tasks.getRun` checks the feed first and falls back
+to the task's history file.
 
 `services.send` takes a service reference, a base64 `payload`, and an optional
 `ttl` duration such as `"500 ms"` or `"10 s"`. Omit `ttl` to inherit the
@@ -97,12 +108,14 @@ Static assets are served from `httpServer.static.dir` with:
 - SPA fallback for extensionless navigation paths when `spaFallback: true`;
 - `404` for missing asset files such as `.wasm`, `.js`, and `.css`.
 
-JSON definition files are always served uncompressed so runtime edits are not
-masked by stale sidecars. Release builds include raw assets plus `.br` and `.gz`
-sidecars; clients that accept neither encoding still receive the raw file.
+JSON definition files are read from the raw file rather than a precompressed
+sidecar, so runtime edits are not masked by stale sidecars; the outer compression
+layer may still compress the response on the fly. Release builds include raw
+assets plus `.br` and `.gz` sidecars; clients that accept neither encoding still
+receive the raw file.
 
 ## Health and readiness
 
 `GET /api/health` reports healthy while the server is running. During shutdown,
-new RPC requests receive a `serverShuttingDown` error while existing work is
-drained.
+new RPC requests receive a `serverShuttingDown` error and HTTP hooks return
+`503` while existing work is drained.

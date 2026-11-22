@@ -1,8 +1,10 @@
-//! Calendar, solar, and loop schedule computation.
+//! Calendar, solar, and repeat schedule computation.
 //!
 //! All calculations are done in the schedule's effective IANA timezone. The
 //! scheduler stores only in-memory state; a restart recomputes the next future
 //! occurrence from the catalog.
+
+pub mod jitter;
 
 use chrono::{
     DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, Offset,
@@ -10,13 +12,14 @@ use chrono::{
 };
 use chrono_tz::Tz;
 use hodeco_contract::domain::{
-    AtSpec, DayMatch, DaySpec, Location, LoopRule, OccurrenceKind, ParsedAt, ScheduleDate,
-    ScheduleDefinition, ScheduleEvery, ScheduleOccurrence, ScheduleRule, SolarEvent,
+    AtSpec, DayMatch, DaySpec, Location, OccurrenceKind, ParsedAt, ScheduleDate,
+    ScheduleDefinition, ScheduleEvery, ScheduleOccurrence, SolarEvent,
 };
 
 const SEARCH_YEARS: i32 = 5;
+const MAX_SEARCH_YEARS: i32 = 100;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScheduleContext {
     pub default_location: Option<Location>,
     pub default_timezone: Option<Tz>,
@@ -47,9 +50,10 @@ pub fn system_timezone() -> Result<Tz, String> {
         return Ok(tz);
     }
     let offset = Local::now().offset().local_minus_utc();
+    let now = Utc::now().naive_utc();
     for candidate in chrono_tz::TZ_VARIANTS {
         if candidate
-            .offset_from_utc_datetime(&Utc::now().naive_utc())
+            .offset_from_utc_datetime(&now)
             .fix()
             .local_minus_utc()
             == offset
@@ -62,17 +66,18 @@ pub fn system_timezone() -> Result<Tz, String> {
 
 /// Returns the next occurrence strictly after `after` unless `inclusive`.
 ///
-/// A loop can still be active when the caller asks for the next occurrence.
-/// The stateless form looks back over the maximum loop span so it can return a
-/// loop attempt that follows the last base occurrence.
+/// A repeat chain can still be active when the caller asks for the next
+/// occurrence.
+/// The stateless form looks back over the repeat span and the previous base
+/// occurrence so it can return a repeat that follows that base.
 pub fn next_occurrence(
     schedule: &ScheduleDefinition,
     context: ScheduleContext,
     after: DateTime<Utc>,
     inclusive: bool,
 ) -> Result<Option<ScheduleOccurrence>, String> {
-    let lookback = loop_lookback(schedule);
-    let start = after - lookback;
+    let start = cursor_start(schedule, context, after);
+    let lookback = after - start;
     let mut cursor = ScheduleCursor::new(
         schedule.clone(),
         context,
@@ -90,36 +95,103 @@ pub fn next_occurrence(
     }
 }
 
-fn loop_lookback(schedule: &ScheduleDefinition) -> TimeDelta {
-    let Some(loop_rule) = &schedule.loop_rule else {
+fn cursor_start(
+    schedule: &ScheduleDefinition,
+    context: ScheduleContext,
+    after: DateTime<Utc>,
+) -> DateTime<Utc> {
+    if schedule.at.is_empty()
+        && schedule.every.is_none()
+        && !schedule.repeat_offsets().is_empty()
+        && let Some(from) = schedule.from
+        && let Ok(tz) = context.timezone(schedule)
+        && let Some(from) = instant_for_date(from, tz)
+        && from <= after
+    {
+        return from - TimeDelta::nanoseconds(1);
+    }
+    after - repeat_lookback(schedule)
+}
+
+fn repeat_lookback(schedule: &ScheduleDefinition) -> TimeDelta {
+    let offsets = schedule.repeat_offsets();
+    let Some(max_offset) = offsets.last() else {
         return TimeDelta::zero();
     };
-    let intervals = loop_rule.intervals();
-    if intervals.is_empty() {
-        return TimeDelta::zero();
-    }
-    let mut total = TimeDelta::zero();
-    match loop_rule.repeat {
-        Some(repeat) => {
-            for attempt in 0..repeat {
-                let interval = intervals[(attempt as usize).min(intervals.len().saturating_sub(1))];
-                total += TimeDelta::from_std(interval).unwrap_or(TimeDelta::zero());
-            }
-        }
-        None => {
-            total = TimeDelta::days(31);
-        }
-    }
-    if let Some(jitter) = loop_rule.jitter {
-        total += TimeDelta::from_std(jitter.as_std()).unwrap_or(TimeDelta::zero());
-    }
+    let mut total = base_lookback(schedule);
+    total += TimeDelta::from_std(*max_offset).unwrap_or(TimeDelta::zero());
     if let Some(jitter) = schedule.jitter {
         total += TimeDelta::from_std(jitter.as_std()).unwrap_or(TimeDelta::zero());
     }
-    total.min(TimeDelta::days(31))
+    total.min(TimeDelta::days(SEARCH_YEARS as i64 * 366 + 2))
 }
 
-/// Returns up to `limit` occurrences, including loop attempts and skipped
+fn base_lookback(schedule: &ScheduleDefinition) -> TimeDelta {
+    let cadence = if schedule.at.is_empty() {
+        match schedule.every {
+            Some(every) if every.uses_elapsed_time() => every
+                .duration()
+                .and_then(|duration| TimeDelta::from_std(duration).ok())
+                .unwrap_or(TimeDelta::zero()),
+            Some(every) => calendar_period(every),
+            None => TimeDelta::zero(),
+        }
+    } else {
+        match schedule.every {
+            Some(every) if !every.uses_elapsed_time() => calendar_period(every),
+            _ => TimeDelta::days(2),
+        }
+    };
+    cadence.max(filter_lookback(schedule))
+}
+
+fn filter_lookback(schedule: &ScheduleDefinition) -> TimeDelta {
+    if !schedule.years.is_empty() {
+        return TimeDelta::days(SEARCH_YEARS as i64 * 366 + 2);
+    }
+    if !schedule.months.is_empty() {
+        return TimeDelta::days(397);
+    }
+    if schedule.days.iter().any(|day| {
+        matches!(
+            day,
+            DaySpec::NthWeekday { nth, .. } if nth.unsigned_abs() == 5
+        )
+    }) {
+        return TimeDelta::days(366);
+    }
+    if schedule.days.iter().any(|day| {
+        matches!(
+            day,
+            DaySpec::MonthDay(_)
+                | DaySpec::LastDay
+                | DaySpec::LastWeekday
+                | DaySpec::NearestWeekday(_)
+                | DaySpec::NthWeekday { .. }
+        )
+    }) {
+        return TimeDelta::days(62);
+    }
+    if !schedule.days.is_empty() {
+        return TimeDelta::days(7);
+    }
+    TimeDelta::zero()
+}
+
+fn calendar_period(every: ScheduleEvery) -> TimeDelta {
+    match every {
+        ScheduleEvery::Days(days) => TimeDelta::days(i64::from(days)),
+        ScheduleEvery::Weeks(weeks) => TimeDelta::days(i64::from(weeks) * 7),
+        ScheduleEvery::Months(_) | ScheduleEvery::Years(_) => {
+            TimeDelta::days(SEARCH_YEARS as i64 * 366 + 2)
+        }
+        ScheduleEvery::Duration(duration) => {
+            TimeDelta::from_std(duration.as_std()).unwrap_or_else(|_| TimeDelta::zero())
+        }
+    }
+}
+
+/// Returns up to `limit` occurrences, including repeat attempts and skipped
 /// allow/deny candidates.
 pub fn preview(
     schedule: &ScheduleDefinition,
@@ -128,14 +200,8 @@ pub fn preview(
     limit: usize,
     include_skipped: bool,
 ) -> Result<Vec<ScheduleOccurrence>, String> {
-    let lookback = loop_lookback(schedule);
-    let mut cursor = ScheduleCursor::new(
-        schedule.clone(),
-        context,
-        after - lookback,
-        false,
-        include_skipped,
-    )?;
+    let start = cursor_start(schedule, context, after);
+    let mut cursor = ScheduleCursor::new(schedule.clone(), context, start, false, include_skipped)?;
     let mut occurrences = Vec::new();
     while occurrences.len() < limit {
         match cursor.advance()? {
@@ -158,10 +224,12 @@ pub struct ScheduleCursor {
     after: DateTime<Utc>,
     inclusive: bool,
     include_skipped: bool,
-    /// Loop state after a base occurrence.
-    loop_state: Option<LoopState>,
+    /// Repeat state after a base occurrence.
+    repeat_state: Option<RepeatState>,
     /// Next base occurrence to consider.
     next_base: Option<DateTime<Utc>>,
+    /// True when the remaining calendar has no future base occurrence.
+    next_base_exhausted: bool,
     /// Exclusive lower bound for the next base occurrence.
     base_cursor: DateTime<Utc>,
     /// Cursor for date-based iteration.
@@ -171,11 +239,10 @@ pub struct ScheduleCursor {
 }
 
 #[derive(Debug, Clone)]
-struct LoopState {
-    attempt: u32,
-    next: DateTime<Utc>,
-    intervals: Vec<Duration>,
-    repeat: Option<u32>,
+struct RepeatState {
+    base: DateTime<Utc>,
+    next_attempt: usize,
+    offsets: Vec<Duration>,
 }
 
 impl ScheduleCursor {
@@ -214,8 +281,9 @@ impl ScheduleCursor {
             after,
             inclusive,
             include_skipped,
-            loop_state: None,
+            repeat_state: None,
             next_base: None,
+            next_base_exhausted: false,
             base_cursor: after,
             date_cursor,
             iterations: 0,
@@ -227,57 +295,52 @@ impl ScheduleCursor {
     }
 
     pub fn advance(&mut self) -> Result<Option<ScheduleOccurrence>, String> {
-        if self.schedule.on.is_none() {
-            return self.next_one_shot();
-        }
+        // Each call is a fresh search. Keeping the counter across calls would
+        // eventually make a long-lived cursor fail permanently.
+        self.iterations = 0;
         loop {
             self.iterations += 1;
             if self.iterations > 2_000_000 {
                 return Err("schedule search exceeded the iteration limit".to_string());
             }
 
-            // Loop attempts run between base occurrences. A base occurrence
-            // replaces the active loop, so peek at the next base first.
-            if self.loop_state.is_some() {
-                let Some(mut loop_state) = self.loop_state.take() else {
-                    unreachable!()
-                };
-                let attempt = loop_state.attempt;
-                let next = loop_state.next;
-                let can_loop =
-                    self.schedule.until.is_none_or(|until| {
+            // Repeat attempts run between base occurrences. A repeat offset
+            // that lands on or after the next base is skipped, and the base
+            // then replaces the remaining repeat list.
+            if let Some(mut repeat_state) = self.repeat_state.take() {
+                let attempt = repeat_state.next_attempt;
+                if let Some(offset) = repeat_state.offsets.get(attempt).copied() {
+                    let next = repeat_state.base + offset;
+                    let can_repeat = self.schedule.until.is_none_or(|until| {
                         self.until_instant(until).is_none_or(|until| next < until)
-                    }) && loop_state.repeat.is_none_or(|repeat| attempt < repeat);
-                if can_loop {
-                    if self.next_base.is_none() {
-                        self.next_base = self.compute_next_base()?;
-                    }
-                    if self.next_base.is_some_and(|base| base <= next) {
-                        // The next base occurrence replaces this loop.
-                    } else {
-                        let interval = loop_state.intervals
-                            [(attempt as usize).min(loop_state.intervals.len().saturating_sub(1))]
-                        .max(Duration::seconds(1));
-                        loop_state.attempt += 1;
-                        loop_state.next = next + interval;
-                        self.loop_state = Some(loop_state);
-                        if (next > self.after || (self.inclusive && next == self.after))
-                            && let Some(occurrence) = self.filter_occurrence(
-                                next,
-                                OccurrenceKind::Loop,
-                                None,
-                                Some(attempt),
-                            )?
-                        {
-                            return Ok(Some(occurrence));
+                    });
+                    if can_repeat {
+                        if self.next_base.is_none() && !self.next_base_exhausted {
+                            self.next_base = self.compute_next_base()?;
+                            self.next_base_exhausted = self.next_base.is_none();
                         }
-                        continue;
+                        if self.next_base.is_none_or(|base| base > next) {
+                            repeat_state.next_attempt += 1;
+                            self.repeat_state = Some(repeat_state);
+                            if (next > self.after || (self.inclusive && next == self.after))
+                                && let Some(occurrence) = self.filter_occurrence(
+                                    next,
+                                    OccurrenceKind::Repeat,
+                                    None,
+                                    Some(attempt as u32),
+                                )?
+                            {
+                                return Ok(Some(occurrence));
+                            }
+                            continue;
+                        }
                     }
                 }
             }
 
             let base = match self.next_base.take() {
                 Some(base) => base,
+                None if self.next_base_exhausted => return Ok(None),
                 None => {
                     let Some(base) = self.compute_next_base()? else {
                         return Ok(None);
@@ -285,18 +348,17 @@ impl ScheduleCursor {
                     base
                 }
             };
+            self.next_base = None;
 
-            // The base occurrence replaces any older loop.
-            let loop_rule = self.schedule.loop_rule.clone();
-            if let Some(loop_rule) = loop_rule
-                && !loop_rule.intervals().is_empty()
-            {
-                self.start_loop(base, &loop_rule);
+            // The base occurrence replaces any older repeat chain.
+            let repeat_offsets = self.schedule.repeat_offsets();
+            if !repeat_offsets.is_empty() {
+                self.start_repeat(base, &repeat_offsets);
             }
 
             self.base_cursor = base + TimeDelta::nanoseconds(1);
             let Some(occurrence) =
-                self.filter_occurrence(base, OccurrenceKind::Scheduled, None, Some(0))?
+                self.filter_occurrence(base, OccurrenceKind::Scheduled, None, None)?
             else {
                 continue;
             };
@@ -304,52 +366,20 @@ impl ScheduleCursor {
         }
     }
 
-    fn next_one_shot(&mut self) -> Result<Option<ScheduleOccurrence>, String> {
-        let Some(from) = self.schedule.from else {
-            return Ok(None);
-        };
-        let Some(at) = self.date_instant(from)? else {
-            return Ok(None);
-        };
-        if at < self.after || (!self.inclusive && at == self.after) {
-            return Ok(None);
-        }
-        if self
-            .schedule
-            .until
-            .is_some_and(|until| self.until_instant(until).is_some_and(|until| at >= until))
-        {
-            return Ok(None);
-        }
-        Ok(Some(self.occurrence(
-            at,
-            OccurrenceKind::Scheduled,
-            false,
-            None,
-        )))
-    }
-
-    fn start_loop(&mut self, base: DateTime<Utc>, loop_rule: &LoopRule) {
-        let intervals: Vec<Duration> = loop_rule
-            .intervals()
-            .into_iter()
-            .map(|duration| Duration::from_std(duration).unwrap_or(Duration::seconds(1)))
+    fn start_repeat(&mut self, base: DateTime<Utc>, offsets: &[std::time::Duration]) {
+        self.next_base_exhausted = false;
+        let offsets: Vec<Duration> = offsets
+            .iter()
+            .map(|duration| Duration::from_std(*duration).unwrap_or(Duration::seconds(1)))
             .collect();
-        let first = intervals.first().copied().unwrap_or(Duration::seconds(1));
-        self.loop_state = Some(LoopState {
-            attempt: 0,
-            next: base + first,
-            intervals,
-            repeat: loop_rule.repeat,
+        self.repeat_state = Some(RepeatState {
+            base,
+            next_attempt: 0,
+            offsets,
         });
     }
 
     fn compute_next_base(&mut self) -> Result<Option<DateTime<Utc>>, String> {
-        let rule = self
-            .schedule
-            .on
-            .clone()
-            .ok_or_else(|| "schedule has no rule".to_string())?;
         let from = match self.schedule.from {
             Some(from) => self.date_instant(from)?,
             None => None,
@@ -359,11 +389,24 @@ impl ScheduleCursor {
             .until
             .and_then(|until| self.until_instant(until));
 
-        if let Some(every) = rule.every
+        if self.schedule.at.is_empty() && self.schedule.every.is_none() {
+            let Some(at) = from else {
+                return Ok(None);
+            };
+            if at < self.base_after() || (!self.inclusive && at == self.base_after()) {
+                return Ok(None);
+            }
+            if until.is_some_and(|until| at >= until) {
+                return Ok(None);
+            }
+            return Ok(Some(at));
+        }
+
+        if let Some(every) = self.schedule.every
             && let Some(duration) = every.duration()
-            && every.is_sub_day()
+            && every.uses_elapsed_time()
         {
-            return self.compute_interval(&rule, from, until, duration);
+            return self.compute_interval(from, until, duration);
         }
 
         let anchor_date = match self.schedule.from {
@@ -373,9 +416,19 @@ impl ScheduleCursor {
         };
         let start_date = self.date_cursor.max(anchor_date);
         let mut date = start_date;
-        let anchor = anchor_date;
 
-        for _ in 0..(SEARCH_YEARS * 366 + 2) {
+        // A schedule with an old `from` date must still find the next
+        // occurrence. Search from the cursor, not from the original anchor, and
+        // extend the horizon to requested `years` values.
+        let mut horizon = start_date + Duration::days(i64::from(SEARCH_YEARS) * 366 + 1);
+        if let Some(year) = self.schedule.years.iter().copied().max()
+            && let Some(year_end) = NaiveDate::from_ymd_opt(year, 12, 31)
+        {
+            horizon = horizon.max(year_end);
+        }
+        horizon = horizon.min(start_date + Duration::days(i64::from(MAX_SEARCH_YEARS) * 366 + 1));
+
+        for _ in 0..=(horizon - start_date).num_days() {
             if let Some(until) = until
                 && self
                     .tz
@@ -385,8 +438,8 @@ impl ScheduleCursor {
             {
                 return Ok(None);
             }
-            if self.date_matches(&rule, date)? {
-                let candidates = self.candidates_for_date(&rule, date, from, until)?;
+            if self.date_matches(date)? {
+                let candidates = self.candidates_for_date(date, from, until)?;
                 for candidate in candidates {
                     if candidate < self.base_cursor
                         || (!self.inclusive && candidate == self.base_cursor)
@@ -402,7 +455,7 @@ impl ScheduleCursor {
             }
             date += Duration::days(1);
             self.date_cursor = date;
-            if date > anchor + Duration::days(SEARCH_YEARS as i64 * 366) {
+            if date > horizon {
                 break;
             }
         }
@@ -411,14 +464,12 @@ impl ScheduleCursor {
 
     fn compute_interval(
         &mut self,
-        rule: &ScheduleRule,
         from: Option<DateTime<Utc>>,
         until: Option<DateTime<Utc>>,
         every: std::time::Duration,
     ) -> Result<Option<DateTime<Utc>>, String> {
-        let _ = rule;
         let Some(from) = from else {
-            return Err("on.every for seconds, minutes, or hours requires from".to_string());
+            return Err("every for seconds, minutes, or hours requires from".to_string());
         };
         let interval =
             TimeDelta::from_std(every).map_err(|_| "interval is too large".to_string())?;
@@ -452,19 +503,17 @@ impl ScheduleCursor {
             }
             step += 1;
         }
-        let _ = rule;
         Ok(None)
     }
 
     fn candidates_for_date(
         &self,
-        rule: &ScheduleRule,
         date: NaiveDate,
         from: Option<DateTime<Utc>>,
         until: Option<DateTime<Utc>>,
     ) -> Result<Vec<DateTime<Utc>>, String> {
         let mut candidates = Vec::new();
-        let at_entries: Vec<&AtSpec> = rule.at.as_slice().iter().collect();
+        let at_entries: Vec<&AtSpec> = self.schedule.at.as_slice().iter().collect();
         if at_entries.is_empty() {
             let time = self.default_time();
             if let Some(candidate) = self.local_instant(date, time) {
@@ -512,16 +561,17 @@ impl ScheduleCursor {
         Ok(candidates)
     }
 
-    fn date_matches(&self, rule: &ScheduleRule, date: NaiveDate) -> Result<bool, String> {
-        if !rule.months.is_empty()
-            && !rule
+    fn date_matches(&self, date: NaiveDate) -> Result<bool, String> {
+        if !self.schedule.months.is_empty()
+            && !self
+                .schedule
                 .months
                 .iter()
                 .any(|month| month.number() == date.month())
         {
             return Ok(false);
         }
-        if !rule.years.is_empty() && !rule.years.contains(&date.year()) {
+        if !self.schedule.years.is_empty() && !self.schedule.years.contains(&date.year()) {
             return Ok(false);
         }
         if self
@@ -532,20 +582,20 @@ impl ScheduleCursor {
         {
             return Ok(false);
         }
-        if !rule.days.is_empty() {
+        if !self.schedule.days.is_empty() {
             let matches = |day: &DaySpec| day_matches(day, date);
-            let matched = if rule.day_match == DayMatch::All {
-                rule.days.iter().all(matches)
+            let matched = if self.schedule.day_match == DayMatch::All {
+                self.schedule.days.iter().all(matches)
             } else {
-                rule.days.iter().any(matches)
+                self.schedule.days.iter().any(matches)
             };
             if !matched {
                 return Ok(false);
             }
         }
 
-        if let Some(every) = rule.every
-            && !every.is_sub_day()
+        if let Some(every) = self.schedule.every
+            && !every.uses_elapsed_time()
         {
             let anchor = match self.schedule.from {
                 Some(ScheduleDate::Date(date)) => date,
@@ -568,7 +618,7 @@ impl ScheduleCursor {
             && let Some(from) = self.date_instant(from)?
             && base < from
         {
-            return self.skipped_or_none(base, kind, "before from");
+            return self.skipped_or_none(base, kind, "before from", attempt);
         }
         if let Some(until) = self.schedule.until
             && let Some(until) = self.until_instant(until)
@@ -579,6 +629,14 @@ impl ScheduleCursor {
 
         let local = base.with_timezone(&self.tz);
         let local_time = local.time();
+        if self
+            .schedule
+            .except
+            .iter()
+            .any(|range| range.contains(local.date_naive()))
+        {
+            return Ok(None);
+        }
         let denied = self
             .schedule
             .deny
@@ -598,32 +656,24 @@ impl ScheduleCursor {
                     "outside allow window".to_string()
                 }
             });
-            return self.skipped_or_none(base, kind, &reason);
+            return self.skipped_or_none(base, kind, &reason, attempt);
         }
 
-        let jitter = match kind {
-            OccurrenceKind::Scheduled => self.schedule.jitter,
-            OccurrenceKind::Loop => self
-                .schedule
-                .loop_rule
-                .as_ref()
-                .and_then(|rule| rule.jitter),
-        };
-        let at = if let Some(jitter) = jitter {
-            let offset = jitter_offset(
-                &self.schedule.id,
+        let at = if let Some(jitter) = self.schedule.jitter {
+            let offset = crate::jitter::offset(
+                self.schedule.id.as_bytes(),
                 base.timestamp_nanos_opt().unwrap_or(0),
                 attempt.unwrap_or(0),
                 jitter.as_std(),
             );
-            clamp_jitter(base + offset, &self.schedule, self.tz)?
+            clamp_jitter(base + offset, &self.schedule, self.tz)?.max(self.after)
         } else {
             base
         };
         if at < self.after || (!self.inclusive && at == self.after) {
             return Ok(None);
         }
-        Ok(Some(self.occurrence(at, kind, false, reason)))
+        Ok(Some(self.occurrence(at, kind, false, reason, attempt)))
     }
 
     fn skipped_or_none(
@@ -631,6 +681,7 @@ impl ScheduleCursor {
         at: DateTime<Utc>,
         kind: OccurrenceKind,
         reason: &str,
+        attempt: Option<u32>,
     ) -> Result<Option<ScheduleOccurrence>, String> {
         if self.include_skipped {
             Ok(Some(self.occurrence(
@@ -638,6 +689,7 @@ impl ScheduleCursor {
                 kind,
                 true,
                 Some(reason.to_string()),
+                attempt,
             )))
         } else {
             Ok(None)
@@ -650,6 +702,7 @@ impl ScheduleCursor {
         kind: OccurrenceKind,
         skipped: bool,
         reason: Option<String>,
+        attempt: Option<u32>,
     ) -> ScheduleOccurrence {
         ScheduleOccurrence {
             at,
@@ -657,6 +710,11 @@ impl ScheduleCursor {
                 .with_timezone(&self.tz)
                 .format("%Y-%m-%d %H:%M:%S %Z")
                 .to_string(),
+            repeat_index: if kind == OccurrenceKind::Repeat {
+                attempt.map(|attempt| attempt + 1)
+            } else {
+                None
+            },
             kind,
             skipped,
             reason,
@@ -740,7 +798,7 @@ fn day_matches(day: &DaySpec, date: NaiveDate) -> bool {
         DaySpec::LastDay => date
             .succ_opt()
             .is_none_or(|next| next.month() != date.month()),
-        DaySpec::LastWeekday => date.day() + 7 > days_in_month(date.year(), date.month()),
+        DaySpec::LastWeekday => last_weekday(date.year(), date.month()) == Some(date),
         DaySpec::NearestWeekday(day) => {
             nearest_weekday(date.year(), date.month(), *day).is_some_and(|nearest| nearest == date)
         }
@@ -761,14 +819,28 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     first_next.pred_opt().unwrap().day()
 }
 
-fn nearest_weekday(year: i32, month: u32, day: u8) -> Option<NaiveDate> {
-    let day = day.min(days_in_month(year, month) as u8);
-    let date = NaiveDate::from_ymd_opt(year, month, day as u32)?;
-    match date.weekday() {
-        Weekday::Sat => date.pred_opt(),
-        Weekday::Sun => date.succ_opt(),
-        _ => Some(date),
+fn last_weekday(year: i32, month: u32) -> Option<NaiveDate> {
+    let mut date = NaiveDate::from_ymd_opt(year, month, days_in_month(year, month))?;
+    while matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+        date = date.pred_opt()?;
     }
+    Some(date)
+}
+
+fn nearest_weekday(year: i32, month: u32, day: u8) -> Option<NaiveDate> {
+    let last_day = days_in_month(year, month);
+    let day = day.min(last_day as u8);
+    let date = NaiveDate::from_ymd_opt(year, month, day as u32)?;
+    let candidate = match date.weekday() {
+        // Keep the nearest weekday inside the requested month. A weekend first
+        // or last day moves inward rather than into the adjacent month.
+        Weekday::Sat if day == 1 => date.succ_opt()?.succ_opt()?,
+        Weekday::Sat => date.pred_opt()?,
+        Weekday::Sun if u32::from(day) == last_day => date.pred_opt()?.pred_opt()?,
+        Weekday::Sun => date.succ_opt()?,
+        _ => date,
+    };
+    (candidate.year() == year && candidate.month() == month).then_some(candidate)
 }
 
 fn nth_weekday(year: i32, month: u32, nth: i8, weekday: Weekday) -> Option<NaiveDate> {
@@ -816,34 +888,6 @@ fn instant_for_date(value: ScheduleDate, tz: Tz) -> Option<DateTime<Utc>> {
             .earliest()
             .map(|value| value.with_timezone(&Utc)),
     }
-}
-
-fn jitter_offset(
-    schedule_id: &str,
-    base_nanos: i64,
-    attempt: u32,
-    jitter: std::time::Duration,
-) -> TimeDelta {
-    let millis = jitter.as_millis() as i64;
-    if millis <= 0 {
-        return TimeDelta::zero();
-    }
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in schedule_id.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    for byte in base_nanos.to_le_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    for byte in attempt.to_le_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    let span = (millis * 2 + 1) as u64;
-    let offset = (hash % span) as i64 - millis;
-    TimeDelta::milliseconds(offset)
 }
 
 /// NOAA-style solar event calculation.
@@ -951,9 +995,7 @@ fn julian_to_utc(julian: f64) -> Result<DateTime<Utc>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hodeco_contract::domain::{
-        AtSpec, DateRange, OneOrMany, ScheduleEvery, ScheduleRule, TimeWindow,
-    };
+    use hodeco_contract::domain::{AtSpec, DateRange, OneOrMany, ScheduleEvery, TimeWindow};
     use hodeco_contract::utils::HumanDuration;
 
     fn schedule(at: &str) -> ScheduleDefinition {
@@ -961,10 +1003,7 @@ mod tests {
             id: "test".to_string(),
             name: "Test".to_string(),
             timezone: Some("UTC".to_string()),
-            on: Some(ScheduleRule {
-                at: OneOrMany::One(AtSpec::Text(at.to_string())),
-                ..ScheduleRule::default()
-            }),
+            at: OneOrMany::One(AtSpec::Text(at.to_string())),
             ..ScheduleDefinition::default()
         }
     }
@@ -988,7 +1027,7 @@ mod tests {
     #[test]
     fn skips_denied_windows_and_exceptions() {
         let mut schedule = schedule("08:00");
-        schedule.on.as_mut().unwrap().at = OneOrMany::Many(vec![
+        schedule.at = OneOrMany::Many(vec![
             AtSpec::Text("08:00".to_string()),
             AtSpec::Text("11:00".to_string()),
         ]);
@@ -999,7 +1038,7 @@ mod tests {
         assert_eq!(next.at, at("2026-11-17T11:00:00Z"));
 
         schedule.deny = OneOrMany::Many(Vec::new());
-        schedule.on.as_mut().unwrap().at = OneOrMany::One(AtSpec::Text("09:00".to_string()));
+        schedule.at = OneOrMany::One(AtSpec::Text("09:00".to_string()));
         schedule.except = OneOrMany::One(DateRange::parse("2026-11-17").unwrap());
         let next = next_occurrence(&schedule, context(), at("2026-11-17T08:00:00Z"), false)
             .unwrap()
@@ -1008,10 +1047,23 @@ mod tests {
     }
 
     #[test]
+    fn exceptions_skip_elapsed_interval_occurrences() {
+        let mut schedule = schedule("09:00");
+        schedule.from = Some(ScheduleDate::parse("2026-11-19").unwrap());
+        schedule.at = OneOrMany::Many(Vec::new());
+        schedule.every = Some(ScheduleEvery::parse("20m").unwrap());
+        schedule.except = OneOrMany::One(DateRange::parse("2026-11-19..2026-11-20").unwrap());
+        let next = next_occurrence(&schedule, context(), at("2026-11-19T00:00:00Z"), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.at, at("2026-11-21T00:00:00Z"));
+    }
+
+    #[test]
     fn computes_calendar_intervals() {
         let mut schedule = schedule("09:00");
         schedule.from = Some(ScheduleDate::parse("2026-11-17").unwrap());
-        schedule.on.as_mut().unwrap().every = Some(ScheduleEvery::Days(3));
+        schedule.every = Some(ScheduleEvery::Days(3));
         let next = next_occurrence(&schedule, context(), at("2026-11-18T00:00:00Z"), false)
             .unwrap()
             .unwrap();
@@ -1019,15 +1071,35 @@ mod tests {
     }
 
     #[test]
-    fn computes_loops_after_a_base_occurrence() {
+    fn computes_elapsed_intervals_longer_than_a_day() {
         let mut schedule = schedule("09:00");
-        schedule.loop_rule = Some(LoopRule {
-            every: OneOrMany::One(HumanDuration::from_std(std::time::Duration::from_secs(
-                30 * 60,
-            ))),
-            repeat: Some(2),
-            jitter: None,
-        });
+        schedule.from = Some(ScheduleDate::parse("2026-11-19").unwrap());
+        schedule.at = OneOrMany::Many(Vec::new());
+        schedule.every = Some(ScheduleEvery::parse("1800m").unwrap());
+        let mut cursor = ScheduleCursor::new(
+            schedule,
+            context(),
+            at("2026-11-18T23:00:00Z"),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            cursor.advance().unwrap().unwrap().at,
+            at("2026-11-19T00:00:00Z")
+        );
+        assert_eq!(
+            cursor.advance().unwrap().unwrap().at,
+            at("2026-11-20T06:00:00Z")
+        );
+    }
+
+    #[test]
+    fn computes_repeats_after_a_base_occurrence() {
+        let mut schedule = schedule("09:00");
+        schedule.repeat_at = OneOrMany::One(HumanDuration::from_std(
+            std::time::Duration::from_secs(30 * 60),
+        ));
         let next = next_occurrence(&schedule, context(), at("2026-11-17T08:00:00Z"), false)
             .unwrap()
             .unwrap();
@@ -1035,8 +1107,201 @@ mod tests {
         let next = next_occurrence(&schedule, context(), next.at, false)
             .unwrap()
             .unwrap();
-        assert_eq!(next.kind, OccurrenceKind::Loop);
+        assert_eq!(next.kind, OccurrenceKind::Repeat);
+        assert_eq!(next.repeat_index, Some(1));
         assert_eq!(next.at, at("2026-11-17T09:30:00Z"));
+        let next = next_occurrence(&schedule, context(), next.at, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Scheduled);
+        assert_eq!(next.at, at("2026-11-18T09:00:00Z"));
+    }
+
+    #[test]
+    fn repeats_follow_a_calendar_cadence() {
+        let mut schedule = schedule("09:00");
+        schedule.from = Some(ScheduleDate::parse("2026-11-17").unwrap());
+        schedule.every = Some(ScheduleEvery::Days(3));
+        schedule.repeat_at = OneOrMany::Many(vec![
+            HumanDuration::from_std(std::time::Duration::from_secs(30 * 60)),
+            HumanDuration::from_std(std::time::Duration::from_secs(60 * 60)),
+        ]);
+        let next = next_occurrence(&schedule, context(), at("2026-11-17T09:20:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Repeat);
+        assert_eq!(next.at, at("2026-11-17T09:30:00Z"));
+        let next = next_occurrence(&schedule, context(), next.at, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Repeat);
+        assert_eq!(next.repeat_index, Some(2));
+        assert_eq!(next.at, at("2026-11-17T10:00:00Z"));
+        let next = next_occurrence(&schedule, context(), next.at, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Scheduled);
+        assert_eq!(next.at, at("2026-11-20T09:00:00Z"));
+    }
+
+    #[test]
+    fn repeats_skip_when_the_next_base_comes_first() {
+        let mut schedule = schedule("09:00");
+        schedule.at = OneOrMany::Many(Vec::new());
+        schedule.from = Some(ScheduleDate::parse("2026-11-17T09:00:00Z").unwrap());
+        schedule.every = Some(ScheduleEvery::parse("1h").unwrap());
+        schedule.repeat_at = OneOrMany::Many(vec![
+            HumanDuration::from_std(std::time::Duration::from_secs(10 * 60)),
+            HumanDuration::from_std(std::time::Duration::from_secs(90 * 60)),
+        ]);
+        let next = next_occurrence(&schedule, context(), at("2026-11-17T09:05:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Repeat);
+        assert_eq!(next.at, at("2026-11-17T09:10:00Z"));
+        let next = next_occurrence(&schedule, context(), next.at, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Scheduled);
+        assert_eq!(next.at, at("2026-11-17T10:00:00Z"));
+    }
+
+    #[test]
+    fn repeats_between_interval_base_occurrences() {
+        let mut schedule = schedule("09:00");
+        schedule.at = OneOrMany::Many(Vec::new());
+        schedule.from = Some(ScheduleDate::parse("2026-11-17T09:00:00Z").unwrap());
+        schedule.every = Some(ScheduleEvery::parse("1h").unwrap());
+        schedule.repeat_at = OneOrMany::One(HumanDuration::from_std(
+            std::time::Duration::from_secs(10 * 60),
+        ));
+        let next = next_occurrence(&schedule, context(), at("2026-11-17T09:05:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Repeat);
+        assert_eq!(next.at, at("2026-11-17T09:10:00Z"));
+        let next = next_occurrence(&schedule, context(), next.at, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Scheduled);
+        assert_eq!(next.at, at("2026-11-17T10:00:00Z"));
+    }
+
+    #[test]
+    fn repeats_after_a_from_only_one_shot() {
+        let mut schedule = ScheduleDefinition {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            timezone: Some("UTC".to_string()),
+            from: Some(ScheduleDate::parse("2026-11-17T09:00:00Z").unwrap()),
+            repeat_at: OneOrMany::Many(vec![
+                HumanDuration::from_std(std::time::Duration::from_secs(30 * 60)),
+                HumanDuration::from_std(std::time::Duration::from_secs(60 * 60)),
+            ]),
+            ..ScheduleDefinition::default()
+        };
+        let next = next_occurrence(&schedule, context(), at("2026-11-17T09:30:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.kind, OccurrenceKind::Repeat);
+        assert_eq!(next.at, at("2026-11-17T10:00:00Z"));
+        schedule.repeat_at = OneOrMany::One(HumanDuration::from_std(
+            std::time::Duration::from_secs(30 * 60),
+        ));
+        assert!(
+            next_occurrence(&schedule, context(), at("2026-11-17T09:30:00Z"), false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn negative_nth_weekday_counts_from_the_end() {
+        use chrono::Weekday;
+        let mut schedule = schedule("09:00");
+        schedule.from = Some(ScheduleDate::parse("2026-11-01").unwrap());
+        schedule.days = vec![DaySpec::NthWeekday {
+            nth: -1,
+            weekday: Weekday::Mon,
+        }];
+        let next = next_occurrence(&schedule, context(), at("2026-11-01T00:00:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.at, at("2026-11-30T09:00:00Z"));
+
+        schedule.days = vec![DaySpec::NthWeekday {
+            nth: -2,
+            weekday: Weekday::Mon,
+        }];
+        let next = next_occurrence(&schedule, context(), at("2026-11-01T00:00:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.at, at("2026-11-23T09:00:00Z"));
+    }
+
+    #[test]
+    fn last_weekday_matches_only_the_final_weekday() {
+        let mut schedule = schedule("09:00");
+        schedule.from = Some(ScheduleDate::parse("2026-11-01").unwrap());
+        schedule.days = vec![DaySpec::LastWeekday];
+        let next = next_occurrence(&schedule, context(), at("2026-11-01T00:00:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.at, at("2026-11-30T09:00:00Z"));
+    }
+
+    #[test]
+    fn nearest_weekday_stays_inside_the_month() {
+        assert_eq!(
+            nearest_weekday(2026, 8, 1),
+            Some(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap())
+        );
+        assert_eq!(
+            nearest_weekday(2026, 5, 31),
+            Some(NaiveDate::from_ymd_opt(2026, 5, 29).unwrap())
+        );
+    }
+
+    #[test]
+    fn far_future_year_filter_is_reachable() {
+        let mut schedule = schedule("09:00");
+        schedule.from = Some(ScheduleDate::parse("2026-01-01").unwrap());
+        schedule.years = vec![2040];
+        let next = next_occurrence(&schedule, context(), at("2026-11-17T00:00:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.at, at("2040-01-01T09:00:00Z"));
+    }
+
+    #[test]
+    fn iteration_budget_resets_for_each_advance() {
+        let mut schedule = schedule("09:00");
+        schedule.from = Some(ScheduleDate::parse("2026-11-17").unwrap());
+        let mut cursor = ScheduleCursor::new(
+            schedule,
+            context(),
+            at("2026-11-17T00:00:00Z"),
+            false,
+            false,
+        )
+        .unwrap();
+        cursor.iterations = 2_000_000;
+        assert!(cursor.advance().unwrap().is_some());
+    }
+
+    #[test]
+    fn negative_nth_weekday_skips_months_without_a_match() {
+        use chrono::Weekday;
+        let mut schedule = schedule("09:00");
+        schedule.from = Some(ScheduleDate::parse("2026-02-01").unwrap());
+        schedule.days = vec![DaySpec::NthWeekday {
+            nth: -5,
+            weekday: Weekday::Mon,
+        }];
+        let next = next_occurrence(&schedule, context(), at("2026-02-01T00:00:00Z"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.at, at("2026-03-02T09:00:00Z"));
     }
 
     #[test]
@@ -1066,14 +1331,6 @@ mod tests {
             .unwrap()
             .is_none()
         );
-    }
-
-    #[test]
-    fn jitter_is_deterministic_and_bounded() {
-        let first = jitter_offset("test", 12345, 0, std::time::Duration::from_secs(10));
-        let second = jitter_offset("test", 12345, 0, std::time::Duration::from_secs(10));
-        assert_eq!(first, second);
-        assert!(first.abs() <= TimeDelta::seconds(10));
     }
 
     #[test]

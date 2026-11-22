@@ -1,9 +1,8 @@
-//! HLOG v2 append log.
+//! Message-history persistence.
 //!
-//! The log is a shared container: magic, version, reserved bytes, and the last
-//! compaction timestamp, followed by framed records. Message snapshots are
-//! written by compaction; normal operation appends NEW, STATE, and DROPPED
-//! records. HLOG v1 is not read or migrated.
+//! Message snapshots are written by compaction; normal operation appends new,
+//! state-change, and dropped-message entries. The storage format is private to
+//! this module.
 
 use super::MessageStore;
 use super::store::{StoreEvent, message_entry_length, service_entry_length};
@@ -11,14 +10,16 @@ use chrono::{TimeZone, Utc};
 use hodeco_contract::domain::{Message, MessageState, ServiceKey};
 use hodeco_contract::utils::FileMode;
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-pub const MAGIC: [u8; 4] = *b"HLOG";
-pub const VERSION: u8 = 2;
+const MAGIC: [u8; 4] = *b"HLOG";
+const VERSION: u8 = 2;
 const RESERVED: [u8; 3] = [0; 3];
 const HEADER_LEN: usize = 4 + 1 + 3 + 8;
 const RECORD_OVERHEAD: usize = 1 + 4;
@@ -42,7 +43,6 @@ pub enum PersistError {
 pub struct PersistedLog {
     pub entries: Vec<(ServiceKey, Message)>,
     pub bytes: u64,
-    pub compacted_at: i64,
 }
 
 pub fn save(
@@ -56,48 +56,10 @@ pub fn save(
 }
 
 fn write_atomic(path: &Path, data: &[u8], file_mode: Option<FileMode>) -> Result<(), PersistError> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    if let Some(parent) = parent {
-        fs::create_dir_all(parent)?;
+    if path.file_name().is_none() {
+        return Err(PersistError::InvalidPath(path.to_path_buf()));
     }
-
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| PersistError::InvalidPath(path.to_path_buf()))?;
-    let mut temporary_name = OsString::from(".");
-    temporary_name.push(file_name);
-    temporary_name.push(format!(".{}.tmp", Uuid::new_v4()));
-    let temporary = path.with_file_name(temporary_name);
-
-    let result = (|| -> Result<(), io::Error> {
-        let file = fs::File::create(&temporary)?;
-        if let Some(mode) = file_mode {
-            apply_mode(&file, mode)?;
-        }
-        let mut writer = BufWriter::new(file);
-        writer.write_all(data)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-        drop(writer);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result.map_err(PersistError::Io)
-}
-
-#[cfg(unix)]
-fn apply_mode(file: &fs::File, mode: FileMode) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(mode.as_u32()))
-}
-
-#[cfg(not(unix))]
-fn apply_mode(_file: &fs::File, _mode: FileMode) -> io::Result<()> {
-    Ok(())
+    crate::utils::write_atomic(path, data, file_mode).map_err(PersistError::Io)
 }
 
 pub fn load(path: &Path) -> Result<Option<PersistedLog>, PersistError> {
@@ -120,19 +82,22 @@ pub fn encode(entries: &[(ServiceKey, Message)]) -> Result<Vec<u8>, PersistError
 
 pub fn decode(data: &[u8]) -> Result<PersistedLog, PersistError> {
     if data.len() < HEADER_LEN {
-        return Err(PersistError::Corrupt("header is truncated".to_string()));
+        return Err(PersistError::Corrupt(
+            "the message log is incomplete".to_string(),
+        ));
     }
     if data[..4] != MAGIC {
-        return Err(PersistError::Corrupt("invalid magic".to_string()));
+        return Err(PersistError::Corrupt(
+            "the message log is not recognized".to_string(),
+        ));
     }
     if data[4] != VERSION {
         return Err(PersistError::Corrupt(if data[4] == 1 {
-            "HLOG v1 is not supported; delete or archive the old message log".to_string()
+            "unsupported message-log format; delete or archive the old message log".to_string()
         } else {
-            format!("unsupported version {}", data[4])
+            "the message log uses an unsupported format".to_string()
         }));
     }
-    let compacted_at = i64::from_le_bytes(data[8..16].try_into().unwrap());
     let mut entries: Vec<Option<(ServiceKey, Message)>> = Vec::new();
     let mut index: HashMap<Uuid, usize> = HashMap::new();
     let mut offset = HEADER_LEN;
@@ -201,11 +166,7 @@ pub fn decode(data: &[u8]) -> Result<PersistedLog, PersistError> {
         }
         bytes += message_entry_length(message.payload.len());
     }
-    Ok(PersistedLog {
-        entries,
-        bytes,
-        compacted_at,
-    })
+    Ok(PersistedLog { entries, bytes })
 }
 
 fn header(compacted_at: i64) -> Vec<u8> {
@@ -280,14 +241,12 @@ fn decode_new(body: &[u8]) -> Result<(ServiceKey, Message), PersistError> {
 
 /// Buffered append handle. The gateway flushes on its timer and on shutdown.
 pub struct LogWriter {
-    path: PathBuf,
     file: BufWriter<fs::File>,
-    file_mode: Option<FileMode>,
     size: u64,
 }
 
 impl LogWriter {
-    /// Opens an existing HLOG v2 file or creates a new one. A corrupt or v1 file
+    /// Opens an existing message-history file or creates a new one. A corrupt or legacy file
     /// is reset when `on_corrupt` is `Ignore`; with `Fail` the error is
     /// returned.
     pub fn open(
@@ -302,18 +261,19 @@ impl LogWriter {
             fs::create_dir_all(parent)?;
         }
 
-        let valid = match fs::read(path) {
-            // Validate the whole log, not just the header. A crash can leave a
-            // valid header followed by a corrupt middle record, and appending
-            // to that file would make the corruption permanent.
-            Ok(data) => decode(&data).is_ok(),
+        let existing = match fs::read(path) {
+            Ok(data) => Some(data),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let encoded = header(Utc::now().timestamp_nanos_opt().unwrap_or(0));
                 write_atomic(path, &encoded, file_mode)?;
-                true
+                None
             }
             Err(error) => return Err(PersistError::Io(error)),
         };
+        // Validate the whole log, not just the header. A crash can leave a
+        // valid header followed by a corrupt middle record, and appending to
+        // that file would make the corruption permanent.
+        let valid = existing.as_deref().is_none_or(|data| decode(data).is_ok());
         if !valid {
             match on_corrupt {
                 hodeco_contract::config::CorruptPolicy::Ignore => {
@@ -322,11 +282,11 @@ impl LogWriter {
                 }
                 hodeco_contract::config::CorruptPolicy::Fail => {
                     return Err(PersistError::Corrupt(
-                        "the message log is not HLOG v2".to_string(),
+                        "the message log uses an unsupported format".to_string(),
                     ));
                 }
             }
-        } else if let Ok(data) = fs::read(path) {
+        } else if let Some(data) = existing {
             // Drop a partial trailing record before appending. Without this,
             // the next record would start inside the partial frame.
             let mut offset = HEADER_LEN;
@@ -351,23 +311,13 @@ impl LogWriter {
             .open(path)?;
         let size = file.metadata()?.len();
         Ok(Self {
-            path: path.to_path_buf(),
             file: BufWriter::new(file),
-            file_mode,
             size,
         })
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn size(&self) -> u64 {
         self.size
-    }
-
-    pub fn file_mode(&self) -> Option<FileMode> {
-        self.file_mode
     }
 
     pub fn append(&mut self, event: &StoreEvent) -> Result<(), PersistError> {
@@ -403,6 +353,184 @@ impl LogWriter {
     }
 }
 
+enum LogCommand {
+    Append(StoreEvent),
+    Flush(oneshot::Sender<Result<(), PersistError>>),
+    Compact {
+        path: PathBuf,
+        file_mode: Option<FileMode>,
+        on_corrupt: hodeco_contract::config::CorruptPolicy,
+        store: Arc<MessageStore>,
+        reply: oneshot::Sender<Result<(), PersistError>>,
+    },
+    Shutdown(oneshot::Sender<Result<(), PersistError>>),
+}
+
+/// Async handle to a blocking message-log writer. Keeping disk writes and
+/// `fsync` on the blocking pool means message traffic never stalls a Tokio
+/// worker.
+#[derive(Clone)]
+pub struct LogHandle {
+    sender: mpsc::Sender<LogCommand>,
+    size: Arc<AtomicU64>,
+}
+
+impl LogHandle {
+    pub fn spawn(writer: LogWriter, capacity: usize) -> (Self, tokio::task::JoinHandle<()>) {
+        let size = Arc::new(AtomicU64::new(writer.size()));
+        let task_size = size.clone();
+        let (sender, receiver) = mpsc::channel(capacity.max(1));
+        let join = tokio::task::spawn_blocking(move || {
+            run_writer(Some(writer), receiver, task_size);
+        });
+        (Self { sender, size }, join)
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size.load(Ordering::Relaxed)
+    }
+
+    pub async fn append(&self, event: StoreEvent) -> Result<(), PersistError> {
+        self.sender
+            .send(LogCommand::Append(event))
+            .await
+            .map_err(|_| channel_closed())
+    }
+
+    pub async fn flush(&self) -> Result<(), PersistError> {
+        let (reply, wait) = oneshot::channel();
+        self.sender
+            .send(LogCommand::Flush(reply))
+            .await
+            .map_err(|_| channel_closed())?;
+        wait.await.map_err(|_| channel_closed())?
+    }
+
+    pub async fn compact(
+        &self,
+        path: PathBuf,
+        file_mode: Option<FileMode>,
+        on_corrupt: hodeco_contract::config::CorruptPolicy,
+        store: Arc<MessageStore>,
+    ) -> Result<(), PersistError> {
+        let (reply, wait) = oneshot::channel();
+        self.sender
+            .send(LogCommand::Compact {
+                path,
+                file_mode,
+                on_corrupt,
+                store,
+                reply,
+            })
+            .await
+            .map_err(|_| channel_closed())?;
+        wait.await.map_err(|_| channel_closed())?
+    }
+
+    pub async fn shutdown(self) -> Result<(), PersistError> {
+        let (reply, wait) = oneshot::channel();
+        self.sender
+            .send(LogCommand::Shutdown(reply))
+            .await
+            .map_err(|_| channel_closed())?;
+        wait.await.map_err(|_| channel_closed())?
+    }
+}
+
+fn run_writer(
+    mut writer: Option<LogWriter>,
+    mut receiver: mpsc::Receiver<LogCommand>,
+    size: Arc<AtomicU64>,
+) {
+    while let Some(command) = receiver.blocking_recv() {
+        match command {
+            LogCommand::Append(event) => {
+                if let Some(current) = writer.as_mut() {
+                    if let Err(error) = current.append(&event) {
+                        tracing::warn!(error = %error, "unable to append to the message log");
+                    }
+                    size.store(current.size(), Ordering::Relaxed);
+                } else {
+                    tracing::warn!("message-log writer is unavailable; dropping a record");
+                }
+            }
+            LogCommand::Flush(reply) => {
+                let result = match writer.as_mut() {
+                    Some(current) => current.flush(),
+                    None => Err(channel_closed()),
+                };
+                let _ = reply.send(result);
+            }
+            LogCommand::Compact {
+                path,
+                file_mode,
+                on_corrupt,
+                store,
+                reply,
+            } => {
+                let result = compact(&mut writer, &path, file_mode, on_corrupt, &store);
+                if let Some(current) = writer.as_ref() {
+                    size.store(current.size(), Ordering::Relaxed);
+                }
+                let _ = reply.send(result);
+            }
+            LogCommand::Shutdown(reply) => {
+                let result = match writer.as_mut() {
+                    Some(current) => current.flush(),
+                    None => Err(channel_closed()),
+                };
+                let _ = reply.send(result);
+                break;
+            }
+        }
+    }
+
+    if let Some(mut current) = writer {
+        let _ = current.flush();
+    }
+}
+
+fn compact(
+    writer: &mut Option<LogWriter>,
+    path: &Path,
+    file_mode: Option<FileMode>,
+    on_corrupt: hodeco_contract::config::CorruptPolicy,
+    store: &MessageStore,
+) -> Result<(), PersistError> {
+    let Some(mut current) = writer.take() else {
+        return Err(channel_closed());
+    };
+    let flushed = current.flush();
+    // Close the active handle before the atomic rename; Windows will not
+    // replace a file that is still open.
+    drop(current);
+    if let Err(error) = flushed {
+        *writer = LogWriter::open(path, file_mode, on_corrupt).ok();
+        return Err(error);
+    }
+
+    match save(path, store, file_mode) {
+        Ok(()) => match LogWriter::open(path, file_mode, on_corrupt) {
+            Ok(fresh) => {
+                *writer = Some(fresh);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) => {
+            *writer = LogWriter::open(path, file_mode, on_corrupt).ok();
+            Err(error)
+        }
+    }
+}
+
+fn channel_closed() -> PersistError {
+    PersistError::Io(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "the message-log writer is not running",
+    ))
+}
+
 fn write_string(data: &mut Vec<u8>, value: &str) -> Result<(), PersistError> {
     let length = u32::try_from(value.len()).map_err(|_| PersistError::TooLarge)?;
     data.extend_from_slice(&length.to_le_bytes());
@@ -436,6 +564,15 @@ fn read_i64(cursor: &mut Cursor<&[u8]>) -> Result<i64, PersistError> {
 
 fn read_string(cursor: &mut Cursor<&[u8]>) -> Result<String, PersistError> {
     let length = read_u32(cursor)? as usize;
+    let remaining = cursor
+        .get_ref()
+        .len()
+        .saturating_sub(cursor.position() as usize);
+    if length > remaining {
+        return Err(PersistError::Corrupt(
+            "a service string is truncated".to_string(),
+        ));
+    }
     let mut value = vec![0_u8; length];
     cursor.read_exact(&mut value).map_err(corrupt)?;
     String::from_utf8(value)
@@ -608,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_corrupt_and_v1_snapshots() {
+    fn rejects_corrupt_and_legacy_snapshots() {
         let file = TestFile::new();
         let store = populated_store();
         save(file.path(), &store, None).unwrap();
@@ -620,7 +757,7 @@ mod tests {
         let mut v1 = data.clone();
         v1[4] = 1;
         let error = decode(&v1).unwrap_err().to_string();
-        assert!(error.contains("HLOG v1"), "{error}");
+        assert!(error.contains("unsupported message-log format"), "{error}");
 
         let mut wrong_magic = data.clone();
         wrong_magic[0] = b'X';

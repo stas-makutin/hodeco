@@ -1,9 +1,10 @@
 # Development
 
 Working on hodeco is mostly ordinary Rust: one Cargo workspace for the backend,
-contract, and codec; a second workspace for the egui UI. The interesting part is
-the split between them — protocol types and decoding are shared, while transport
-and rendering stay on their respective sides.
+contract, codec, and schedule engine; a second workspace for the egui UI. The
+interesting part is the split between them — protocol types, decoding, and
+scheduling are shared, while transport and rendering stay on their respective
+sides.
 
 If you are new to the code, start with `cargo test --workspace`, then run the
 backend and the UI separately. The UI's demo mode gives you a populated app
@@ -18,6 +19,7 @@ without a gateway or a serial controller.
 | HTTP routes, RPC handling, WebSocket behavior | `src/http/` |
 | Serial services, discovery, message storage, logging | `src/services/`, `src/messages/`, `src/logging/` |
 | Tasks, schedules, commands, run history, hooks | `src/automation/` |
+| Calendar, solar, repeat, or jitter math | `hodeco-schedule/` |
 | A UI screen or widget | `hodeco-ui/src/app/views/`, `hodeco-ui/src/ui/` |
 
 ## Workspace layout
@@ -28,6 +30,7 @@ without a gateway or a serial controller.
 | `tests/` | Backend integration tests. |
 | `hodeco-contract/` | Shared wire types, DTOs, method names, errors, config schema, and parameter metadata. |
 | `hodeco-codec/` | Pure Z-Wave/frame codec, hex helpers, builder, and static catalog shared with the UI. |
+| `hodeco-schedule/` | Calendar, solar, repeat, and jitter computation shared with the UI. |
 | `hodeco-ui/` | Separate workspace for the egui admin/diagnostics frontend. |
 | `wiki/` | Source for the GitHub wiki. |
 | `packaging/` | nFPM package definition used by the release workflow. |

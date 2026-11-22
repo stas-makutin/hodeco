@@ -11,7 +11,6 @@ pub enum ErrorCode {
     ConfigWriteFailed,
     UnknownProtocol,
     UnknownTransport,
-    ProtocolError,
     TransportError,
     ServiceNotFound,
     ServiceAlreadyExists,

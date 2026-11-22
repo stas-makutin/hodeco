@@ -67,6 +67,7 @@ pub fn data_response(body: &[u8]) -> Vec<u8> {
     data_frame(FRAME_RESPONSE, body)
 }
 
+#[cfg(test)]
 pub fn unpack_data_frame(frame: &[u8]) -> Option<&[u8]> {
     if frame.len() <= 3 {
         return None;
@@ -118,6 +119,8 @@ pub fn version_request() -> Vec<u8> {
 pub struct ZWaveSettings {
     pub open_attempts_interval: Duration,
     pub outgoing_max_ttl: Duration,
+    pub reply_timeout: Duration,
+    pub write_timeout: Option<Duration>,
 }
 
 impl ZWaveSettings {
@@ -140,9 +143,19 @@ impl ZWaveSettings {
             outgoing_max_ttl
         };
 
+        let reply_timeout =
+            param_duration(params, crate::services::catalog::SERIAL_PARAM_READ_TIMEOUT)
+                .filter(|timeout| !timeout.is_zero())
+                .unwrap_or(REPLY_TIMEOUT);
+        let write_timeout =
+            param_duration(params, crate::services::catalog::SERIAL_PARAM_WRITE_TIMEOUT)
+                .filter(|timeout| !timeout.is_zero());
+
         Self {
             open_attempts_interval,
             outgoing_max_ttl,
+            reply_timeout,
+            write_timeout,
         }
     }
 }
@@ -294,10 +307,15 @@ async fn run(
                 update_status(&status, ServiceState::Stopped, None);
                 return;
             }
-            match opener
-                .open(key.entry.clone(), serial_settings.clone())
-                .await
-            {
+            let opened = tokio::select! {
+                _ = cancel.cancelled() => {
+                    purge(&mut receiver, recorder.as_ref());
+                    update_status(&status, ServiceState::Stopped, None);
+                    return;
+                }
+                result = opener.open(key.entry.clone(), serial_settings.clone()) => result,
+            };
+            match opened {
                 Ok(opened) => port = Some(opened),
                 Err(error) => {
                     tracing::warn!(
@@ -340,7 +358,7 @@ async fn run(
                         update_status(&status, ServiceState::Stopped, None);
                         return;
                     }
-                    _ = tokio::time::sleep(REPLY_TIMEOUT) => {
+                    _ = tokio::time::sleep(settings.reply_timeout) => {
                         tracing::debug!(service = %key.entry, "z-wave reply timeout");
                         expect_reply = false;
                     }
@@ -350,6 +368,7 @@ async fn run(
                             &read_buffer,
                             &mut buffer,
                             &mut writer,
+                            settings.write_timeout,
                             &key,
                             recorder.as_ref(),
                             &status,
@@ -381,7 +400,14 @@ async fn run(
                         if !ttl.is_zero() && outgoing.created.elapsed() > ttl {
                             recorder.update_state(outgoing.id, MessageState::OutgoingTimedOut);
                         } else {
-                            match write_cancellable(&mut writer, &outgoing.payload, &cancel).await {
+                            match write_with_timeout(
+                                &mut writer,
+                                &outgoing.payload,
+                                &cancel,
+                                settings.write_timeout,
+                            )
+                            .await
+                            {
                                 Ok(()) => {
                                     recorder.update_state(outgoing.id, MessageState::Outgoing);
                                     if matches!(
@@ -422,6 +448,7 @@ async fn run(
                             &read_buffer,
                             &mut buffer,
                             &mut writer,
+                            settings.write_timeout,
                             &key,
                             recorder.as_ref(),
                             &status,
@@ -454,6 +481,7 @@ async fn read_result(
     chunk: &[u8],
     buffer: &mut Vec<u8>,
     writer: &mut (impl AsyncWrite + Unpin),
+    write_timeout: Option<Duration>,
     key: &ServiceKey,
     recorder: &dyn MessageRecorder,
     status: &watch::Sender<ServiceStatus>,
@@ -498,7 +526,7 @@ async fn read_result(
                 return ReadOutcome::Continue;
             }
 
-            match process_incoming(buffer, writer, key, recorder, cancel).await {
+            match process_incoming(buffer, writer, key, recorder, cancel, write_timeout).await {
                 Ok(()) => ReadOutcome::Continue,
                 Err(error) => {
                     if cancel.is_cancelled() {
@@ -527,6 +555,7 @@ async fn process_incoming(
     key: &ServiceKey,
     recorder: &dyn MessageRecorder,
     cancel: &CancellationToken,
+    write_timeout: Option<Duration>,
 ) -> io::Result<()> {
     let mut index = 0;
 
@@ -540,13 +569,13 @@ async fn process_incoming(
                 (FrameValidation::Ok, consumed) => {
                     let frame = buffer[index..index + consumed].to_vec();
                     recorder.register(key, &frame, MessageState::Incoming);
-                    write_reply(writer, recorder, key, FRAME_ACK, cancel).await?;
+                    write_reply(writer, recorder, key, FRAME_ACK, cancel, write_timeout).await?;
                     index += consumed;
                 }
                 (FrameValidation::Incomplete, _) => break,
                 (FrameValidation::WrongLength, _) => {
                     tracing::warn!("discarding a z-wave data frame with an invalid length");
-                    write_reply(writer, recorder, key, FRAME_NAK, cancel).await?;
+                    write_reply(writer, recorder, key, FRAME_NAK, cancel, write_timeout).await?;
                     buffer.clear();
                     index = 0;
                     break;
@@ -556,7 +585,7 @@ async fn process_incoming(
                         frame = %to_hex(&buffer[index..index + consumed]),
                         "discarding a z-wave data frame with an invalid checksum"
                     );
-                    write_reply(writer, recorder, key, FRAME_NAK, cancel).await?;
+                    write_reply(writer, recorder, key, FRAME_NAK, cancel, write_timeout).await?;
                     index += consumed;
                 }
                 (FrameValidation::NoSof, _) => unreachable!("the frame starts with a SOF byte"),
@@ -597,15 +626,31 @@ async fn write_cancellable(
     }
 }
 
+async fn write_with_timeout(
+    writer: &mut (impl AsyncWrite + Unpin),
+    payload: &[u8],
+    cancel: &CancellationToken,
+    timeout: Option<Duration>,
+) -> io::Result<()> {
+    let write = write_cancellable(writer, payload, cancel);
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, write)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "serial write timed out"))?,
+        None => write.await,
+    }
+}
+
 async fn write_reply(
     writer: &mut (impl AsyncWrite + Unpin),
     recorder: &dyn MessageRecorder,
     key: &ServiceKey,
     reply: u8,
     cancel: &CancellationToken,
+    write_timeout: Option<Duration>,
 ) -> io::Result<()> {
     let message = recorder.register(key, &[reply], MessageState::OutgoingPending);
-    match write_cancellable(writer, &[reply], cancel).await {
+    match write_with_timeout(writer, &[reply], cancel, write_timeout).await {
         Ok(()) => {
             recorder.update_state(message.id, MessageState::Outgoing);
             Ok(())

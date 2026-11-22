@@ -3,16 +3,15 @@ use super::loader::ConfigError;
 use crate::services::catalog;
 use hodeco_contract::config::{Config, ServicesFile};
 use hodeco_contract::domain::{
-    ActionKind, CommandDefinition, DaySpec, MessagePayload, NextCondition, ScheduleDefinition,
-    ServiceRef, TaskDefinition, TaskTrigger,
+    ActionKind, CommandDefinition, DaySpec, MAX_TASK_START_DELAY, NextCondition,
+    ScheduleDefinition, ServiceRef, TaskDefinition, TaskTrigger,
 };
-use hodeco_contract::utils::{Base64Bytes, Size, is_valid_id};
+use hodeco_contract::utils::{Size, is_valid_id};
 use std::collections::BTreeSet;
-use std::str::FromStr;
 
 const MIN_MESSAGE_LOG_SIZE: Size = Size::from_bytes(8 * 1024);
-const MIN_TASK_LOG_SIZE: Size = Size::from_bytes(4 * 1024);
 const MIN_TASK_HISTORY_SIZE: Size = Size::from_bytes(1024);
+const MIN_RUN_FEED_SIZE: Size = Size::from_bytes(1024 * 1024);
 const MIN_PAYLOAD_SIZE: Size = Size::from_bytes(1);
 
 /// Top-level configuration sections that only apply after a restart.
@@ -73,9 +72,6 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
     if config.http_server.port == 0 {
         errors.push("httpServer.port must be greater than 0".to_string());
     }
-    if config.http_server.max_connections == 0 {
-        errors.push("httpServer.maxConnections must be greater than 0".to_string());
-    }
     if config.http_server.read_timeout.as_std().is_zero() {
         errors.push("httpServer.readTimeout must be greater than 0".to_string());
     }
@@ -127,15 +123,6 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
     if config.task_log.dir.as_os_str().is_empty() {
         errors.push("taskLog.dir must not be empty".to_string());
     }
-    if config.task_log.max_size < MIN_TASK_LOG_SIZE {
-        errors.push(format!(
-            "taskLog.maxSize must be at least {}",
-            MIN_TASK_LOG_SIZE
-        ));
-    }
-    if config.task_log.max_rows == 0 {
-        errors.push("taskLog.maxRows must be greater than 0".to_string());
-    }
     if config.task_log.compaction_factor < 1.0 {
         errors.push("taskLog.compactionFactor must be at least 1.0".to_string());
     }
@@ -157,6 +144,14 @@ pub fn validate(config: &Config) -> Result<(), ConfigError> {
     }
     if config.task_engine.max_fan_out == 0 {
         errors.push("taskEngine.maxFanOut must be greater than 0".to_string());
+    }
+    if config.task_engine.run_feed.max_rows == 0 {
+        errors.push("taskEngine.runFeed.maxRows must be greater than 0".to_string());
+    }
+    if config.task_engine.run_feed.max_size < MIN_RUN_FEED_SIZE {
+        errors.push(format!(
+            "taskEngine.runFeed.maxSize must be at least {MIN_RUN_FEED_SIZE}"
+        ));
     }
 
     finish(errors)
@@ -248,7 +243,7 @@ pub fn validate_bundle(bundle: &ConfigBundle) -> Result<(), ConfigError> {
     finish(errors)
 }
 
-pub fn validate_services(file: &ServicesFile, errors: &mut Vec<String>) {
+fn validate_services(file: &ServicesFile, errors: &mut Vec<String>) {
     let mut aliases = BTreeSet::new();
     let mut keys = BTreeSet::new();
     for (index, service) in file.services.iter().enumerate() {
@@ -317,32 +312,6 @@ pub fn validate_task(
     finish_inline(errors)
 }
 
-pub fn validate_tasks(
-    tasks: &[TaskDefinition],
-    schedules: &BTreeSet<String>,
-    commands: &BTreeSet<String>,
-    services: &BTreeSet<ServiceRef>,
-) -> Result<(), String> {
-    let mut errors = Vec::new();
-    let mut ids = BTreeSet::new();
-    for (index, task) in tasks.iter().enumerate() {
-        if !ids.insert(task.id.clone()) {
-            errors.push(format!("tasks[{index}]: duplicate task id '{}'", task.id));
-        }
-        let all_tasks: Vec<&TaskDefinition> = tasks.iter().collect();
-        validate_task_at(
-            task,
-            &all_tasks,
-            schedules,
-            commands,
-            services,
-            index,
-            &mut errors,
-        );
-    }
-    finish_inline(errors)
-}
-
 pub fn validate_schedule(
     schedule: &ScheduleDefinition,
     defaults: &hodeco_contract::config::SchedulesFile,
@@ -379,6 +348,38 @@ fn validate_task_at(
     }
     if task.run_timeout.as_std().is_zero() {
         errors.push(format!("{prefix}.runTimeout must be greater than 0"));
+    }
+    if let Some(delay) = task.delay {
+        if delay.as_std() > MAX_TASK_START_DELAY {
+            errors.push(format!("{prefix}.delay must not exceed 24 hours"));
+        }
+        match task.jitter {
+            Some(jitter) => {
+                if jitter.as_std() > MAX_TASK_START_DELAY {
+                    errors.push(format!("{prefix}.jitter must not exceed 24 hours"));
+                }
+                if jitter.as_std() > delay.as_std() {
+                    errors.push(format!("{prefix}.jitter must not exceed delay"));
+                }
+                if delay.as_std() + jitter.as_std() > MAX_TASK_START_DELAY {
+                    errors.push(format!(
+                        "{prefix}.delay plus jitter must not exceed 24 hours"
+                    ));
+                }
+                if delay.as_std() + jitter.as_std() >= task.run_timeout.as_std() {
+                    errors.push(format!(
+                        "{prefix}.delay plus jitter must be less than runTimeout"
+                    ));
+                }
+            }
+            None => {
+                if delay.as_std() >= task.run_timeout.as_std() {
+                    errors.push(format!("{prefix}.delay must be less than runTimeout"));
+                }
+            }
+        }
+    } else if task.jitter.is_some() {
+        errors.push(format!("{prefix}.jitter requires a delay"));
     }
     if task.max_runs_per_minute == 0 {
         errors.push(format!("{prefix}.maxRunsPerMinute must be greater than 0"));
@@ -431,7 +432,6 @@ fn validate_task_at(
                     errors.push(format!("{trigger_prefix}.secret must not be empty"));
                 }
             }
-            TaskTrigger::Manual(_) | TaskTrigger::Task(_) => {}
         }
     }
     if http_triggers > 1 {
@@ -469,9 +469,6 @@ fn validate_task_at(
                     &action_prefix,
                     errors,
                 );
-                if let Err(error) = validate_message_payload(&action.message.payload) {
-                    errors.push(format!("{action_prefix}.message.payload: {error}"));
-                }
                 if action.message.ttl.is_some_and(|ttl| ttl.as_std().is_zero()) {
                     errors.push(format!(
                         "{action_prefix}.message.ttl must be greater than 0"
@@ -558,31 +555,6 @@ fn validate_service_ref(
     }
 }
 
-fn validate_message_payload(payload: &MessagePayload) -> Result<(), String> {
-    match payload {
-        MessagePayload::Trigger | MessagePayload::Text { .. } => Ok(()),
-        MessagePayload::Hex { hex } => {
-            let compact: String = hex
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect();
-            if !compact.len().is_multiple_of(2) {
-                return Err("hex payload must contain an even number of digits".to_string());
-            }
-            if !compact
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-            {
-                return Err("hex payload contains a non-hex character".to_string());
-            }
-            Ok(())
-        }
-        MessagePayload::Base64 { base64 } => Base64Bytes::from_str(base64)
-            .map(|_| ())
-            .map_err(|error| format!("invalid base64 payload: {error}")),
-    }
-}
-
 fn validate_schedule_at(
     schedule: &ScheduleDefinition,
     defaults: &hodeco_contract::config::SchedulesFile,
@@ -613,8 +585,8 @@ fn validate_schedule_at(
     }
     let has_location = schedule.location.is_some() || defaults.location.is_some();
 
-    if schedule.on.is_none() && schedule.from.is_none() {
-        errors.push(format!("{prefix}: from or on is required"));
+    if schedule.at.is_empty() && schedule.every.is_none() && schedule.from.is_none() {
+        errors.push(format!("{prefix}: from, at, or every is required"));
     }
     if let Some(from) = schedule.from
         && let Some(until) = schedule.until
@@ -622,53 +594,50 @@ fn validate_schedule_at(
     {
         errors.push(format!("{prefix}.until must not be before from"));
     }
-    if let Some(rule) = &schedule.on {
-        if rule
-            .every
-            .is_some_and(|every| every.duration().is_some_and(|duration| duration.is_zero()))
-        {
-            errors.push(format!("{prefix}.on.every must be greater than 0"));
+    if let Some(every) = schedule.every {
+        if every.duration().is_some_and(|duration| duration.is_zero()) {
+            errors.push(format!("{prefix}.every must be greater than 0"));
         }
-        if rule.every.is_some() && schedule.from.is_none() {
-            errors.push(format!("{prefix}.on.every requires from"));
+        if schedule.from.is_none() {
+            errors.push(format!("{prefix}.every requires from"));
         }
-        if rule.every.is_some_and(|every| every.is_sub_day()) {
-            if !rule.at.is_empty() {
+        if every.uses_elapsed_time() {
+            if !schedule.at.is_empty() {
                 errors.push(format!(
-                    "{prefix}.on.at is not allowed for second, minute, or hour intervals"
+                    "{prefix}.at is not allowed for second, minute, or hour intervals"
                 ));
             }
-            if !rule.days.is_empty() || !rule.months.is_empty() || !rule.years.is_empty() {
+            if !schedule.days.is_empty()
+                || !schedule.months.is_empty()
+                || !schedule.years.is_empty()
+            {
                 errors.push(format!(
                     "{prefix}: date filters are not allowed for second, minute, or hour intervals"
                 ));
             }
         }
-        if rule.at.is_empty() && rule.every.is_none() {
-            errors.push(format!("{prefix}.on: at or every is required"));
-        }
-        for (at_index, at) in rule.at.iter().enumerate() {
-            match at.parse() {
-                Ok(hodeco_contract::domain::ParsedAt::Solar { event, .. }) => {
-                    if !has_location {
-                        errors.push(format!(
-                            "{prefix}.on.at[{at_index}]: {event:?} requires a location"
-                        ));
-                    }
+    }
+    for (at_index, at) in schedule.at.iter().enumerate() {
+        match at.parse() {
+            Ok(hodeco_contract::domain::ParsedAt::Solar { event, .. }) => {
+                if !has_location {
+                    errors.push(format!(
+                        "{prefix}.at[{at_index}]: {event:?} requires a location"
+                    ));
                 }
-                Ok(_) => {}
-                Err(error) => errors.push(format!("{prefix}.on.at[{at_index}]: {error}")),
             }
+            Ok(_) => {}
+            Err(error) => errors.push(format!("{prefix}.at[{at_index}]: {error}")),
         }
-        for (day_index, day) in rule.days.iter().enumerate() {
-            if let Err(error) = validate_day(day) {
-                errors.push(format!("{prefix}.on.days[{day_index}]: {error}"));
-            }
+    }
+    for (day_index, day) in schedule.days.iter().enumerate() {
+        if let Err(error) = validate_day(day) {
+            errors.push(format!("{prefix}.days[{day_index}]: {error}"));
         }
-        for year in &rule.years {
-            if !(1..=9999).contains(year) {
-                errors.push(format!("{prefix}.on.years: {year} is out of range"));
-            }
+    }
+    for year in &schedule.years {
+        if !(1..=9999).contains(year) {
+            errors.push(format!("{prefix}.years: {year} is out of range"));
         }
     }
     for (range_index, range) in schedule.except.iter().enumerate() {
@@ -676,14 +645,15 @@ fn validate_schedule_at(
             errors.push(format!("{prefix}.except[{range_index}] is reversed"));
         }
     }
-    if let Some(loop_rule) = &schedule.loop_rule {
-        if loop_rule.intervals().is_empty() {
-            errors.push(format!(
-                "{prefix}.loop.every must contain at least one interval"
-            ));
-        }
-        if loop_rule.repeat == Some(0) {
-            errors.push(format!("{prefix}.loop.repeat must be greater than 0"));
+    if !schedule.repeat_at.is_empty() {
+        let mut seen = BTreeSet::new();
+        for (index, offset) in schedule.repeat_at.iter().enumerate() {
+            let duration = offset.as_std();
+            if duration.is_zero() {
+                errors.push(format!("{prefix}.repeatAt[{index}] must be greater than 0"));
+            } else if !seen.insert(duration) {
+                errors.push(format!("{prefix}.repeatAt must not contain duplicates"));
+            }
         }
     }
     if let Some(jitter) = schedule.jitter
@@ -704,7 +674,7 @@ fn validate_day(day: &DaySpec) -> Result<(), String> {
             }
         }
         DaySpec::NthWeekday { nth, .. } => {
-            if (1..=5).contains(&nth.abs()) {
+            if (1..=5).contains(&nth.unsigned_abs()) {
                 Ok(())
             } else {
                 Err(format!("nth weekday {nth} is out of range"))
@@ -783,9 +753,11 @@ mod automation_tests {
     use hodeco_contract::config::{CommandsFile, Config, SchedulesFile, ServicesFile, TasksFile};
     use hodeco_contract::domain::{
         ActionKind, AtSpec, CommandAction, CommandDefinition, HttpMethod, HttpTrigger,
-        NextCondition, NextRule, OneOrMany, ScheduleDefinition, ScheduleEvery, ScheduleRule,
-        ScheduleTrigger, TaskAction, TaskDefinition, TaskTrigger,
+        NextCondition, NextRule, OneOrMany, ScheduleDefinition, ScheduleEvery, ScheduleTrigger,
+        TaskAction, TaskDefinition, TaskTrigger,
     };
+    use hodeco_contract::utils::HumanDuration;
+    use std::time::Duration;
 
     fn bundle() -> ConfigBundle {
         ConfigBundle {
@@ -811,10 +783,7 @@ mod automation_tests {
         ScheduleDefinition {
             id: id.to_string(),
             name: id.to_string(),
-            on: Some(ScheduleRule {
-                at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
-                ..ScheduleRule::default()
-            }),
+            at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
             ..ScheduleDefinition::default()
         }
     }
@@ -852,6 +821,73 @@ mod automation_tests {
         });
         bundle.tasks.tasks.push(task);
         validate_bundle(&bundle).unwrap();
+    }
+
+    #[test]
+    fn validates_task_start_delay_and_jitter() {
+        let mut valid_bundle = self::bundle();
+        let mut valid_task = self::task("delayed");
+        valid_task.delay = Some(HumanDuration::from_std(Duration::from_secs(60)));
+        valid_task.jitter = Some(HumanDuration::from_std(Duration::from_secs(10)));
+        valid_bundle.tasks.tasks.push(valid_task);
+        validate_bundle(&valid_bundle).unwrap();
+
+        let mut long_bundle = self::bundle();
+        let mut long_task = self::task("invalid");
+        long_task.run_timeout = HumanDuration::from_std(Duration::from_secs(60));
+        long_task.delay = Some(HumanDuration::from_std(Duration::from_secs(60)));
+        long_bundle.tasks.tasks.push(long_task);
+        let error = validate_bundle(&long_bundle).unwrap_err().to_string();
+        assert!(
+            error.contains("delay must be less than runTimeout"),
+            "{error}"
+        );
+
+        let mut jitter_bundle = self::bundle();
+        let mut jitter_task = self::task("invalid");
+        jitter_task.jitter = Some(HumanDuration::from_std(Duration::from_secs(10)));
+        jitter_bundle.tasks.tasks.push(jitter_task);
+        let error = validate_bundle(&jitter_bundle).unwrap_err().to_string();
+        assert!(error.contains("jitter requires a delay"), "{error}");
+
+        let mut jitter_bundle = self::bundle();
+        let mut jitter_task = self::task("invalid");
+        jitter_task.delay = Some(HumanDuration::from_std(Duration::from_secs(10)));
+        jitter_task.jitter = Some(HumanDuration::from_std(Duration::from_secs(20)));
+        jitter_bundle.tasks.tasks.push(jitter_task);
+        let error = validate_bundle(&jitter_bundle).unwrap_err().to_string();
+        assert!(error.contains("jitter must not exceed delay"), "{error}");
+
+        let mut long_delay_bundle = self::bundle();
+        let mut long_delay_task = self::task("invalid");
+        long_delay_task.delay = Some(HumanDuration::from_std(Duration::from_secs(25 * 60 * 60)));
+        long_delay_bundle.tasks.tasks.push(long_delay_task);
+        let error = validate_bundle(&long_delay_bundle).unwrap_err().to_string();
+        assert!(error.contains("delay must not exceed 24 hours"), "{error}");
+
+        let mut combined_bundle = self::bundle();
+        let mut combined_task = self::task("invalid");
+        combined_task.run_timeout = HumanDuration::from_std(Duration::from_secs(30 * 60 * 60));
+        combined_task.delay = Some(HumanDuration::from_std(Duration::from_secs(20 * 60 * 60)));
+        combined_task.jitter = Some(HumanDuration::from_std(Duration::from_secs(5 * 60 * 60)));
+        combined_bundle.tasks.tasks.push(combined_task);
+        let error = validate_bundle(&combined_bundle).unwrap_err().to_string();
+        assert!(
+            error.contains("delay plus jitter must not exceed 24 hours"),
+            "{error}"
+        );
+
+        let mut sum_bundle = self::bundle();
+        let mut sum_task = self::task("invalid");
+        sum_task.run_timeout = HumanDuration::from_std(Duration::from_secs(60));
+        sum_task.delay = Some(HumanDuration::from_std(Duration::from_secs(50)));
+        sum_task.jitter = Some(HumanDuration::from_std(Duration::from_secs(10)));
+        sum_bundle.tasks.tasks.push(sum_task);
+        let error = validate_bundle(&sum_bundle).unwrap_err().to_string();
+        assert!(
+            error.contains("delay plus jitter must be less than runTimeout"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -914,17 +950,66 @@ mod automation_tests {
     }
 
     #[test]
+    fn accepts_repeat_after_a_one_shot() {
+        let mut schedule = schedule("repeat");
+        schedule.at = OneOrMany::Many(Vec::new());
+        schedule.from =
+            Some(hodeco_contract::domain::ScheduleDate::parse("2026-11-17T09:00:00Z").unwrap());
+        schedule.repeat_at = OneOrMany::One(HumanDuration::from_std(Duration::from_secs(20 * 60)));
+        validate_schedule(&schedule, &SchedulesFile::default()).unwrap();
+    }
+
+    #[test]
+    fn rejects_repeat_without_a_base_occurrence() {
+        let mut schedule = schedule("repeat");
+        schedule.at = OneOrMany::Many(Vec::new());
+        schedule.repeat_at = OneOrMany::One(HumanDuration::from_std(Duration::from_secs(20 * 60)));
+        let error = validate_schedule(&schedule, &SchedulesFile::default()).unwrap_err();
+        assert!(error.contains("from, at, or every is required"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_repeat_offsets() {
+        let mut schedule = schedule("repeat");
+        schedule.repeat_at = OneOrMany::Many(vec![
+            HumanDuration::from_std(Duration::ZERO),
+            HumanDuration::from_std(Duration::from_secs(20 * 60)),
+            HumanDuration::from_std(Duration::from_secs(20 * 60)),
+        ]);
+        let error = validate_schedule(&schedule, &SchedulesFile::default()).unwrap_err();
+        assert!(
+            error.contains("repeatAt[0] must be greater than 0"),
+            "{error}"
+        );
+        assert!(
+            error.contains("repeatAt must not contain duplicates"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_schedule_rules() {
         let mut bundle = bundle();
         let mut invalid = schedule("bad");
         invalid.name = " ".to_string();
-        invalid.on = Some(ScheduleRule {
-            every: Some(ScheduleEvery::Days(2)),
-            ..ScheduleRule::default()
-        });
+        invalid.at = OneOrMany::Many(Vec::new());
+        invalid.every = Some(ScheduleEvery::Days(2));
         bundle.schedules.schedules.push(invalid);
         let error = validate_bundle(&bundle).unwrap_err().to_string();
         assert!(error.contains("name must not be empty"), "{error}");
         assert!(error.contains("requires from"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_run_feed_limits() {
+        let mut invalid_rows = bundle();
+        invalid_rows.config.task_engine.run_feed.max_rows = 0;
+        let error = validate_bundle(&invalid_rows).unwrap_err().to_string();
+        assert!(error.contains("runFeed.maxRows"), "{error}");
+
+        let mut invalid_size = bundle();
+        invalid_size.config.task_engine.run_feed.max_size = Size::from_bytes(1024);
+        let error = validate_bundle(&invalid_size).unwrap_err().to_string();
+        assert!(error.contains("runFeed.maxSize"), "{error}");
     }
 }

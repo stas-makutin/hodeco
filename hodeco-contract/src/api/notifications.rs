@@ -21,10 +21,12 @@ pub enum NotificationMethod {
     TaskRunStarted,
     #[serde(rename = "events.taskRunFinished")]
     TaskRunFinished,
+    #[serde(rename = "events.taskRunDropped")]
+    TaskRunDropped,
 }
 
 impl NotificationMethod {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::DiscoveryStarted,
         Self::DiscoveryFinished,
         Self::MessageNew,
@@ -33,6 +35,7 @@ impl NotificationMethod {
         Self::ServiceStateChanged,
         Self::TaskRunStarted,
         Self::TaskRunFinished,
+        Self::TaskRunDropped,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -45,6 +48,7 @@ impl NotificationMethod {
             Self::ServiceStateChanged => "events.serviceStateChanged",
             Self::TaskRunStarted => "events.taskRunStarted",
             Self::TaskRunFinished => "events.taskRunFinished",
+            Self::TaskRunDropped => "events.taskRunDropped",
         }
     }
 }
@@ -68,6 +72,8 @@ pub enum Notification {
     TaskRunStarted(TaskRunNotification),
     #[serde(rename = "events.taskRunFinished")]
     TaskRunFinished(TaskRunFinishedNotification),
+    #[serde(rename = "events.taskRunDropped")]
+    TaskRunDropped(TaskRunDroppedNotification),
 }
 
 impl Notification {
@@ -81,6 +87,7 @@ impl Notification {
             Self::ServiceStateChanged(_) => NotificationMethod::ServiceStateChanged,
             Self::TaskRunStarted(_) => NotificationMethod::TaskRunStarted,
             Self::TaskRunFinished(_) => NotificationMethod::TaskRunFinished,
+            Self::TaskRunDropped(_) => NotificationMethod::TaskRunDropped,
         }
     }
 }
@@ -114,6 +121,12 @@ pub struct ServiceStateChangedNotification {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TaskRunFinishedNotification {
     pub run: RunSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TaskRunDroppedNotification {
+    pub run_ids: Vec<Uuid>,
 }
 
 #[cfg(test)]

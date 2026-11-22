@@ -30,7 +30,7 @@ external file takes effect when the UI is restarted or the page is reloaded.
 ## `zwave.json`
 
 The bundled catalog is version 1 and currently describes 135 command classes
-with 377 commands, 141 Serial API commands, and 59 packed groups. Most common
+with 377 commands, 141 Serial API commands, and 76 packed groups. Most common
 commands have typed layouts; the remaining raw fields are documented fallbacks
 for variable-length lists and vendor-specific or union payloads.
 
@@ -354,7 +354,7 @@ Rules:
 - The same group schema is used by `serialCommands` and `commandClasses`,
   including request, response, and callback layouts.
 
-Bundled packed groups (59 in the current catalog) cover Thermostat Setpoint,
+Bundled packed groups (76 in the current catalog) cover Thermostat Setpoint,
 Sensor Multilevel, Meter, Configuration Properties, Multi Channel
 endpoint/capability fields, Door Lock handles/conditions/options, Central Scene
 key attributes, Supervision session flags, and the Add/Remove/Node ID inclusion

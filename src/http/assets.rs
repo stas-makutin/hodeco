@@ -173,6 +173,9 @@ fn is_navigation(request: &Request) -> bool {
     }
 
     let path = percent_encoding::percent_decode_str(request.uri().path()).decode_utf8_lossy();
+    if path == "/api" || path.starts_with("/api/") {
+        return false;
+    }
     let last_segment = path.rsplit('/').next().unwrap_or_default();
     !last_segment.contains('.')
 }

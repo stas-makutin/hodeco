@@ -15,6 +15,7 @@ pub(crate) mod runs;
 pub(crate) mod schedules;
 pub(crate) mod server;
 pub(crate) mod services;
+pub(crate) mod task_history;
 pub(crate) mod tasks;
 
 impl App {

@@ -1,6 +1,6 @@
 # WebSocket
 
-The WebSocket is the UI's transport and the most convenient way to build a live
+The WebSocket is the live transport for the UI and API clients, and the most convenient way to build a live
 client. It carries the same RPC requests as `POST /api/rpc`, plus server-pushed
 notifications on the same connection.
 
@@ -24,11 +24,14 @@ HTTP RPC endpoint: a string `id`, a `method`, and an object of `params`.
 | `messages` | `events.messageNew`, `events.messageDropped`, `events.messageStateChanged` |
 | `discovery` | `events.discoveryStarted`, `events.discoveryFinished` |
 | `services` | `events.serviceStateChanged` |
-| `tasks` | `events.taskRunStarted`, `events.taskRunFinished` |
+| `tasks` | `events.taskRunStarted`, `events.taskRunFinished`, `events.taskRunDropped` |
 
-`events.taskRunStarted` carries `{ runId, taskId, trigger, startedAt }`.
+`events.taskRunStarted` carries `{ runId, taskId, trigger, startedAt }` plus
+`delayedUntil` when the run has a start delay.
 `events.taskRunFinished` carries the run summary, including outcome, action and
-next counts, and the error; fetch `tasks.get` for full action output.
+next counts, and the error; fetch `tasks.getRun` for full action output.
+`events.taskRunDropped` carries `{ runIds }` when the bounded in-memory run feed
+evicts rows or a task's feed rows are purged or removed.
 
 `events.serviceStateChanged` reports runtime state only and never triggers a
 config reload. After reconnecting, refresh with `services.list` rather than

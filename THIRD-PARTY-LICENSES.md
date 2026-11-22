@@ -7,7 +7,7 @@ attribution notices of the third-party crates included in the build.
 
 ## Overview
 
-- MIT License (167)
+- MIT License (172)
 - Apache License 2.0 (4)
 - BSD 3-Clause "New" or "Revised" License (1)
 - Mozilla Public License 2.0 (1)
@@ -2790,7 +2790,7 @@ SOFTWARE.
 
 Used by:
 
-- hodeco 0.1.0
+- hodeco 0.2.0
 
 ```
 MIT License
@@ -2821,8 +2821,10 @@ SOFTWARE.
 
 Used by:
 
-- hodeco-codec 0.1.0
-- hodeco-contract 0.1.0
+- hodeco-codec 0.2.0
+- hodeco-contract 0.2.0
+- hodeco-schedule 0.2.0
+- chrono-tz 0.10.4 ([source](https://github.com/chronotope/chrono-tz))
 - chrono 0.4.45 ([source](https://github.com/chronotope/chrono))
 - windows-core 0.58.0 ([source](https://github.com/microsoft/windows-rs))
 - windows-implement 0.58.0 ([source](https://github.com/microsoft/windows-rs))
@@ -3084,6 +3086,33 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
+- siphasher 1.0.4 ([source](https://github.com/jedisct1/rust-siphash))
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
 - tracing-core 0.1.36 ([source](https://github.com/tokio-rs/tracing))
 - zip 9.5.1 ([source](https://github.com/zip-rs/zip2))
 
@@ -3140,6 +3169,37 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
+- phf 0.12.1 ([source](https://github.com/rust-phf/rust-phf))
+- phf_shared 0.12.1 ([source](https://github.com/rust-phf/rust-phf))
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 

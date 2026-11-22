@@ -1,7 +1,7 @@
 //! Messages tab: store-wide find, filtered local list, and the shared viewer.
 
 use super::super::{
-    App, ConditionEditor, FilterDialogMode, MessageFiltersDialog, MessageView,
+    App, ConditionEditor, FilterDialogMode, FilterDraft, MessageFiltersDialog, MessageView,
     PayloadConditionDraft, RawConditionDraft, RawLeafDraft, SearchDirection,
 };
 use crate::model;
@@ -15,7 +15,6 @@ use hodeco_codec::entities;
 use hodeco_codec::filter::{self, FrameKind, Includes};
 use hodeco_codec::hex;
 use hodeco_codec::parsed::{DecodeResult, FieldKind};
-use hodeco_codec::zwave;
 use hodeco_contract::domain::{Message, MessageDirection, MessageState, ServiceInfo, ServiceRef};
 
 pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
@@ -763,7 +762,6 @@ pub(crate) fn show_filters_dialog(
     keep_open: &mut bool,
 ) {
     let theme = app.theme;
-    let palette = app.palette();
     let protocols: Vec<(String, String)> = app
         .protocols
         .iter()
@@ -814,81 +812,10 @@ pub(crate) fn show_filters_dialog(
             widgets::dialog_width(ui, 800.0);
             widgets::dialog_header(ui, theme, title, Some(description));
             widgets::dialog_body(ui, 560.0, |ui| {
-                metadata_editor(app, ui, &mut draft, &protocols, &transports, &services, theme);
+                metadata_editor(app, ui, &mut draft, &protocols, &transports, &services);
                 ui.add_space(8.0);
                 ui.separator();
-                ui.label(RichText::new("Payload matches any of").strong());
-                ui.label(
-                    RichText::new(
-                        "Each card is one OR condition. Fields inside a card are ANDed. Unchecked frame fields are omitted.",
-                    )
-                    .size(13.5)
-                    .color(palette.muted),
-                );
-                let mut edit = None;
-                let mut remove = None;
-                for (index, condition) in draft.payload_conditions.iter().enumerate() {
-                    ui.add_space(4.0);
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(condition.summary()).strong());
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.small_button("Remove").clicked() {
-                                        remove = Some(index);
-                                    }
-                                    if ui.small_button("Edit").clicked() {
-                                        edit = Some(index);
-                                    }
-                                },
-                            );
-                        });
-                    });
-                }
-                if let Some(index) = remove {
-                    draft.payload_conditions.remove(index);
-                }
-                if let Some(index) = edit {
-                    let condition = draft.payload_conditions[index].clone();
-                    dialog.editor = Some(ConditionEditor {
-                        index: Some(index),
-                        draft: condition,
-                        error: None,
-                    });
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Add Z-Wave frame...").clicked() {
-                        dialog.editor = Some(ConditionEditor {
-                            index: None,
-                            draft: PayloadConditionDraft::Frame(filter::FilterSpec::default()),
-                            error: None,
-                        });
-                    }
-                    if ui.button("Add raw bytes...").clicked() {
-                        dialog.editor = Some(ConditionEditor {
-                            index: None,
-                            draft: PayloadConditionDraft::Raw(RawConditionDraft::new()),
-                            error: None,
-                        });
-                    }
-                });
-                let leaves = draft.leaf_count();
-                let bytes = draft.byte_count();
-                let over = draft.exceeds_limits();
-                ui.label(
-                    RichText::new(format!(
-                        "{leaves}/{} match sequences · {bytes}/{} pattern bytes",
-                        hodeco_contract::domain::MAX_PAYLOAD_LEAVES,
-                        hodeco_contract::domain::MAX_PAYLOAD_TOTAL_BYTES
-                    ))
-                    .size(13.5)
-                    .color(if over { palette.red } else { palette.muted }),
-                );
-                if let Some(error) = &draft.error {
-                    ui.label(RichText::new(error).size(13.5).color(palette.red));
-                }
+                payload_conditions_list(app, ui, &mut draft, &mut dialog.editor);
             });
             widgets::dialog_footer(ui, |ui| {
                 if ui.button("Cancel").clicked() {
@@ -901,74 +828,14 @@ pub(crate) fn show_filters_dialog(
                 if ui.button(clear_label).clicked() {
                     clear = true;
                 }
-                if ui
-                    .add_enabled(!over, egui::Button::new("Apply"))
-                    .clicked()
-                {
+                if ui.add_enabled(!over, egui::Button::new("Apply")).clicked() {
                     apply = true;
                 }
             });
             false
         });
 
-    let mut save_editor = false;
-    let mut close_editor = false;
-    if let Some(editor) = dialog.editor.as_mut() {
-        let editor_title = match &editor.draft {
-            PayloadConditionDraft::Frame(_) => "Z-Wave frame condition",
-            PayloadConditionDraft::Raw(_) => "Raw bytes condition",
-        };
-        let mut save = false;
-        let mut close = false;
-        let editor_modal = egui::Modal::new(Id::unique("hodeco-payload-condition"))
-            .frame(widgets::modal_frame(theme))
-            .show(ctx, |ui| {
-                widgets::dialog_width(ui, 860.0);
-                widgets::dialog_header(ui, theme, editor_title, None);
-                widgets::dialog_body(ui, 540.0, |ui| {
-                    match &mut editor.draft {
-                        PayloadConditionDraft::Frame(spec) => frame_condition_editor(app, ui, spec),
-                        PayloadConditionDraft::Raw(raw) => raw_condition_editor(ui, raw, theme),
-                    }
-                    if let Some(error) = &editor.error {
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(error).size(13.5).color(palette.red));
-                    }
-                });
-                widgets::dialog_footer(ui, |ui| {
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                    let label = if editor.index.is_some() {
-                        "Save condition"
-                    } else {
-                        "Add condition"
-                    };
-                    if ui.button(label).clicked() {
-                        save = true;
-                    }
-                });
-                false
-            });
-        if save {
-            match editor.draft.to_expr() {
-                Ok(_) => save_editor = true,
-                Err(error) => editor.error = Some(error),
-            }
-        } else if close || editor_modal.should_close() {
-            close_editor = true;
-        }
-    }
-    if save_editor {
-        let editor = dialog.editor.take().expect("editor exists");
-        if let Some(index) = editor.index {
-            draft.payload_conditions[index] = editor.draft;
-        } else {
-            draft.payload_conditions.push(editor.draft);
-        }
-    } else if close_editor {
-        dialog.editor = None;
-    }
+    payload_condition_modal(app, ctx, theme, &mut dialog.editor, &mut draft);
 
     if keep.should_close() {
         *keep_open = false;
@@ -1009,14 +876,159 @@ pub(crate) fn show_filters_dialog(
     }
 }
 
+pub(crate) fn payload_conditions_list(
+    app: &App,
+    ui: &mut Ui,
+    draft: &mut FilterDraft,
+    editor: &mut Option<ConditionEditor>,
+) {
+    let palette = app.palette();
+    ui.label(RichText::new("Payload matches any of").strong());
+    ui.label(
+        RichText::new(
+            "Each card is one OR condition. Fields inside a card are ANDed. Unchecked frame fields are omitted.",
+        )
+        .size(13.5)
+        .color(palette.muted),
+    );
+    let mut edit = None;
+    let mut remove = None;
+    for (index, condition) in draft.payload_conditions.iter().enumerate() {
+        ui.add_space(4.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(condition.summary()).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(index);
+                    }
+                    if ui.small_button("Edit").clicked() {
+                        edit = Some(index);
+                    }
+                });
+            });
+        });
+    }
+    if let Some(index) = remove {
+        draft.payload_conditions.remove(index);
+    }
+    if let Some(index) = edit {
+        let condition = draft.payload_conditions[index].clone();
+        *editor = Some(ConditionEditor {
+            index: Some(index),
+            draft: condition,
+            error: None,
+        });
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Add Z-Wave frame...").clicked() {
+            *editor = Some(ConditionEditor {
+                index: None,
+                draft: PayloadConditionDraft::Frame(filter::FilterSpec::default()),
+                error: None,
+            });
+        }
+        if ui.button("Add raw bytes...").clicked() {
+            *editor = Some(ConditionEditor {
+                index: None,
+                draft: PayloadConditionDraft::Raw(RawConditionDraft::new()),
+                error: None,
+            });
+        }
+    });
+    let leaves = draft.leaf_count();
+    let bytes = draft.byte_count();
+    let over = draft.exceeds_limits();
+    ui.label(
+        RichText::new(format!(
+            "{leaves}/{} match sequences · {bytes}/{} pattern bytes",
+            hodeco_contract::domain::MAX_PAYLOAD_LEAVES,
+            hodeco_contract::domain::MAX_PAYLOAD_TOTAL_BYTES
+        ))
+        .size(13.5)
+        .color(if over { palette.red } else { palette.muted }),
+    );
+    if let Some(error) = &draft.error {
+        ui.label(RichText::new(error).size(13.5).color(palette.red));
+    }
+}
+
+pub(crate) fn payload_condition_modal(
+    app: &App,
+    ctx: &egui::Context,
+    theme: UiTheme,
+    editor: &mut Option<ConditionEditor>,
+    draft: &mut FilterDraft,
+) {
+    let Some(mut current) = editor.take() else {
+        return;
+    };
+    let palette = app.palette();
+    let editor_title = match &current.draft {
+        PayloadConditionDraft::Frame(_) => "Z-Wave frame condition",
+        PayloadConditionDraft::Raw(_) => "Raw bytes condition",
+    };
+    let mut save = false;
+    let mut close = false;
+    let editor_modal = egui::Modal::new(Id::unique("hodeco-payload-condition"))
+        .frame(widgets::modal_frame(theme))
+        .show(ctx, |ui| {
+            widgets::dialog_width(ui, 860.0);
+            widgets::dialog_header(ui, theme, editor_title, None);
+            widgets::dialog_body(ui, 540.0, |ui| {
+                match &mut current.draft {
+                    PayloadConditionDraft::Frame(spec) => frame_condition_editor(app, ui, spec),
+                    PayloadConditionDraft::Raw(raw) => raw_condition_editor(ui, raw, theme),
+                }
+                if let Some(error) = &current.error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(error).size(13.5).color(palette.red));
+                }
+            });
+            widgets::dialog_footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                let label = if current.index.is_some() {
+                    "Save condition"
+                } else {
+                    "Add condition"
+                };
+                if ui.button(label).clicked() {
+                    save = true;
+                }
+            });
+            false
+        });
+    if save {
+        match current.draft.to_expr() {
+            Ok(_) => {
+                if let Some(index) = current.index {
+                    if index < draft.payload_conditions.len() {
+                        draft.payload_conditions[index] = current.draft;
+                    }
+                } else {
+                    draft.payload_conditions.push(current.draft);
+                }
+            }
+            Err(error) => {
+                current.error = Some(error);
+                *editor = Some(current);
+            }
+        }
+    } else if !(close || editor_modal.should_close()) {
+        *editor = Some(current);
+    }
+}
+
 fn metadata_editor(
     app: &mut App,
     ui: &mut Ui,
-    draft: &mut super::super::FilterDraft,
+    draft: &mut FilterDraft,
     protocols: &[(String, String)],
     transports: &[(String, String)],
     services: &[(ServiceRef, String)],
-    theme: UiTheme,
 ) {
     let palette = app.palette();
     ui.label(RichText::new("State").strong());
@@ -1149,7 +1161,6 @@ fn metadata_editor(
                 );
             }
         });
-    let _ = theme;
 }
 
 fn match_checkbox(ui: &mut Ui, include: &mut bool, enabled: bool) {
@@ -1522,7 +1533,7 @@ fn raw_condition_editor(ui: &mut Ui, raw: &mut RawConditionDraft, theme: UiTheme
             ui.horizontal(|ui| {
                 ui.checkbox(&mut leaf.anywhere, "Anywhere");
                 if !leaf.anywhere {
-                    ui.label("Offset");
+                    widgets::field_label(ui, theme, "Offset");
                     let mut offset = leaf.offset.trim().parse::<u32>().unwrap_or(0);
                     if ui
                         .add(DragValue::new(&mut offset).range(0..=u32::MAX))
@@ -1533,7 +1544,7 @@ fn raw_condition_editor(ui: &mut Ui, raw: &mut RawConditionDraft, theme: UiTheme
                 }
             });
             let width = ui.available_width().max(240.0);
-            ui.label("Bytes");
+            widgets::field_label(ui, theme, "Bytes");
             widgets::hex_input(
                 ui,
                 &mut leaf.bytes,
@@ -1542,7 +1553,7 @@ fn raw_condition_editor(ui: &mut Ui, raw: &mut RawConditionDraft, theme: UiTheme
                 3,
                 width,
             );
-            ui.label("Mask");
+            widgets::field_label(ui, theme, "Mask");
             widgets::hex_input(
                 ui,
                 &mut leaf.mask,
@@ -1662,7 +1673,7 @@ pub(crate) fn render_message(
         MessageView::Hex => hex_view(ui, theme, message.payload.as_slice(), text_encoding),
         MessageView::Parsed => {
             let protocol = model::message_protocol(services, message);
-            if protocol != Some("zwave") {
+            let Some(parser) = model::message_parser(services, message) else {
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(match protocol {
@@ -1676,21 +1687,32 @@ pub(crate) fn render_message(
                 );
                 ui.add_space(4.0);
                 return hex_view(ui, theme, message.payload.as_slice(), text_encoding);
-            }
-            let decoded = zwave::decode(message.payload.as_slice());
+            };
+            let decoded = parser(message.payload.as_slice());
             let entity_keys = model::entity_service_keys(services, &message.service);
             let entities = entities::current();
             ui.add_space(4.0);
             if decoded.frames.is_empty() {
-                ui.label(RichText::new("No Z-Wave frames recognised.").color(palette.muted));
+                ui.label(
+                    RichText::new(format!(
+                        "No {} frames recognised.",
+                        protocol.unwrap_or("protocol")
+                    ))
+                    .color(palette.muted),
+                );
             }
             const MAX_PARSED_FRAMES: usize = 64;
             for (index, frame) in decoded.frames.iter().take(MAX_PARSED_FRAMES).enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(format!("Frame {} · {}", index + 1, frame.title))
-                            .strong()
-                            .size(14.0),
+                        RichText::new(format!(
+                            "Frame {} · {} · {} bytes",
+                            index + 1,
+                            frame.title,
+                            frame.range.len()
+                        ))
+                        .strong()
+                        .size(14.0),
                     );
                     match frame.checksum_ok {
                         Some(true) => {
@@ -1702,8 +1724,15 @@ pub(crate) fn render_message(
                         None => {}
                     }
                 });
+                if frame.summary != frame.title {
+                    ui.label(
+                        RichText::new(&frame.summary)
+                            .size(13.5)
+                            .color(palette.muted),
+                    );
+                }
                 egui::Grid::new(("message-parsed-fields", index))
-                    .num_columns(2)
+                    .num_columns(3)
                     .spacing([16.0, 4.0])
                     .show(ui, |ui| {
                         for field in &frame.fields {
@@ -1713,6 +1742,15 @@ pub(crate) fn render_message(
                             } else {
                                 field.label.clone()
                             };
+                            ui.label(
+                                RichText::new(format!(
+                                    "[0x{:04x}..0x{:04x}]",
+                                    field.range.start, field.range.end
+                                ))
+                                .monospace()
+                                .size(13.5)
+                                .color(palette.muted),
+                            );
                             ui.label(
                                 RichText::new(label)
                                     .strong()
@@ -1767,8 +1805,7 @@ pub(crate) fn render_message(
                     .size(13.5)
                     .color(palette.muted),
             );
-            let json = serde_json::to_string_pretty(message)
-                .unwrap_or_else(|error| format!("could not serialize message: {error}"));
+            let json = model::pretty_json(message);
             widgets::copy_field(ui, theme, "Message JSON", &json, true);
             None
         }
@@ -2061,7 +2098,7 @@ mod tests {
     #[test]
     fn large_payload_views_are_virtualized() {
         let payload = vec![b'A'; 100_000];
-        let decoded = zwave::decode(&payload);
+        let decoded = hodeco_codec::zwave::decode(&payload);
         egui::__run_test_ui(|ui| {
             hex_view(ui, UiTheme::Dark, &payload, model::TextEncoding::Ascii);
             colored_dump(

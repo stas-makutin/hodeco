@@ -43,15 +43,15 @@ or a Windows box: one process, a small set of YAML files, and a browser.
 | Z-Wave | serial | Supported |
 | ZigBee | serial | Planned |
 
-Each controller is one `services` entry in the config. The gateway owns the
-serial port, and clients share it through the API.
+Each controller is one entry in `services.yaml`. The gateway owns the serial
+port, and clients share it through the API.
 
 ## A typical setup
 
 1. Plug a Z-Wave USB controller into the machine.
 2. Install hodeco from a release archive or a `.deb`/`.rpm` package.
 3. Start it and open `http://127.0.0.1:8180/`.
-4. Add the serial service in the UI, or put it in `config.yaml`.
+4. Add the serial service in the UI, or put it in `services.yaml`.
 5. Watch discovery, messages, and parsed frames arrive in the UI or over the
    WebSocket.
 
@@ -77,6 +77,7 @@ serial port, and clients share it through the API.
 | --- | --- |
 | `hodeco` | The gateway: HTTP/WebSocket API, service lifecycle, logging, message store, Z-Wave serial service. |
 | `hodeco-contract` | The shared contract: wire types, method names, errors, configuration schema, parameter metadata, and the static Z-Wave/serial catalog. No Tokio or transport dependencies, so it also builds for WASM. |
+| `hodeco-schedule` | Shared calendar, solar, repeat, and jitter computation used by the gateway scheduler and the UI preview/demo paths. |
 | `hodeco-ui` | The egui admin and diagnostics frontend. Native and browser/WASM builds from the same code. |
 | `hodeco-codec` | Pure Z-Wave/Parsed decoding, hex helpers, frame builder, command definitions, and entity catalog shared with the UI. |
 
@@ -86,6 +87,9 @@ serial port, and clients share it through the API.
   a first-run check.
 - [Configuration](Configuration) — the full `config.yaml` reference and platform
   defaults.
+- [Tasks](Tasks) — triggers, actions, next rules, hooks, and run history.
+- [Schedules](Schedules) — recurrence, solar events, repeats, and previews.
+- [Persistence](Persistence) — message and task-history storage.
 - [HTTP API](HTTP-API) — endpoints, request shapes, methods, and static assets.
 - [WebSocket](WebSocket) — subscriptions, notifications, and backpressure.
 - [Logging](Logging) — the operational log versus the message history.
@@ -95,7 +99,7 @@ serial port, and clients share it through the API.
 
 ## Project status
 
-The project is pre-1.0 (`0.1.0`). The protocol version is independent of the
+The project is pre-1.0 (`0.2.0`). The protocol version is independent of the
 crate version and is currently `1.0`. Z-Wave over serial is supported today;
 ZigBee is planned. New protocols are added behind the same shared contract, so
 the API shape stays consistent as support grows.

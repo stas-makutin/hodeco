@@ -1,4 +1,5 @@
 use crate::automation::engine;
+use crate::automation::feed::RunFeed;
 use crate::automation::history::HistoryStore;
 use crate::automation::runtime::TaskRuntime;
 use crate::automation::scheduler;
@@ -25,6 +26,7 @@ use tracing::{error, info, warn};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTART_DELAY: Duration = Duration::from_millis(100);
+const MESSAGE_LOG_QUEUE: usize = 4096;
 
 pub type AppError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -37,6 +39,7 @@ pub struct AppState {
     pub automation: Arc<AutomationStore>,
     pub runtime: Arc<TaskRuntime>,
     pub history: Arc<HistoryStore>,
+    pub run_feed: Arc<RunFeed>,
     pub registry: Arc<ServiceRegistry>,
     pub discovery: Arc<DiscoveryRegistry>,
     pub store: Arc<MessageStore>,
@@ -46,6 +49,8 @@ pub struct AppState {
     pub shutting_down: Arc<AtomicBool>,
     pub ws_limits: Arc<Semaphore>,
     pub started_at: DateTime<Utc>,
+    /// System IANA time zone, resolved once at startup for `schedules.list`.
+    pub system_timezone: Option<String>,
 }
 
 impl AppState {
@@ -66,7 +71,8 @@ impl AppState {
 struct Gateway {
     state: AppState,
     status_events: broadcast::Receiver<StatusEvent>,
-    writer: persist::LogWriter,
+    writer: persist::LogHandle,
+    writer_task: JoinHandle<()>,
 }
 
 impl Gateway {
@@ -74,7 +80,8 @@ impl Gateway {
         let Gateway {
             state,
             mut status_events,
-            mut writer,
+            writer,
+            writer_task,
         } = self;
 
         let mut store_events = state.store.subscribe();
@@ -88,25 +95,28 @@ impl Gateway {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = flush.tick() => {
-                    if let Err(error) = writer.flush() {
+                    if let Err(error) = writer.flush().await {
                         warn!(error = %error, "unable to flush the message log");
                     }
-                    maybe_compact_messages(&state, &mut writer, &mut last_compact).await;
+                    maybe_compact_messages(&state, &writer, &mut last_compact).await;
                 }
                 event = store_events.recv() => {
                     match event {
                         Ok(event) => {
-                            if let Err(error) = writer.append(&event) {
+                            if let Err(error) = writer.append(event.clone()).await {
                                 warn!(error = %error, "unable to append to the message log");
                             }
-                            engine::handle_store_event(&state, &event).await;
+                            engine::handle_store_event(&state, &event);
                             let _ = state.events.send(Event::from(event));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "message event stream lagged; requesting client resync");
                             let _ = state.resync.send(());
                         }
-                        Err(broadcast::error::RecvError::Closed) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!("message event stream closed");
+                            break;
+                        }
                     }
                 }
                 event = discovery_events.recv() => {
@@ -118,7 +128,10 @@ impl Gateway {
                             warn!(skipped, "discovery event stream lagged; requesting client resync");
                             let _ = state.resync.send(());
                         }
-                        Err(broadcast::error::RecvError::Closed) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!("discovery event stream closed");
+                            break;
+                        }
                     }
                 }
                 event = status_events.recv() => {
@@ -133,14 +146,20 @@ impl Gateway {
                             warn!(skipped, "service status event stream lagged; requesting client resync");
                             let _ = state.resync.send(());
                         }
-                        Err(broadcast::error::RecvError::Closed) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!("service status event stream closed");
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        if let Err(error) = writer.flush() {
+        if let Err(error) = writer.shutdown().await {
             warn!(error = %error, "unable to flush the message log during shutdown");
+        }
+        if let Err(error) = writer_task.await {
+            warn!(error = %error, "message-log writer task failed");
         }
         state.registry.shutdown().await;
         state.discovery.shutdown().await;
@@ -151,7 +170,7 @@ impl Gateway {
 
 async fn maybe_compact_messages(
     state: &AppState,
-    writer: &mut persist::LogWriter,
+    writer: &persist::LogHandle,
     last_compact: &mut Instant,
 ) {
     let config = &state.config.message_log;
@@ -161,31 +180,20 @@ async fn maybe_compact_messages(
     if !by_size && !by_age {
         return;
     }
-    if let Err(error) = writer.flush() {
-        warn!(error = %error, "unable to flush the message log before compaction");
-        return;
-    }
-    let path = config.file.clone();
-    let file_mode = config.file_mode;
-    let store = state.store.clone();
-    let result =
-        tokio::task::spawn_blocking(move || persist::save(&path, &store, Some(file_mode))).await;
-    match result {
-        Ok(Ok(())) => {
-            match persist::LogWriter::open(&config.file, Some(config.file_mode), config.on_corrupt)
-            {
-                Ok(fresh) => {
-                    *writer = fresh;
-                    *last_compact = Instant::now();
-                    info!("message log compacted");
-                }
-                Err(error) => {
-                    warn!(error = %error, "unable to reopen the message log after compaction")
-                }
-            }
+    match writer
+        .compact(
+            config.file.clone(),
+            Some(config.file_mode),
+            config.on_corrupt,
+            state.store.clone(),
+        )
+        .await
+    {
+        Ok(()) => {
+            *last_compact = Instant::now();
+            info!("message log compacted");
         }
-        Ok(Err(error)) => warn!(error = %error, "unable to compact the message log"),
-        Err(error) => warn!(error = %error, "message log compaction task failed"),
+        Err(error) => warn!(error = %error, "unable to compact the message log"),
     }
 }
 
@@ -234,23 +242,35 @@ pub async fn run(
     tokio::task::spawn_blocking(move || load_message_log(&message_log, &load_store))
         .await
         .map_err(|error| -> AppError { Box::new(error) })??;
-    let writer = persist::LogWriter::open(
-        &config.message_log.file,
-        Some(config.message_log.file_mode),
-        config.message_log.on_corrupt,
-    )
+    let writer_path = config.message_log.file.clone();
+    let writer_mode = Some(config.message_log.file_mode);
+    let writer_corrupt = config.message_log.on_corrupt;
+    let writer = tokio::task::spawn_blocking(move || {
+        persist::LogWriter::open(&writer_path, writer_mode, writer_corrupt)
+    })
+    .await
+    .map_err(|error| -> AppError { Box::new(error) })?
     .map_err(|error| -> AppError { Box::new(error) })?;
+    let (writer, writer_task) = persist::LogHandle::spawn(writer, MESSAGE_LOG_QUEUE);
 
     let history = Arc::new(HistoryStore::new(
         config.task_log.clone(),
         config.task_log.dir.clone(),
     ));
-    let task_ids = automation.snapshot().task_ids();
+    let task_history: BTreeMap<String, hodeco_contract::domain::TaskHistoryConfig> = automation
+        .snapshot()
+        .tasks
+        .values()
+        .map(|task| (task.id.clone(), task.history.clone()))
+        .collect();
     let load_history = history.clone();
-    let report = tokio::task::spawn_blocking(move || load_history.load(&task_ids))
+    let report = tokio::task::spawn_blocking(move || load_history.load_with_history(&task_history))
         .await
         .map_err(|error| -> AppError { Box::new(error) })?
         .map_err(|error| -> AppError { Box::new(error) })?;
+    if report.loaded > 0 {
+        info!(rows = report.loaded, "task history loaded");
+    }
     for path in &report.orphans_removed {
         warn!(path = %path.display(), "removed orphan task history file");
     }
@@ -263,11 +283,18 @@ pub async fn run(
     let registry = Arc::new(ServiceRegistry::with_defaults(store.clone(), &cancel_token));
     let status_events = registry.subscribe_status();
     let discovery = Arc::new(DiscoveryRegistry::with_defaults(&cancel_token));
-    let runtime = Arc::new(TaskRuntime::new(config.task_engine.max_concurrent_runs));
-    runtime.seed_history_time(history.latest_time());
-    let ws_limits = Arc::new(Semaphore::new(
-        config.http_server.max_connections.max(1) as usize
+    let run_feed = Arc::new(RunFeed::new(&config.task_engine.run_feed));
+    let runtime = Arc::new(TaskRuntime::with_shutdown(
+        config.task_engine.max_concurrent_runs,
+        &cancel_token,
     ));
+    runtime.seed_history_time(history.latest_time());
+    let ws_limit = if config.http_server.max_connections == 0 {
+        Semaphore::MAX_PERMITS
+    } else {
+        config.http_server.max_connections as usize
+    };
+    let ws_limits = Arc::new(Semaphore::new(ws_limit));
     let state = AppState {
         config: config.clone(),
         config_store,
@@ -275,6 +302,7 @@ pub async fn run(
         automation,
         runtime,
         history,
+        run_feed,
         registry: registry.clone(),
         discovery: discovery.clone(),
         store: store.clone(),
@@ -284,6 +312,9 @@ pub async fn run(
         shutting_down: Arc::new(AtomicBool::new(false)),
         ws_limits,
         started_at: Utc::now(),
+        system_timezone: hodeco_schedule::system_timezone()
+            .ok()
+            .map(|timezone| timezone.name().to_string()),
     };
 
     for service in &services_store.snapshot() {
@@ -316,6 +347,7 @@ pub async fn run(
             state: state.clone(),
             status_events,
             writer,
+            writer_task,
         }
         .run(gateway_cancel.clone()),
     );
@@ -351,6 +383,7 @@ pub async fn run(
     }
 
     state.shutting_down.store(true, Ordering::SeqCst);
+    state.runtime.cancel_runs();
     http_cancel.cancel();
     gateway_cancel.cancel();
     scheduler_cancel.cancel();
@@ -371,6 +404,8 @@ pub async fn run(
             }
         }
     }
+
+    state.runtime.wait_for_runs(SHUTDOWN_TIMEOUT).await;
 
     if cancel_token.is_cancelled() {
         Ok(())

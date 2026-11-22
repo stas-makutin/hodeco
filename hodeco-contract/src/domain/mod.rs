@@ -13,8 +13,8 @@ pub use command::*;
 pub use discovery::{DiscoveryEntry, DiscoveryInfo, DiscoveryState};
 pub use message::{Message, MessageDirection, MessageOrder, MessageState};
 pub use params::{
-    ParamDef, ParamError, ParamType, ParamValues, param_bool, param_duration, param_i64,
-    param_size, param_str, param_u64, parse_param_values,
+    ParamDef, ParamError, ParamType, ParamValues, param_duration, param_str, param_u64,
+    parse_param_values,
 };
 pub use payload::{
     MAX_PAYLOAD_DEPTH, MAX_PAYLOAD_LEAF_BYTES, MAX_PAYLOAD_LEAVES, MAX_PAYLOAD_TOTAL_BYTES,

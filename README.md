@@ -45,8 +45,9 @@ no external database, no cloud account.
   and build outgoing frames with typed controls, packed bit fields, signed or
   unsigned integer widths, TX options, and a per-send TTL override.
 - **Automation included.** Tasks run commands and send messages on schedules,
-  messages, HTTP hooks, or manual triggers; next rules chain tasks, and every run
-  is recorded in per-task history. Commands and schedules are reusable catalogs.
+  messages, HTTP hooks, or manual triggers; next rules chain tasks, a bounded
+  recent-run feed powers the Runs view, and opt-in per-task history keeps runs on
+  disk. Commands and schedules are reusable catalogs.
 - **Operations included.** Rotating logs with optional ZIP archives, file-backed
   message and task persistence, a Windows service host, and a systemd installer.
 - **Portable releases.** Windows x64/ARM64, Linux x64/ARM64/ARMv7, and fully
@@ -59,8 +60,8 @@ no external database, no cloud account.
 | Z-Wave | serial | Supported |
 | ZigBee | serial | Planned |
 
-Each controller is one `services` entry in the config. The gateway owns the
-serial port; clients share the devices through the API. New protocols are added
+Each controller is one entry in `services.yaml`. The gateway owns the serial
+port; clients share the devices through the API. New protocols are added
 behind the same contract, so the API shape stays consistent as support grows.
 
 ## Quick start
@@ -151,18 +152,21 @@ default; clients that do not accept Brotli or gzip still receive the raw files.
 | --- | --- |
 | `hodeco` | Backend server: HTTP/WebSocket API, service lifecycle, logging, message store, and the serial services (Z-Wave today, ZigBee planned). |
 | `hodeco-contract` | Shared wire types, method names, errors, configuration schema, parameter metadata, and the static Z-Wave/serial catalog. No Tokio or transport dependencies; builds for WASM. |
+| `hodeco-schedule` | Pure calendar, solar, repeat, and jitter computation shared by the gateway scheduler and the UI preview/demo paths. |
 | `hodeco-ui` | egui admin and diagnostics frontend. Native and browser/WASM builds from the same code. |
 | `hodeco-codec` | Pure Z-Wave/Parsed decoding, hex helpers, frame builder, command definitions, and entity catalog shared with the UI. |
 
 ## A tour of the API
 
-The gateway exposes four routes:
+The gateway exposes the API, the live WebSocket, health, task hooks, and the
+static frontend:
 
 | Route | Purpose |
 | --- | --- |
 | `POST /api/rpc` | JSON-RPC-style request/response. |
 | `GET /api/ws` | WebSocket for RPC calls and live notifications. |
 | `GET /api/health` | Health check. |
+| `GET/POST /api/hooks/{task}` | Starts a task's HTTP trigger. |
 | `GET /*` | Static frontend assets. |
 
 A request is intentionally boring:
@@ -176,13 +180,13 @@ curl -s http://127.0.0.1:8180/api/rpc \
 The envelope is JSON-RPC-flavored but minimal: `id` is a string, `method` is a
 known method name, and `params` is an object. The `jsonrpc` field is not used.
 
-The method surface covers server and config (`server.info`, `config.get`,
-`config.update`), metadata (`protocols.*`, `transports.list`), discovery
+The method surface covers server and config (`server.info`, `system.restart`,
+`config.get`, `config.update`), metadata (`protocols.*`, `transports.list`), discovery
 (`discovery.start`, `discovery.get`, `discovery.cancel`), services
 (`services.list`, `services.add`, `services.remove`, `services.alias`,
 `services.status`, `services.params`, `services.send`), messages
-(`messages.list`, `messages.get`), and events (`events.subscribe`,
-`events.unsubscribe`).
+(`messages.list`, `messages.get`), automation (`tasks.*`, `schedules.*`,
+`commands.*`), and events (`events.subscribe`, `events.unsubscribe`).
 
 `messages.list` is the workhorse: timestamp-bounded paging, metadata and ID
 filters, and protocol-neutral masked `PayloadExpr` trees evaluated by the
@@ -194,7 +198,7 @@ On the WebSocket, no events are delivered until the client subscribes:
 {"id":"1","method":"events.subscribe","params":{"topics":["messages","services"]}}
 ```
 
-Topics are `messages`, `discovery`, and `services`. Each connection has a bounded
+Topics are `messages`, `discovery`, `services`, and `tasks`. Each connection has a bounded
 outgoing queue; a slow consumer, or a lagging server-side event stream, closes
 the connection with `1013`. Reconnect, resubscribe, and resynchronize with the
 list methods.
@@ -297,8 +301,6 @@ files:
 
 taskLog:
   dir: tasks
-  maxSize: 100 KiB
-  maxRows: 1000
   fileMode: "0640"
   compactionFactor: 2.0
   compactInterval: 30 d
@@ -309,6 +311,9 @@ taskEngine:
   maxConcurrentRuns: 32
   maxChainDepth: 16
   maxFanOut: 16
+  runFeed:
+    maxRows: 1000
+    maxSize: 4 MiB
 ```
 
 ```yaml
@@ -343,9 +348,8 @@ timezone: Europe/Berlin
 schedules:
   - id: before-sunset
     name: Before sunset
-    on:
-      at: "sunset - 15m"
-      days: [mon, tue, wed, thu, fri]
+    at: "sunset - 15m"
+    days: [mon, tue, wed, thu, fri]
 ```
 
 ```yaml
@@ -452,6 +456,9 @@ The [wiki](../../wiki) is the operator and integrator manual:
 - [Getting Started](wiki/Getting-Started.md) — run a release or build from source.
 - [Changelog](CHANGELOG.md) — release history and breaking changes.
 - [Configuration](wiki/Configuration.md) — full config reference and paths.
+- [Tasks](wiki/Tasks.md) — triggers, actions, next rules, hooks, and run history.
+- [Schedules](wiki/Schedules.md) — recurrence, solar events, repeats, and previews.
+- [Persistence](wiki/Persistence.md) — message and task-history storage.
 - [HTTP API](wiki/HTTP-API.md) — endpoints, RPC methods, and static assets.
 - [WebSocket](wiki/WebSocket.md) — subscriptions, notifications, and backpressure.
 - [Logging](wiki/Logging.md) — operational logs and message persistence.

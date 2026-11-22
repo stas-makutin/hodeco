@@ -72,7 +72,11 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
         }
     };
 
-    match runtime.block_on(app::run(loaded.bundle, config_path, cancel_token)) {
+    let shutdown = cancel_token.clone();
+    match runtime.block_on(async move {
+        install_signal_handlers(cancel_token);
+        app::run(loaded.bundle, config_path, shutdown).await
+    }) {
         Ok(()) => info!("service stopped"),
         Err(error) => {
             error!(error = %error, "service failed");
@@ -81,6 +85,39 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
     }
 
     logging::shutdown();
+}
+
+/// Installs console and SIGTERM handling on the service runtime. This keeps
+/// signal delivery on Tokio instead of dedicating another OS thread to it.
+fn install_signal_handlers(cancel: CancellationToken) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            let mut terminate =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(signal) => signal,
+                    Err(error) => {
+                        warn!(error = %error, "failed to install SIGTERM handler");
+                        return;
+                    }
+                };
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                warn!(error = %error, "failed to install Ctrl+C handler");
+                return;
+            }
+        }
+
+        info!("shutdown signal received");
+        cancel.cancel();
+    });
 }
 
 struct LoadedConfig {

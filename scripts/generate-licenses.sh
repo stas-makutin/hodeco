@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Generates THIRD-PARTY-LICENSES.md notices with cargo-about.
+# The backend file includes dev-dependencies (proptest, tempfile,
+# tokio-tungstenite, http-body-util, ...) because cargo-about has no dev-dep
+# exclusion; this is intentional so the notice remains a superset for every
+# build configuration.
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 

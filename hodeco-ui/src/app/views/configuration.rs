@@ -79,9 +79,8 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
             {
                 app.refresh_config();
             }
-            if let Some(config) = &app.config
-                && let Ok(json) = serde_json::to_string_pretty(config)
-            {
+            if let Some(config) = &app.config {
+                let json = crate::model::pretty_json(config);
                 widgets::copy_with_feedback(ui, &json, "Copy JSON");
             }
         },
@@ -110,309 +109,565 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
     };
 
     let mut changed = false;
+    let mut jump_to: Option<&'static str> = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Jump to").small().color(palette(theme).muted));
+        for title in [
+            "Paths",
+            "Catalog files",
+            "Log",
+            "HTTP server",
+            "Message log",
+            "Task engine",
+            "Task history log",
+        ] {
+            if ui.link(title).clicked() {
+                jump_to = Some(title);
+            }
+        }
+    });
+    ui.add_space(4.0);
     egui::ScrollArea::vertical()
+        .id_salt("configuration-scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             widgets::keyboard_scroll(ui, ui.rect_contains_pointer(ui.max_rect()));
-            section(ui, theme, "Paths", |ui| {
-                grid(ui, theme, |ui| {
-                    text_row(
-                        ui,
-                        theme,
-                        "Working directory",
-                        &mut draft.working_dir,
-                        config.working_dir.display(),
-                        &mut changed,
-                    );
-                });
-            });
-
-            section(ui, theme, "Log", |ui| {
-                grid(ui, theme, |ui| {
-                    text_row(
-                        ui,
-                        theme,
-                        "Directory",
-                        &mut draft.log.dir,
-                        config.log.dir.display(),
-                        &mut changed,
-                    );
-                    text_row(
-                        ui,
-                        theme,
-                        "File",
-                        &mut draft.log.file,
-                        &config.log.file,
-                        &mut changed,
-                    );
-                    octal_row(
-                        ui,
-                        theme,
-                        "Directory mode",
-                        &mut draft.log.dir_mode,
-                        config.log.dir_mode,
-                        &mut changed,
-                    );
-                    octal_row(
-                        ui,
-                        theme,
-                        "File mode",
-                        &mut draft.log.file_mode,
-                        config.log.file_mode,
-                        &mut changed,
-                    );
-                    size_row(
-                        ui,
-                        theme,
-                        "Max size",
-                        &mut draft.log.max_size,
-                        config.log.max_size,
-                        &mut changed,
-                    );
-                    duration_row(
-                        ui,
-                        theme,
-                        "Max age",
-                        &mut draft.log.max_age,
-                        config.log.max_age,
-                        &mut changed,
-                    );
-                    number_row_u32(
-                        ui,
-                        theme,
-                        "Backups",
-                        &mut draft.log.backups,
-                        config.log.backups,
-                        &mut changed,
-                    );
-                    number_row_u32(
-                        ui,
-                        theme,
-                        "Backup days",
-                        &mut draft.log.backup_days,
-                        config.log.backup_days,
-                        &mut changed,
-                    );
-                    ui.label(field_label(theme, "Archive"));
-                    let archive_changed = draft.log.archive != config.log.archive;
-                    ui.horizontal(|ui| {
-                        changed |= ComboBox::from_id_salt("config-log-archive")
-                            .selected_text(archive_label(draft.log.archive))
-                            .show_ui(ui, |ui| {
-                                let mut changed = false;
-                                changed |= ui
-                                    .selectable_value(&mut draft.log.archive, Archive::None, "None")
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(&mut draft.log.archive, Archive::Zip, "Zip")
-                                    .changed();
-                                changed
-                            })
-                            .inner
-                            .unwrap_or(false);
-                        if previous_hint(
+            section(ui, theme, "Paths", jump_to == Some("Paths"), |ui| {
+                widgets::control_group(ui, "Runtime", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
                             ui,
                             theme,
-                            archive_changed,
-                            archive_label(config.log.archive),
-                        ) {
-                            draft.log.archive = config.log.archive;
-                            changed = true;
-                        }
-                    });
-                    ui.end_row();
-                });
-            });
-
-            section(ui, theme, "HTTP server", |ui| {
-                grid(ui, theme, |ui| {
-                    text_row(
-                        ui,
-                        theme,
-                        "Bind",
-                        &mut draft.http_server.bind,
-                        &config.http_server.bind,
-                        &mut changed,
-                    );
-                    number_row_u16(
-                        ui,
-                        theme,
-                        "Port",
-                        &mut draft.http_server.port,
-                        config.http_server.port,
-                        &mut changed,
-                    );
-                    number_row_u32(
-                        ui,
-                        theme,
-                        "Max connections",
-                        &mut draft.http_server.max_connections,
-                        config.http_server.max_connections,
-                        &mut changed,
-                    );
-                    duration_row(
-                        ui,
-                        theme,
-                        "Read timeout",
-                        &mut draft.http_server.read_timeout,
-                        config.http_server.read_timeout,
-                        &mut changed,
-                    );
-                    duration_row(
-                        ui,
-                        theme,
-                        "Read header timeout",
-                        &mut draft.http_server.read_header_timeout,
-                        config.http_server.read_header_timeout,
-                        &mut changed,
-                    );
-                    duration_row(
-                        ui,
-                        theme,
-                        "Write timeout",
-                        &mut draft.http_server.write_timeout,
-                        config.http_server.write_timeout,
-                        &mut changed,
-                    );
-                    duration_row(
-                        ui,
-                        theme,
-                        "Idle timeout",
-                        &mut draft.http_server.idle_timeout,
-                        config.http_server.idle_timeout,
-                        &mut changed,
-                    );
-                    number_row_u32(
-                        ui,
-                        theme,
-                        "Max header bytes",
-                        &mut draft.http_server.max_header_bytes,
-                        config.http_server.max_header_bytes,
-                        &mut changed,
-                    );
-                    text_row(
-                        ui,
-                        theme,
-                        "Static assets directory",
-                        &mut draft.http_server.static_assets.dir,
-                        config.http_server.static_assets.dir.display(),
-                        &mut changed,
-                    );
-                    text_row(
-                        ui,
-                        theme,
-                        "Static index",
-                        &mut draft.http_server.static_assets.index,
-                        &config.http_server.static_assets.index,
-                        &mut changed,
-                    );
-                    bool_row(
-                        ui,
-                        theme,
-                        "SPA fallback",
-                        &mut draft.http_server.static_assets.spa_fallback,
-                        config.http_server.static_assets.spa_fallback,
-                        &mut changed,
-                    );
-                    bool_row(
-                        ui,
-                        theme,
-                        "Precompressed assets",
-                        &mut draft.http_server.static_assets.precompressed,
-                        config.http_server.static_assets.precompressed,
-                        &mut changed,
-                    );
-                });
-            });
-
-            section(ui, theme, "Message log", |ui| {
-                grid(ui, theme, |ui| {
-                    size_row(
-                        ui,
-                        theme,
-                        "Max size",
-                        &mut draft.message_log.max_size,
-                        config.message_log.max_size,
-                        &mut changed,
-                    );
-                    text_row(
-                        ui,
-                        theme,
-                        "File",
-                        &mut draft.message_log.file,
-                        config.message_log.file.display(),
-                        &mut changed,
-                    );
-                    octal_row(
-                        ui,
-                        theme,
-                        "File mode",
-                        &mut draft.message_log.file_mode,
-                        config.message_log.file_mode,
-                        &mut changed,
-                    );
-                    duration_row(
-                        ui,
-                        theme,
-                        "Flush interval",
-                        &mut draft.message_log.auto_persist,
-                        config.message_log.auto_persist,
-                        &mut changed,
-                    );
-                    text_row(
-                        ui,
-                        theme,
-                        "Compaction factor",
-                        &mut draft.message_log.compaction_factor,
-                        config.message_log.compaction_factor.to_string(),
-                        &mut changed,
-                    );
-                    duration_row(
-                        ui,
-                        theme,
-                        "Compact interval",
-                        &mut draft.message_log.compact_interval,
-                        config.message_log.compact_interval,
-                        &mut changed,
-                    );
-                    ui.label(field_label(theme, "On corrupt"));
-                    let corrupt_changed =
-                        draft.message_log.on_corrupt != config.message_log.on_corrupt;
-                    ui.horizontal(|ui| {
-                        changed |= ComboBox::from_id_salt("config-message-log-corrupt")
-                            .selected_text(corrupt_label(draft.message_log.on_corrupt))
-                            .show_ui(ui, |ui| {
-                                let mut changed = false;
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut draft.message_log.on_corrupt,
-                                        CorruptPolicy::Ignore,
-                                        "Ignore",
-                                    )
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut draft.message_log.on_corrupt,
-                                        CorruptPolicy::Fail,
-                                        "Fail",
-                                    )
-                                    .changed();
-                                changed
-                            })
-                            .inner
-                            .unwrap_or(false);
-                        if previous_hint(
+                            "Working directory",
+                            &mut draft.working_dir,
+                            config.working_dir.display(),
+                            &mut changed,
+                        );
+                        note_row(
                             ui,
                             theme,
-                            corrupt_changed,
-                            corrupt_label(config.message_log.on_corrupt),
-                        ) {
-                            draft.message_log.on_corrupt = config.message_log.on_corrupt;
-                            changed = true;
-                        }
+                            "Base directory for relative paths and runtime data.",
+                        );
                     });
-                    ui.end_row();
                 });
+            });
+
+            section(ui, theme, "Catalog files", jump_to == Some("Catalog files"), |ui| {
+                widgets::control_group(ui, "Paths", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
+                            ui,
+                            theme,
+                            "Services",
+                            &mut draft.files.services,
+                            config.files.services.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Path to services.yaml, relative to config.yaml.");
+                        text_row(
+                            ui,
+                            theme,
+                            "Tasks",
+                            &mut draft.files.tasks,
+                            config.files.tasks.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Path to tasks.yaml.");
+                        text_row(
+                            ui,
+                            theme,
+                            "Schedules",
+                            &mut draft.files.schedules,
+                            config.files.schedules.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Path to schedules.yaml.");
+                        text_row(
+                            ui,
+                            theme,
+                            "Commands",
+                            &mut draft.files.commands,
+                            config.files.commands.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Path to commands.yaml.");
+                    });
+                });
+            });
+
+            section(ui, theme, "Log", jump_to == Some("Log"), |ui| {
+                widgets::control_group(ui, "Files", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
+                            ui,
+                            theme,
+                            "Directory",
+                            &mut draft.log.dir,
+                            config.log.dir.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Directory for rolling log files.");
+                        text_row(
+                            ui,
+                            theme,
+                            "File",
+                            &mut draft.log.file,
+                            &config.log.file,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Log file name, placed inside the log directory.");
+                        octal_row(
+                            ui,
+                            theme,
+                            "Directory mode",
+                            &mut draft.log.dir_mode,
+                            config.log.dir_mode,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Unix permissions used when creating the directory.");
+                        octal_row(
+                            ui,
+                            theme,
+                            "File mode",
+                            &mut draft.log.file_mode,
+                            config.log.file_mode,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Unix permissions used for new log files.");
+                    });
+                });
+                widgets::control_group(ui, "Rotation", |ui| {
+                    grid(ui, theme, |ui| {
+                        size_row(
+                            ui,
+                            theme,
+                            "Max size",
+                            &mut draft.log.max_size,
+                            config.log.max_size,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Rotate the active file when it reaches this size.");
+                        duration_row(
+                            ui,
+                            theme,
+                            "Max age",
+                            &mut draft.log.max_age,
+                            config.log.max_age,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Rotate the active file after this age.");
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Backups",
+                            &mut draft.log.backups,
+                            config.log.backups,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Maximum retained rotated files.");
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Backup days",
+                            &mut draft.log.backup_days,
+                            config.log.backup_days,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Delete backups older than this many days.");
+                        ui.label(field_label(theme, "Archive"));
+                        let archive_changed = draft.log.archive != config.log.archive;
+                        ui.horizontal(|ui| {
+                            changed |= ComboBox::from_id_salt("config-log-archive")
+                                .selected_text(archive_label(draft.log.archive))
+                                .show_ui(ui, |ui| {
+                                    let mut changed = false;
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut draft.log.archive,
+                                            Archive::None,
+                                            "None",
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut draft.log.archive,
+                                            Archive::Zip,
+                                            "Zip",
+                                        )
+                                        .changed();
+                                    changed
+                                })
+                                .inner
+                                .unwrap_or(false);
+                            if previous_hint(
+                                ui,
+                                theme,
+                                archive_changed,
+                                archive_label(config.log.archive),
+                            ) {
+                                draft.log.archive = config.log.archive;
+                                changed = true;
+                            }
+                        });
+                        ui.end_row();
+                        note_row(ui, theme, "Optionally compress rotated files as ZIP archives.");
+                    });
+                });
+            });
+
+            section(ui, theme, "HTTP server", jump_to == Some("HTTP server"), |ui| {
+                widgets::control_group(ui, "Listener", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
+                            ui,
+                            theme,
+                            "Bind",
+                            &mut draft.http_server.bind,
+                            &config.http_server.bind,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Interface to bind; 0.0.0.0 listens on all interfaces.");
+                        number_row_u16(
+                            ui,
+                            theme,
+                            "Port",
+                            &mut draft.http_server.port,
+                            config.http_server.port,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "TCP port for HTTP and WebSocket clients.");
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Max connections",
+                            &mut draft.http_server.max_connections,
+                            config.http_server.max_connections,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "Concurrent accepted connections; 0 removes the limit.",
+                        );
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Max header bytes",
+                            &mut draft.http_server.max_header_bytes,
+                            config.http_server.max_header_bytes,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Maximum size of request headers.");
+                    });
+                });
+                widgets::control_group(ui, "Timeouts", |ui| {
+                    grid(ui, theme, |ui| {
+                        duration_row(
+                            ui,
+                            theme,
+                            "Read timeout",
+                            &mut draft.http_server.read_timeout,
+                            config.http_server.read_timeout,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Maximum time to read the request body.");
+                        duration_row(
+                            ui,
+                            theme,
+                            "Read header timeout",
+                            &mut draft.http_server.read_header_timeout,
+                            config.http_server.read_header_timeout,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Maximum time to read request headers.");
+                        duration_row(
+                            ui,
+                            theme,
+                            "Write timeout",
+                            &mut draft.http_server.write_timeout,
+                            config.http_server.write_timeout,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Maximum time to write a response.");
+                        duration_row(
+                            ui,
+                            theme,
+                            "Idle timeout",
+                            &mut draft.http_server.idle_timeout,
+                            config.http_server.idle_timeout,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Keep-alive idle timeout.");
+                    });
+                });
+                widgets::control_group(ui, "Static assets", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
+                            ui,
+                            theme,
+                            "Directory",
+                            &mut draft.http_server.static_assets.dir,
+                            config.http_server.static_assets.dir.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Directory containing the built web UI.");
+                        text_row(
+                            ui,
+                            theme,
+                            "Index",
+                            &mut draft.http_server.static_assets.index,
+                            &config.http_server.static_assets.index,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Index file served for the UI root.");
+                        bool_row(
+                            ui,
+                            theme,
+                            "SPA fallback",
+                            &mut draft.http_server.static_assets.spa_fallback,
+                            config.http_server.static_assets.spa_fallback,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Serve the index for unknown non-API paths.");
+                        bool_row(
+                            ui,
+                            theme,
+                            "Precompressed assets",
+                            &mut draft.http_server.static_assets.precompressed,
+                            config.http_server.static_assets.precompressed,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Prefer sibling .br or .gz files when supported.");
+                    });
+                });
+            });
+
+            section(ui, theme, "Message log", jump_to == Some("Message log"), |ui| {
+                widgets::control_group(ui, "Storage", |ui| {
+                    grid(ui, theme, |ui| {
+                        size_row(
+                            ui,
+                            theme,
+                            "Max size",
+                            &mut draft.message_log.max_size,
+                            config.message_log.max_size,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "History is compacted after growing beyond this size times the compaction factor.",
+                        );
+                        text_row(
+                            ui,
+                            theme,
+                            "File",
+                            &mut draft.message_log.file,
+                            config.message_log.file.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "File used to persist message history.");
+                        octal_row(
+                            ui,
+                            theme,
+                            "File mode",
+                            &mut draft.message_log.file_mode,
+                            config.message_log.file_mode,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Unix permissions for new log files.");
+                        duration_row(
+                            ui,
+                            theme,
+                            "Flush interval",
+                            &mut draft.message_log.auto_persist,
+                            config.message_log.auto_persist,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "How often buffered message history is written to disk.");
+                    });
+                });
+                widgets::control_group(ui, "Compaction", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
+                            ui,
+                            theme,
+                            "Compaction factor",
+                            &mut draft.message_log.compaction_factor,
+                            config.message_log.compaction_factor.to_string(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Compact above maxSize × factor.");
+                        duration_row(
+                            ui,
+                            theme,
+                            "Compact interval",
+                            &mut draft.message_log.compact_interval,
+                            config.message_log.compact_interval,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Compact after this age even if the size threshold is not reached.");
+                        corrupt_row(
+                            ui,
+                            theme,
+                            "On corrupt",
+                            &mut draft.message_log.on_corrupt,
+                            config.message_log.on_corrupt,
+                            &mut changed,
+                            "config-message-log-corrupt",
+                        );
+                        note_row(ui, theme, "Ignore replaces a corrupt file; Fail refuses startup.");
+                    });
+                });
+            });
+
+            section(ui, theme, "Task engine", jump_to == Some("Task engine"), |ui| {
+                widgets::control_group(ui, "Safety limits", |ui| {
+                    grid(ui, theme, |ui| {
+                        size_row(
+                            ui,
+                            theme,
+                            "Max trigger payload",
+                            &mut draft.task_engine.max_trigger_payload_size,
+                            config.task_engine.max_trigger_payload_size,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "Largest accepted trigger payload; the hard cap may be lower.",
+                        );
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Max concurrent runs",
+                            &mut draft.task_engine.max_concurrent_runs,
+                            config.task_engine.max_concurrent_runs,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "Global cap across tasks; excess triggers are suppressed.",
+                        );
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Max chain depth",
+                            &mut draft.task_engine.max_chain_depth,
+                            config.task_engine.max_chain_depth,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "Maximum next-task depth from one trigger.",
+                        );
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Max fan out",
+                            &mut draft.task_engine.max_fan_out,
+                            config.task_engine.max_fan_out,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "Maximum net tasks started from one trigger fan-out.",
+                        );
+                        number_row_u32(
+                            ui,
+                            theme,
+                            "Run feed rows",
+                            &mut draft.task_engine.run_feed.max_rows,
+                            config.task_engine.run_feed.max_rows,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "Recent completed runs kept in memory and returned by tasks.runFeed.",
+                        );
+                        size_row(
+                            ui,
+                            theme,
+                            "Run feed size",
+                            &mut draft.task_engine.run_feed.max_size,
+                            config.task_engine.run_feed.max_size,
+                            &mut changed,
+                        );
+                        note_row(
+                            ui,
+                            theme,
+                            "Byte cap for recent runs; the oldest run is evicted first.",
+                        );
+                    });
+                });
+            });
+
+            section(ui, theme, "Task history log", jump_to == Some("Task history log"), |ui| {
+                widgets::control_group(ui, "Storage", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
+                            ui,
+                            theme,
+                            "Directory",
+                            &mut draft.task_log.dir,
+                            config.task_log.dir.display(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Directory for per-task history files.");
+                        octal_row(
+                            ui,
+                            theme,
+                            "File mode",
+                            &mut draft.task_log.file_mode,
+                            config.task_log.file_mode,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Unix permissions for new history files.");
+                    });
+                });
+                widgets::control_group(ui, "Compaction", |ui| {
+                    grid(ui, theme, |ui| {
+                        text_row(
+                            ui,
+                            theme,
+                            "Compaction factor",
+                            &mut draft.task_log.compaction_factor,
+                            config.task_log.compaction_factor.to_string(),
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Compact above each task's history maxSize × factor.");
+                        duration_row(
+                            ui,
+                            theme,
+                            "Compact interval",
+                            &mut draft.task_log.compact_interval,
+                            config.task_log.compact_interval,
+                            &mut changed,
+                        );
+                        note_row(ui, theme, "Checked on a task's next run.");
+                        corrupt_row(
+                            ui,
+                            theme,
+                            "On corrupt",
+                            &mut draft.task_log.on_corrupt,
+                            config.task_log.on_corrupt,
+                            &mut changed,
+                            "config-task-log-corrupt",
+                        );
+                        note_row(ui, theme, "Ignore skips a corrupt task file; Fail refuses startup.");
+                    });
+                });
+                ui.label(
+                    RichText::new(
+                        "Per-task history size and row limits are configured in the task editor. These compaction settings apply to every history file.",
+                    )
+                    .size(13.0)
+                    .color(palette(theme).muted),
+                );
             });
         });
 
@@ -427,11 +682,15 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
     app.config_ui.dirty = dirty;
 }
 
-fn section(ui: &mut Ui, _theme: UiTheme, title: &str, body: impl FnOnce(&mut Ui)) {
+fn section(ui: &mut Ui, _theme: UiTheme, title: &str, jump: bool, body: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
-    egui::CollapsingHeader::new(RichText::new(title).size(15.0).strong())
+    let response = egui::CollapsingHeader::new(RichText::new(title).size(15.0).strong())
         .default_open(true)
+        .open(jump.then_some(true))
         .show(ui, body);
+    if jump {
+        ui.scroll_to_rect(response.header_response.rect, Some(egui::Align::TOP));
+    }
 }
 
 fn grid(ui: &mut Ui, _theme: UiTheme, body: impl FnOnce(&mut Ui)) {
@@ -441,8 +700,14 @@ fn grid(ui: &mut Ui, _theme: UiTheme, body: impl FnOnce(&mut Ui)) {
         .show(ui, body);
 }
 
+fn note_row(ui: &mut Ui, theme: UiTheme, note: &str) {
+    ui.label("");
+    ui.label(RichText::new(note).small().color(palette(theme).muted));
+    ui.end_row();
+}
+
 fn field_label(theme: UiTheme, label: &str) -> RichText {
-    RichText::new(label).size(13.5).color(palette(theme).muted)
+    widgets::field_label_text(theme, label)
 }
 
 /// Shows the previous value while a field differs from the loaded config and
@@ -600,6 +865,23 @@ struct TimeParts {
 }
 
 fn parse_time_parts(value: &str) -> Option<TimeParts> {
+    let value = value.trim();
+    for unit in [
+        TimeUnit::Weeks,
+        TimeUnit::Days,
+        TimeUnit::Hours,
+        TimeUnit::Milliseconds,
+        TimeUnit::Microseconds,
+        TimeUnit::Nanoseconds,
+        TimeUnit::Minutes,
+        TimeUnit::Seconds,
+    ] {
+        if let Some(amount) = value.strip_suffix(unit.suffix())
+            && let Ok(amount) = amount.trim().parse::<u64>()
+        {
+            return Some(TimeParts { amount, unit });
+        }
+    }
     let nanos = value.parse::<HumanDuration>().ok()?.as_std().as_nanos();
     if nanos == 0 {
         return Some(TimeParts {
@@ -677,6 +959,20 @@ struct SizeParts {
 }
 
 fn parse_size_parts(value: &str) -> Option<SizeParts> {
+    let value = value.trim();
+    for unit in [
+        SizeUnit::Tebibytes,
+        SizeUnit::Gibibytes,
+        SizeUnit::Mebibytes,
+        SizeUnit::Kibibytes,
+        SizeUnit::Bytes,
+    ] {
+        if let Some(amount) = value.strip_suffix(unit.suffix())
+            && let Ok(amount) = amount.trim().parse::<u64>()
+        {
+            return Some(SizeParts { amount, unit });
+        }
+    }
     let bytes = value.parse::<Size>().ok()?.as_bytes();
     if bytes == 0 {
         return Some(SizeParts {
@@ -732,14 +1028,7 @@ fn duration_row(
                         ui.selectable_value(&mut unit, candidate, candidate.suffix());
                     }
                 });
-            if unit != original_unit {
-                let nanos = u128::from(parts.amount) * original_unit.nanos();
-                parts.amount = nanos
-                    .checked_div(unit.nanos())
-                    .and_then(|amount| u64::try_from(amount).ok())
-                    .unwrap_or(0);
-                parts.unit = unit;
-            }
+            parts.unit = unit;
             if response.changed() || unit != original_unit {
                 *value = format_time(parts);
                 *changed = true;
@@ -792,11 +1081,7 @@ fn size_row(
                         ui.selectable_value(&mut unit, candidate, candidate.suffix());
                     }
                 });
-            if unit != original_unit {
-                let bytes = parts.amount.saturating_mul(original_unit.bytes());
-                parts.amount = bytes / unit.bytes();
-                parts.unit = unit;
-            }
+            parts.unit = unit;
             if response.changed() || unit != original_unit {
                 *value = format_size(parts);
                 *changed = true;
@@ -915,6 +1200,40 @@ fn octal_row(
         }
         if previous_hint(ui, theme, value.trim() != previous.trim(), &previous) {
             *value = previous.clone();
+            *changed = true;
+        }
+    });
+    ui.end_row();
+}
+
+fn corrupt_row(
+    ui: &mut Ui,
+    theme: UiTheme,
+    label: &str,
+    value: &mut CorruptPolicy,
+    previous: CorruptPolicy,
+    changed: &mut bool,
+    id_salt: &str,
+) {
+    ui.label(field_label(theme, label));
+    ui.horizontal(|ui| {
+        let selection_changed = ComboBox::from_id_salt(id_salt)
+            .selected_text(corrupt_label(*value))
+            .show_ui(ui, |ui| {
+                let mut changed = false;
+                changed |= ui
+                    .selectable_value(value, CorruptPolicy::Ignore, "Ignore")
+                    .changed();
+                changed |= ui
+                    .selectable_value(value, CorruptPolicy::Fail, "Fail")
+                    .changed();
+                changed
+            })
+            .inner
+            .unwrap_or(false);
+        *changed |= selection_changed;
+        if previous_hint(ui, theme, *value != previous, corrupt_label(previous)) {
+            *value = previous;
             *changed = true;
         }
     });

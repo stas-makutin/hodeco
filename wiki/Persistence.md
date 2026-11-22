@@ -1,62 +1,49 @@
 # Persistence
 
-hodeco keeps two append-only logs. Neither requires an external database.
+hodeco stores message history and task history on disk. Neither requires an
+external database.
 
-## Shared container
-
-Both logs use the same framing:
-
-```text
-magic (4) | version (u8) | reserved (3) | compacted_at (i64 ns)
-record_type (u8) | record_length (u32) | record_body
-```
-
-Records are written until EOF. A partial trailing record is ignored on load and
-truncated before the next append. Middle corruption follows the file's
-`onCorrupt` policy. Compaction writes a temporary file, fsyncs it, and renames it
-atomically. The compaction threshold is `maxSize * compactionFactor` (default
-`2.0`) or `compactInterval` (default 30 days).
-
-## Message log — HLOG v2
+## Message history
 
 Default: `messages.log`, 10 MiB, flush interval 60 s.
 
-Records:
+The message history records incoming and outgoing messages, state changes, and
+evictions from the bounded in-memory store. When the store exceeds its size
+limit, the oldest messages are removed.
 
-- `MESSAGE_NEW`: protocol, transport, entry, message ID, time, state, payload.
-- `MESSAGE_STATE`: message ID and new state.
-- `MESSAGE_DROPPED`: message IDs removed from the bounded store.
+The file is compacted when it grows above `maxSize × compactionFactor` (default
+`2.0`) or after `compactInterval` (default 30 days). Compaction rewrites the
+live messages to a temporary file and replaces the original atomically.
 
-The service key is repeated in each NEW record; there is no service table.
-Compaction writes one NEW record per live message.
+`messageLog.onCorrupt` controls unsupported or corrupt files:
 
-**HLOG v1 is not supported.** There is no migration, rename, or dual reader.
-With `messageLog.onCorrupt: ignore` a v1 file is replaced at startup; with
-`fail` startup is refused. Archive or delete the old message log before
-upgrading from 0.1.x.
+- `ignore` replaces the file at startup;
+- `fail` refuses startup.
 
-## Task history — TLOG
+Archive or delete an old message log before upgrading from 0.1.x.
 
-Each task owns `tasks/<id>.tlog`, default 100 KiB / 1,000 rows. Records contain
-typed blocks rather than JSON:
+## Task history
 
-- run core, chain;
-- typed trigger blocks (message, schedule, HTTP, manual, task);
-- executed command and message actions;
-- selector result, started next tasks, error.
+History is opt-in. Each task with history enabled owns a history file under
+`tasks/`; the task's `history.maxSize` and `history.maxRows` control its limits.
+The task editor starts at 200 rows / 100 KiB when history is enabled.
 
-Only executed actions are stored. A run row has a global monotonically
-increasing `time` for paging. Task history flushes immediately. Orphan `.tlog`
-files whose task no longer exists are removed at startup.
+Stored runs include trigger metadata and payload, executed actions, selector
+result, started next tasks, chain information, and the error. Only executed
+actions are stored. Run rows use a monotonically increasing `time` for paging.
 
-`tasks.purgeHistory` rewrites the file with an empty header and resets the
-in-memory `maxRuns` counters. Deleting a task removes its history file.
-`maxRuns` is no longer derived from TLOG rows, so trimming history does not
-affect it.
+History is file-backed. The service keeps per-task row/byte metadata and the
+latest summary, not the full run set, and reads the file on demand. The separate
+in-memory run feed is volatile and is not part of persistent task history.
+
+`tasks.purgeHistory` clears the task's history file, removes that task's feed
+rows, resets the in-memory `maxRuns` counters, and clears the cached last-run
+summary. Deleting a task removes its history file. Files for tasks that no
+longer exist are removed at startup.
 
 ## Crash behavior
 
 - Message records may lose up to one flush interval (default 60 s).
 - Task history flushes each completed run.
-- A partial trailing record is discarded; a valid prefix remains readable.
+- A partial trailing write is discarded; the valid prefix remains readable.
 - Compaction preserves the newest rows within the configured limits.

@@ -1,3 +1,7 @@
+# Generates THIRD-PARTY-LICENSES.md notices with cargo-about.
+# The backend file includes dev-dependencies (proptest, tempfile, tokio-tungstenite,
+# http-body-util, ...) because cargo-about has no dev-dep exclusion; this is
+# intentional so the notice remains a superset for every build configuration.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 

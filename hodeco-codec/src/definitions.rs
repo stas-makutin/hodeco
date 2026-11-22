@@ -351,6 +351,7 @@ impl FieldType {
     }
 
     /// Numeric fields can be referenced by `lengthFrom` and `countFrom`.
+    #[cfg(test)]
     pub fn is_numeric(self) -> bool {
         matches!(
             self,

@@ -12,7 +12,9 @@ rust-version = "1.95"
 [workspace.dependencies]
 hodeco-codec = { path = "../hodeco-codec" }
 hodeco-contract = { path = "../hodeco-contract" }
+hodeco-schedule = { path = "../hodeco-schedule" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std", "wasmbind"] }
+chrono-tz = "0.10"
 egui = "0.37"
 egui_extras = { version = "0.37", default-features = false, features = ["serde"] }
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11", "clipboard"] }
@@ -40,9 +42,12 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 hodeco-codec.workspace = true
 hodeco-contract.workspace = true
+hodeco-schedule.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 egui.workspace = true
-egui_extras.workspace = true
+egui_extras = { workspace = true, features = ["datepicker"] }
+jiff = "0.2"
 ewebsock.workspace = true
 log.workspace = true
 serde.workspace = true

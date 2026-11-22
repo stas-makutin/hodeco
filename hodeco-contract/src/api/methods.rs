@@ -49,6 +49,8 @@ pub enum Method {
     TasksList,
     #[serde(rename = "tasks.get")]
     TasksGet,
+    #[serde(rename = "tasks.getRun")]
+    TasksGetRun,
     #[serde(rename = "tasks.add")]
     TasksAdd,
     #[serde(rename = "tasks.update")]
@@ -57,8 +59,12 @@ pub enum Method {
     TasksRemove,
     #[serde(rename = "tasks.fire")]
     TasksFire,
+    #[serde(rename = "tasks.cancelRun")]
+    TasksCancelRun,
     #[serde(rename = "tasks.history")]
     TasksHistory,
+    #[serde(rename = "tasks.runFeed")]
+    TasksRunFeed,
     #[serde(rename = "tasks.purgeHistory")]
     TasksPurgeHistory,
     #[serde(rename = "schedules.list")]
@@ -73,6 +79,10 @@ pub enum Method {
     SchedulesRemove,
     #[serde(rename = "schedules.preview")]
     SchedulesPreview,
+    #[serde(rename = "schedules.setDefaults")]
+    SchedulesSetDefaults,
+    #[serde(rename = "schedules.solarPreview")]
+    SchedulesSolarPreview,
     #[serde(rename = "commands.list")]
     CommandsList,
     #[serde(rename = "commands.get")]
@@ -90,7 +100,7 @@ pub enum Method {
 }
 
 impl Method {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 46] = [
         Self::SystemRestart,
         Self::ServerInfo,
         Self::ConfigGet,
@@ -113,11 +123,14 @@ impl Method {
         Self::MessagesList,
         Self::TasksList,
         Self::TasksGet,
+        Self::TasksGetRun,
         Self::TasksAdd,
         Self::TasksUpdate,
         Self::TasksRemove,
         Self::TasksFire,
+        Self::TasksCancelRun,
         Self::TasksHistory,
+        Self::TasksRunFeed,
         Self::TasksPurgeHistory,
         Self::SchedulesList,
         Self::SchedulesGet,
@@ -125,6 +138,8 @@ impl Method {
         Self::SchedulesUpdate,
         Self::SchedulesRemove,
         Self::SchedulesPreview,
+        Self::SchedulesSetDefaults,
+        Self::SchedulesSolarPreview,
         Self::CommandsList,
         Self::CommandsGet,
         Self::CommandsAdd,
@@ -158,11 +173,14 @@ impl Method {
             Self::MessagesList => "messages.list",
             Self::TasksList => "tasks.list",
             Self::TasksGet => "tasks.get",
+            Self::TasksGetRun => "tasks.getRun",
             Self::TasksAdd => "tasks.add",
             Self::TasksUpdate => "tasks.update",
             Self::TasksRemove => "tasks.remove",
             Self::TasksFire => "tasks.fire",
+            Self::TasksCancelRun => "tasks.cancelRun",
             Self::TasksHistory => "tasks.history",
+            Self::TasksRunFeed => "tasks.runFeed",
             Self::TasksPurgeHistory => "tasks.purgeHistory",
             Self::SchedulesList => "schedules.list",
             Self::SchedulesGet => "schedules.get",
@@ -170,6 +188,8 @@ impl Method {
             Self::SchedulesUpdate => "schedules.update",
             Self::SchedulesRemove => "schedules.remove",
             Self::SchedulesPreview => "schedules.preview",
+            Self::SchedulesSetDefaults => "schedules.setDefaults",
+            Self::SchedulesSolarPreview => "schedules.solarPreview",
             Self::CommandsList => "commands.list",
             Self::CommandsGet => "commands.get",
             Self::CommandsAdd => "commands.add",

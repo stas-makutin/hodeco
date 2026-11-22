@@ -5,7 +5,6 @@ use hodeco_contract::api::payloads::TaskRunNotification;
 use hodeco_contract::domain::{DiscoveryInfo, Message, ServiceRef, ServiceStatus};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,21 +35,6 @@ impl fmt::Display for Topic {
     }
 }
 
-impl FromStr for Topic {
-    type Err = UnknownTopic;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|topic| topic.as_str() == value)
-            .ok_or_else(|| UnknownTopic(value.to_string()))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown event topic '{0}'")]
-pub struct UnknownTopic(pub String);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     DiscoveryStarted(DiscoveryInfo),
@@ -66,6 +50,9 @@ pub enum Event {
     },
     TaskRunStarted(TaskRunNotification),
     TaskRunFinished(TaskRunFinishedNotification),
+    TaskRunDropped {
+        run_ids: Vec<Uuid>,
+    },
 }
 
 impl Event {
@@ -76,7 +63,9 @@ impl Event {
                 Topic::Messages
             }
             Self::ServiceStateChanged { .. } => Topic::Services,
-            Self::TaskRunStarted(_) | Self::TaskRunFinished(_) => Topic::Tasks,
+            Self::TaskRunStarted(_) | Self::TaskRunFinished(_) | Self::TaskRunDropped { .. } => {
+                Topic::Tasks
+            }
         }
     }
 }
@@ -117,17 +106,6 @@ mod tests {
             state: MessageState::Incoming,
             payload: Base64Bytes::from(vec![1]),
         }
-    }
-
-    #[test]
-    fn parses_topics() {
-        for topic in Topic::ALL {
-            assert_eq!(topic.as_str().parse::<Topic>().unwrap(), topic);
-        }
-        assert_eq!(
-            "unknown".parse::<Topic>(),
-            Err(UnknownTopic("unknown".to_string()))
-        );
     }
 
     #[test]

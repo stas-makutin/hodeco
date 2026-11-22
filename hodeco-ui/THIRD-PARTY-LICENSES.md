@@ -7,7 +7,7 @@ attribution notices of the third-party crates included in the build.
 
 ## Overview
 
-- MIT License (271)
+- MIT License (278)
 - Unicode License v3 (20)
 - Apache License 2.0 (13)
 - ISC License (3)
@@ -4596,12 +4596,14 @@ SOFTWARE.
 
 Used by:
 
-- hodeco-codec 0.1.0
-- hodeco-contract 0.1.0
-- hodeco-ui 0.1.0
+- hodeco-codec 0.2.0
+- hodeco-contract 0.2.0
+- hodeco-schedule 0.2.0
+- hodeco-ui 0.2.0
 - accesskit 0.25.2 ([source](https://github.com/AccessKit/accesskit))
 - block2 0.5.1 ([source](https://github.com/madsmtm/objc2))
 - block2 0.6.2 ([source](https://github.com/madsmtm/objc2))
+- chrono-tz 0.10.4 ([source](https://github.com/chronotope/chrono-tz))
 - chrono 0.4.45 ([source](https://github.com/chronotope/chrono))
 - dispatch2 0.3.1 ([source](https://github.com/madsmtm/objc2))
 - dispatch 0.2.0 ([source](http://github.com/SSheldon/rust-dispatch))
@@ -5013,6 +5015,33 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
+- siphasher 1.0.4 ([source](https://github.com/jedisct1/rust-siphash))
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
 - tracing-core 0.1.36 ([source](https://github.com/tokio-rs/tracing))
 
 ```
@@ -5106,10 +5135,43 @@ SOFTWARE.
 
 Used by:
 
+- phf 0.12.1 ([source](https://github.com/rust-phf/rust-phf))
+- phf_shared 0.12.1 ([source](https://github.com/rust-phf/rust-phf))
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
 - aho-corasick 1.1.5 ([source](https://github.com/BurntSushi/aho-corasick))
 - byteorder-lite 0.1.0 ([source](https://github.com/image-rs/byteorder-lite))
 - byteorder 1.5.0 ([source](https://github.com/BurntSushi/byteorder))
 - jiff-core 0.1.5 ([source](https://github.com/BurntSushi/jiff))
+- jiff-tzdb-platform 0.1.3 ([source](https://github.com/BurntSushi/jiff))
+- jiff-tzdb 0.1.10 ([source](https://github.com/BurntSushi/jiff))
 - jiff 0.2.43 ([source](https://github.com/BurntSushi/jiff))
 - memchr 2.8.3 ([source](https://github.com/BurntSushi/memchr))
 

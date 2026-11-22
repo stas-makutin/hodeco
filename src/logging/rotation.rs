@@ -5,16 +5,15 @@ use hodeco_contract::utils::FileMode;
 use std::fs::{File, FileTimes, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 const ERROR_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A `tracing` writer that appends to the configured log file and rotates it
-/// according to size and age limits.
-#[derive(Clone)]
+/// according to size and age limits. The dedicated log thread owns the writer,
+/// so no synchronization is needed around the file state.
 pub struct RotatingWriter {
-    state: Arc<Mutex<WriterState>>,
+    state: WriterState,
 }
 
 struct WriterState {
@@ -76,27 +75,18 @@ impl RotatingWriter {
             state.ensure_status_file()?;
         }
 
-        Ok(Self {
-            state: Arc::new(Mutex::new(state)),
-        })
-    }
-
-    fn lock(&self) -> MutexGuard<'_, WriterState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        Ok(Self { state })
     }
 }
 
 impl Write for RotatingWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.lock().write_record(buf)?;
+        self.state.write_record(buf)?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut state = self.lock();
-        match state.file.as_mut() {
+        match self.state.file.as_mut() {
             Some(file) => file.flush(),
             None => Ok(()),
         }

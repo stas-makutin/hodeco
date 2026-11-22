@@ -10,14 +10,19 @@ use super::payloads::{
     ConfigUpdateParams, DiscoveryCancelParams, DiscoveryGetParams, DiscoveryStartParams,
     EventTopic, EventsSubscribeParams, EventsUnsubscribeParams, MessagesGetParams,
     MessagesListParams, ProtocolInfoParams, ProtocolParamsParams, SchedulesAddParams,
-    SchedulesGetParams, SchedulesPreviewParams, SchedulesRemoveParams, SchedulesUpdateParams,
-    ServicesAddParams, ServicesAliasParams, ServicesParamsParams, ServicesRemoveParams,
-    ServicesSendParams, ServicesStatusParams, TasksAddParams, TasksFireParams, TasksGetParams,
-    TasksHistoryParams, TasksPurgeHistoryParams, TasksRemoveParams, TasksUpdateParams,
+    SchedulesGetParams, SchedulesPreviewParams, SchedulesRemoveParams, SchedulesSetDefaultsParams,
+    SchedulesSolarPreviewParams, SchedulesUpdateParams, ServicesAddParams, ServicesAliasParams,
+    ServicesParamsParams, ServicesRemoveParams, ServicesSendParams, ServicesStatusParams,
+    TasksAddParams, TasksCancelRunParams, TasksFireParams, TasksGetParams, TasksGetRunParams,
+    TasksHistoryParams, TasksPurgeHistoryParams, TasksRemoveParams, TasksRunFeedParams,
+    TasksUpdateParams,
 };
 use crate::config::Config;
-use crate::domain::{CommandDefinition, ScheduleDefinition, ServiceRef, TaskDefinition};
+use crate::domain::{
+    AtSpec, CommandDefinition, Location, OneOrMany, ScheduleDefinition, ServiceRef, TaskDefinition,
+};
 use crate::utils::{Base64Bytes, HumanDuration};
+use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -37,17 +42,9 @@ pub fn example_params(method: Method) -> Value {
             limit: Some(50),
             ..MessagesListParams::default()
         }),
-        Method::ConfigUpdate => {
-            // Services are managed through services.*; the config.update
-            // handler always replaces this field with the current registry.
-            let mut value = encode(ConfigUpdateParams {
-                config: Config::default(),
-            });
-            if let Some(config) = value.get_mut("config").and_then(Value::as_object_mut) {
-                config.remove("services");
-            }
-            value
-        }
+        Method::ConfigUpdate => encode(ConfigUpdateParams {
+            config: Config::default(),
+        }),
         Method::ProtocolsInfo => encode(ProtocolInfoParams {
             protocol: "zwave".to_string(),
         }),
@@ -96,6 +93,9 @@ pub fn example_params(method: Method) -> Value {
         Method::TasksList => json!({}),
         Method::TasksGet => encode(TasksGetParams {
             task_id: "evening-lights".to_string(),
+        }),
+        Method::TasksGetRun => encode(TasksGetRunParams {
+            task_id: "evening-lights".to_string(),
             run_id: Uuid::nil(),
         }),
         Method::TasksAdd => encode(TasksAddParams {
@@ -121,9 +121,17 @@ pub fn example_params(method: Method) -> Value {
             payload: Some(Base64Bytes::from(vec![1, 2, 3])),
             ..TasksFireParams::default()
         }),
+        Method::TasksCancelRun => encode(TasksCancelRunParams {
+            task_id: "evening-lights".to_string(),
+            run_id: Uuid::nil(),
+        }),
         Method::TasksHistory => encode(TasksHistoryParams {
             limit: Some(50),
             ..TasksHistoryParams::default()
+        }),
+        Method::TasksRunFeed => encode(TasksRunFeedParams {
+            limit: Some(50),
+            ..TasksRunFeedParams::default()
         }),
         Method::TasksPurgeHistory => encode(TasksPurgeHistoryParams {
             task_id: "evening-lights".to_string(),
@@ -136,6 +144,8 @@ pub fn example_params(method: Method) -> Value {
             schedule: ScheduleDefinition {
                 id: "before-sunset".to_string(),
                 name: "Before sunset".to_string(),
+                at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
+                repeat_at: OneOrMany::One(HumanDuration::from_std(Duration::from_secs(30 * 60))),
                 ..ScheduleDefinition::default()
             },
         }),
@@ -144,6 +154,8 @@ pub fn example_params(method: Method) -> Value {
             schedule: ScheduleDefinition {
                 id: "before-sunset".to_string(),
                 name: "Before sunset".to_string(),
+                at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
+                repeat_at: OneOrMany::One(HumanDuration::from_std(Duration::from_secs(30 * 60))),
                 ..ScheduleDefinition::default()
             },
         }),
@@ -154,9 +166,20 @@ pub fn example_params(method: Method) -> Value {
             schedule: ScheduleDefinition {
                 id: "before-sunset".to_string(),
                 name: "Before sunset".to_string(),
+                at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
+                repeat_at: OneOrMany::One(HumanDuration::from_std(Duration::from_secs(30 * 60))),
                 ..ScheduleDefinition::default()
             },
             limit: Some(20),
+        }),
+        Method::SchedulesSetDefaults => encode(SchedulesSetDefaultsParams {
+            location: Some(Location::new(52.52, 13.405, Some(34.0))),
+            timezone: Some("Europe/Berlin".to_string()),
+        }),
+        Method::SchedulesSolarPreview => encode(SchedulesSolarPreviewParams {
+            location: Location::new(52.52, 13.405, Some(34.0)),
+            date: NaiveDate::from_ymd_opt(2026, 6, 21).unwrap(),
+            timezone: Some("Europe/Berlin".to_string()),
         }),
         Method::CommandsList => json!({}),
         Method::CommandsGet => encode(CommandsGetParams {
@@ -220,7 +243,7 @@ mod tests {
     fn examples_use_contract_field_names() {
         let list = example_params(Method::MessagesList);
         assert_eq!(list["limit"], 50);
-        assert_eq!(list["order"], serde_json::json!(0));
+        assert!(list.get("order").is_none());
 
         let send = example_params(Method::ServicesSend);
         assert_eq!(send["service"]["alias"], "ZW");

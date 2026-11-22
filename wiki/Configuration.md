@@ -55,7 +55,7 @@ log:
 httpServer:
   bind: 127.0.0.1
   port: 8180
-  maxConnections: 1000
+  maxConnections: 1000  # 0 removes the practical limit
   readTimeout: 5 s
   readHeaderTimeout: 5 s
   writeTimeout: 5 s
@@ -71,7 +71,7 @@ messageLog:
   maxSize: 10 MiB
   file: /var/lib/hodeco/messages.log
   fileMode: "0644"
-  autoPersist: 60 s      # append-log flush interval
+  autoPersist: 60 s      # how often message history is written to disk
   compactionFactor: 2.0
   compactInterval: 30 d
   onCorrupt: ignore      # ignore or fail
@@ -84,8 +84,6 @@ files:
 
 taskLog:
   dir: tasks
-  maxSize: 100 KiB
-  maxRows: 1000
   fileMode: "0640"
   compactionFactor: 2.0
   compactInterval: 30 d
@@ -96,7 +94,13 @@ taskEngine:
   maxConcurrentRuns: 32
   maxChainDepth: 16
   maxFanOut: 16
+  runFeed:
+    maxRows: 1000                 # recent runs kept in memory
+    maxSize: 4 MiB                # byte cap; oldest run evicted first
 ```
+
+The run feed is a volatile recent-runs buffer exposed by `tasks.runFeed`. It
+clears on restart and is independent of per-task history files.
 
 ```yaml
 # services.yaml
@@ -131,12 +135,9 @@ timezone: Europe/Berlin
 schedules:
   - id: before-sunset
     name: Before sunset
-    on:
-      at: "sunset - 15m"
-      days: [mon, tue, wed, thu, fri]
-    loop:
-      every: 30m
-      repeat: 2
+    at: "sunset - 15m"
+    days: [mon, tue, wed, thu, fri]
+    repeatAt: [30m, 1h]
 ```
 
 ```yaml
@@ -146,8 +147,11 @@ tasks:
     name: Evening lights
     enabled: true
     failFast: true
-    runTimeout: 5m
+    runTimeout: 10m
+    delay: 5m
+    jitter: 30s
     maxRunsPerMinute: 60
+    # Run history is opt-in; these limits apply when enabled.
     history:
       maxSize: 100 KiB
       maxRows: 1000
@@ -164,7 +168,7 @@ tasks:
       - id: notify
         message:
           service: { alias: ZW }
-          payload: { source: trigger }
+          payload: "AQID"
           ttl: 30s
     next:
       - when: allSucceeded
@@ -172,7 +176,7 @@ tasks:
 ```
 
 See the [task](Tasks) and [schedule](Schedules) pages for trigger, action,
-next-rule, calendar, solar, and loop details.
+next-rule, calendar, solar, repeat, and jitter details.
 
 ## Notes
 
@@ -186,26 +190,31 @@ next-rule, calendar, solar, and loop details.
   override it per send without changing the service configuration.
 - `openAttemptsInterval` controls how often a service retries opening its
   transport; the default is `3 s`.
+- `readTimeout` bounds the wait for a Z-Wave serial reply; `0 s` uses the
+  protocol default. `writeTimeout` bounds serial writes; `0 s` disables it.
+- A task's optional `delay` and `jitter` are limited to 24 hours combined and
+  must fit inside its `runTimeout`.
 - `services.*`, `tasks.*`, `schedules.*`, and `commands.*` RPC methods rewrite
   the relevant file atomically. The service account must be able to write those
   files for write-back to succeed.
-- Removing a service or changing its alias is rejected while a task trigger or
-  message action references it. Remove the task references first.
+- Removing a service or changing its alias is rejected while any task references
+  it. Remove the task references first.
 - Config changes made outside the service require a manual restart; there is no
   file watcher. Missing catalog files are treated as empty.
 - `log.maxSize: 0` or `log.maxAge: 0 s` disables that rotation trigger.
   Rotation is enabled only when retention is configured.
-- `messageLog.onCorrupt` is `ignore` or `fail`. The message log is HLOG v2;
-  v1 files are not migrated. With `ignore`, a v1 or corrupt file is replaced at
-  startup. With `fail`, startup is refused.
-- `taskLog.onCorrupt` applies to individual `tasks/<id>.tlog` files. Orphan
-  `.tlog` files are removed at startup.
+- `messageLog.onCorrupt` is `ignore` or `fail`. With `ignore`, an unsupported or
+  corrupt message-history file is replaced at startup. With `fail`, startup is
+  refused.
+- `taskLog.onCorrupt` applies to each task's history file. Files for tasks that
+  no longer exist are removed at startup.
 - `httpServer.static.precompressed` enables serving `.br`/`.gz` sidecars and
   defaults to `true`. Release builds ship raw assets plus `.br` and `.gz`
   sidecars; the raw file remains the fallback for clients that accept neither.
-  JSON definition files are always served uncompressed so runtime edits are
-  visible. For other assets, regenerate the sidecars when editing raw files; a
-  stale sidecar can shadow a newer raw file.
+  JSON definition files are read from the raw file rather than a precompressed
+  sidecar, so runtime edits are visible; dynamic compression may still apply.
+  For other assets, regenerate the sidecars when editing raw files; a stale
+  sidecar can shadow a newer raw file.
 
 See [Logging](Logging) and [HTTP API](HTTP-API) for the runtime behavior behind
 these settings.

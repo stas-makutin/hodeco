@@ -104,7 +104,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Params").strong());
+        ui.label(RichText::new("Request").strong());
         ui.label(
             RichText::new("{}")
                 .monospace()
@@ -127,7 +127,6 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
     ui.add_space(6.0);
     widgets::section_header(
         ui,
-        theme,
         &format!("History ({})", app.console.entries.len()),
         |_ui| {},
     );
@@ -164,7 +163,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                     collapsing = collapsing.open(Some(true));
                 }
                 let response = collapsing.show(ui, |ui| {
-                    widgets::copy_field(ui, theme, "Params", &entry.params, true);
+                    widgets::copy_field(ui, theme, "Request", &entry.params, true);
                     ui.add_space(4.0);
                     match &entry.outcome {
                         ConsoleOutcome::Pending => {
@@ -176,7 +175,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                         ConsoleOutcome::Success(value) => {
                             let text = serde_json::to_string_pretty(value)
                                 .unwrap_or_else(|_| value.to_string());
-                            widgets::copy_field(ui, theme, "Result", &text, true);
+                            widgets::copy_field(ui, theme, "Response", &text, true);
                         }
                         ConsoleOutcome::Error(error) => {
                             error_block(ui, theme, error);
@@ -209,7 +208,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
 
 fn error_block(ui: &mut Ui, theme: UiTheme, error: &ApiError) {
     let json = serde_json::to_string_pretty(error).unwrap_or_else(|_| error.message.clone());
-    widgets::copy_field(ui, theme, "Result", &json, true);
+    widgets::copy_field(ui, theme, "Response", &json, true);
 }
 
 fn outcome_label(outcome: &ConsoleOutcome) -> (Tone, &'static str) {
@@ -227,7 +226,7 @@ fn example_json(method: &str) -> String {
         .parse::<Method>()
         .map(example_params)
         .unwrap_or_else(|_| json!({}));
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
+    crate::model::pretty_json(&value)
 }
 
 fn request_text(method: &str, params: &str) -> String {

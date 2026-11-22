@@ -75,16 +75,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
     }
     let mut activate = None;
     if let Some(nav) = nav {
-        let last = services.len().saturating_sub(1);
-        let next = match nav {
-            widgets::ListNav::Up => selected.map_or(0, |current| current.saturating_sub(1)),
-            widgets::ListNav::Down => selected.map_or(0, |current| (current + 1).min(last)),
-            widgets::ListNav::PageUp => selected.map_or(0, |current| current.saturating_sub(10)),
-            widgets::ListNav::PageDown => selected.map_or(0, |current| (current + 10).min(last)),
-            widgets::ListNav::Home => 0,
-            widgets::ListNav::End => last,
-            widgets::ListNav::Activate => selected.unwrap_or(0),
-        };
+        let next = nav.apply(selected, services.len());
         selected = Some(next);
         if nav == widgets::ListNav::Activate
             && let Some(service) = services.get(next)

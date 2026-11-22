@@ -75,6 +75,7 @@ pub fn serial_command_name(command: u8) -> Option<String> {
         .map(|definition| definition.name.clone())
 }
 
+#[cfg(test)]
 pub fn command_class_name(class: u8) -> Option<String> {
     let definitions = definitions::current();
     definitions
@@ -974,8 +975,20 @@ fn format_numeric(field: &FieldDef, value: u64, width: usize) -> String {
         format => format,
     };
     match format {
-        FieldFormat::Hex | FieldFormat::TxOptions => {
-            format!("0x{value:0width$x}", width = width * 2)
+        FieldFormat::Hex => format!("0x{value:0width$x}", width = width * 2),
+        FieldFormat::TxOptions => {
+            let names = field
+                .values
+                .iter()
+                .filter(|candidate| value & u64::from(candidate.value) != 0)
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>();
+            let raw = format!("0x{value:0width$x}", width = width * 2);
+            if names.is_empty() {
+                raw
+            } else {
+                format!("{} ({raw})", names.join(", "))
+            }
         }
         FieldFormat::Level => level_value(value as u8),
         FieldFormat::Duration => dimming_duration(value as u8),
@@ -1562,7 +1575,7 @@ mod tests {
             CC_SWITCH_BINARY,
             0x01,
             0xff,
-            0x01,
+            0x25,
             0x01,
         ]);
         let decoded = decode(&outgoing);
@@ -1573,6 +1586,9 @@ mod tests {
                 .iter()
                 .any(|field| field.label == "CC command" && field.value == "Set (0x01)")
         );
+        assert!(decoded.frames[0].fields.iter().any(|field| {
+            field.label == "TX options" && field.value == "ACK, AUTO_ROUTE, EXPLORE (0x25)"
+        }));
 
         let callback = request(&[SERIAL_SEND_DATA, 0x21, 0x00]);
         let decoded = decode(&callback);

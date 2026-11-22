@@ -275,10 +275,6 @@ impl ParamEdit {
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                if let Some(description) = &self.def.description {
-                    ui.label(RichText::new(description).size(14.0).color(palette.text));
-                    ui.label(RichText::new("·").size(14.0).color(palette.border));
-                }
                 let default = self
                     .def
                     .default
@@ -325,6 +321,9 @@ impl ParamEdit {
                     }
                 }
             });
+            if let Some(description) = &self.def.description {
+                ui.label(RichText::new(description).small().color(palette.muted));
+            }
             if let Some(error) = &self.error {
                 ui.label(RichText::new(error).size(14.0).color(palette.red));
             }

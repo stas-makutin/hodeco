@@ -20,6 +20,10 @@ pub enum ParamType {
     FileMode,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ParamDef {
@@ -28,9 +32,9 @@ pub struct ParamDef {
     pub kind: ParamType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
-    #[serde(rename = "const", default)]
+    #[serde(rename = "const", default, skip_serializing_if = "is_false")]
     pub is_const: bool,
     #[serde(rename = "enum", default, skip_serializing_if = "Vec::is_empty")]
     pub enum_values: Vec<Value>,
@@ -148,14 +152,6 @@ pub fn param_u64(values: &ParamValues, name: &str) -> Option<u64> {
     values.get(name).and_then(Value::as_u64)
 }
 
-pub fn param_i64(values: &ParamValues, name: &str) -> Option<i64> {
-    values.get(name).and_then(Value::as_i64)
-}
-
-pub fn param_bool(values: &ParamValues, name: &str) -> Option<bool> {
-    values.get(name).and_then(Value::as_bool)
-}
-
 pub fn param_str<'a>(values: &'a ParamValues, name: &str) -> Option<&'a str> {
     values.get(name).and_then(Value::as_str)
 }
@@ -169,14 +165,6 @@ pub fn param_duration(values: &ParamValues, name: &str) -> Option<Duration> {
             .map(HumanDuration::as_std);
     }
     value.as_u64().map(Duration::from_secs)
-}
-
-pub fn param_size(values: &ParamValues, name: &str) -> Option<u64> {
-    let value = values.get(name)?;
-    if let Some(text) = value.as_str() {
-        return text.parse::<Size>().ok().map(Size::as_bytes);
-    }
-    value.as_u64()
 }
 
 fn normalize(kind: ParamType, value: &Value) -> Option<Value> {
@@ -362,7 +350,7 @@ mod tests {
             ("count".to_string(), json!(25)),
         ]);
         let parsed = parse_param_values(&[bool_def(), uint_def()], &values).unwrap();
-        assert_eq!(param_bool(&parsed, "flag"), Some(true));
+        assert_eq!(parsed.get("flag").and_then(Value::as_bool), Some(true));
         assert_eq!(param_u64(&parsed, "count"), Some(25));
     }
 }

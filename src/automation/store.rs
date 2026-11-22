@@ -11,6 +11,7 @@ use hodeco_contract::domain::{
 };
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,10 +24,6 @@ pub struct AutomationSnapshot {
 }
 
 impl AutomationSnapshot {
-    pub fn task_ids(&self) -> BTreeSet<String> {
-        self.tasks.keys().cloned().collect()
-    }
-
     pub fn schedule_ids(&self) -> BTreeSet<String> {
         self.schedules.keys().cloned().collect()
     }
@@ -85,7 +82,7 @@ impl AutomationSnapshot {
 
 pub struct AutomationStore {
     paths: CatalogPaths,
-    data: RwLock<AutomationSnapshot>,
+    data: RwLock<Arc<AutomationSnapshot>>,
     mutation: AsyncMutex<()>,
 }
 
@@ -93,12 +90,15 @@ impl AutomationStore {
     pub fn new(snapshot: AutomationSnapshot, paths: CatalogPaths) -> Self {
         Self {
             paths,
-            data: RwLock::new(snapshot),
+            data: RwLock::new(Arc::new(snapshot)),
             mutation: AsyncMutex::new(()),
         }
     }
 
-    pub fn snapshot(&self) -> AutomationSnapshot {
+    /// Shares the current catalog without cloning it. Hot paths (message-trigger
+    /// evaluation, scheduling, and list requests) read the catalog per event; a
+    /// cheap `Arc` clone keeps them from paying a full catalog copy each time.
+    pub fn snapshot(&self) -> Arc<AutomationSnapshot> {
         self.data.read().clone()
     }
 
@@ -106,48 +106,35 @@ impl AutomationStore {
         self.data.read().tasks.get(id).cloned()
     }
 
-    pub fn schedule(&self, id: &str) -> Option<ScheduleDefinition> {
-        self.data.read().schedules.get(id).cloned()
-    }
-
-    pub fn command(&self, id: &str) -> Option<CommandDefinition> {
-        self.data.read().commands.get(id).cloned()
-    }
-
-    pub fn replace_snapshot(&self, snapshot: AutomationSnapshot) {
+    pub fn replace_snapshot(&self, snapshot: Arc<AutomationSnapshot>) {
         *self.data.write() = snapshot;
     }
 
-    pub fn replace_tasks(&self, tasks: BTreeMap<String, TaskDefinition>) {
-        self.data.write().tasks = tasks;
-    }
-
-    pub fn replace_schedules(&self, schedules: BTreeMap<String, ScheduleDefinition>) {
-        self.data.write().schedules = schedules;
-    }
-
-    pub fn replace_commands(&self, commands: BTreeMap<String, CommandDefinition>) {
-        self.data.write().commands = commands;
+    /// Replaces the shared `location` / `timezone` defaults in `schedules.yaml`.
+    pub fn set_schedule_defaults(&self, location: Option<Location>, timezone: Option<String>) {
+        let mut data = self.data.write();
+        let data = Arc::make_mut(&mut data);
+        data.location = location;
+        data.timezone = timezone;
     }
 
     pub fn update_tasks(&self, update: impl FnOnce(&mut BTreeMap<String, TaskDefinition>)) {
-        update(&mut self.data.write().tasks);
+        let mut data = self.data.write();
+        update(&mut Arc::make_mut(&mut data).tasks);
     }
 
     pub fn update_schedules(&self, update: impl FnOnce(&mut BTreeMap<String, ScheduleDefinition>)) {
-        update(&mut self.data.write().schedules);
+        let mut data = self.data.write();
+        update(&mut Arc::make_mut(&mut data).schedules);
     }
 
     pub fn update_commands(&self, update: impl FnOnce(&mut BTreeMap<String, CommandDefinition>)) {
-        update(&mut self.data.write().commands);
+        let mut data = self.data.write();
+        update(&mut Arc::make_mut(&mut data).commands);
     }
 
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.mutation.lock().await
-    }
-
-    pub fn paths(&self) -> &CatalogPaths {
-        &self.paths
     }
 
     pub fn tasks_file(&self) -> TasksFile {
@@ -194,22 +181,6 @@ impl AutomationStore {
             .await
             .map_err(|error| ConfigError::Task(error.to_string()))?
     }
-
-    pub async fn save_all(&self) -> Result<(), ConfigError> {
-        self.save_tasks().await?;
-        self.save_schedules().await?;
-        self.save_commands().await?;
-        Ok(())
-    }
-
-    /// Tasks that currently reference a schedule or command.
-    pub fn used_by_schedule(&self, schedule_id: &str) -> Vec<String> {
-        self.data.read().used_by_schedule(schedule_id)
-    }
-
-    pub fn used_by_command(&self, command_id: &str) -> Vec<String> {
-        self.data.read().used_by_command(command_id)
-    }
 }
 
 #[cfg(test)]
@@ -247,8 +218,9 @@ mod tests {
             timezone: None,
         };
         let store = AutomationStore::new(snapshot, paths());
-        assert_eq!(store.used_by_schedule("before-sunset"), vec!["evening"]);
-        assert!(store.used_by_command("meter").is_empty());
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.used_by_schedule("before-sunset"), vec!["evening"]);
+        assert!(snapshot.used_by_command("meter").is_empty());
     }
 
     #[test]

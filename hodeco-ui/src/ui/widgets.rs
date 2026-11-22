@@ -5,9 +5,10 @@
 
 use crate::theme::{UiTheme, palette};
 use egui::{
-    Align, Align2, Color32, ComboBox, Context, Frame, Id, Layout, Margin, Popup,
-    PopupCloseBehavior, RichText, ScrollArea, Stroke, TextEdit, TextStyle, Ui, Vec2,
+    Align, Align2, Color32, ComboBox, Context, Frame, Id, Label, Layout, Margin, Popup,
+    PopupCloseBehavior, Response, RichText, ScrollArea, Stroke, TextEdit, TextStyle, Ui, Vec2,
 };
+use hodeco_contract::utils::HumanDuration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -42,6 +43,10 @@ pub struct ComboOptions<'a, T> {
     pub any_label: Option<&'a str>,
     pub emphasize: &'a [T],
 }
+
+/// Maximum height of the scrollable result list inside a [`searchable_combo`]
+/// popup.
+const LIST_MAX_HEIGHT: f32 = 270.0;
 
 /// A combo box with a filter field in its popup.
 ///
@@ -98,6 +103,15 @@ pub fn searchable_combo<T: Copy + PartialEq>(
                 width
             };
             ui.set_max_width(row_width);
+            // egui popups are laid out inside the previous frame's rect
+            // (`egui::containers::Area::content_ui`) and can therefore only
+            // shrink while they are open, never grow back. Reserve the full
+            // list height on every frame so filtering down to a few matches
+            // — then clearing the filter — keeps the dropdown at a stable
+            // size instead of leaving it permanently shrunk.
+            ui.set_min_height(
+                ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 + LIST_MAX_HEIGHT,
+            );
             let mut clear_clicked = false;
             // Decide this before the TextEdit consumes input. Otherwise the
             // first typed character adds Clear while the filter still occupies
@@ -137,7 +151,7 @@ pub fn searchable_combo<T: Copy + PartialEq>(
                 |label: &str| needle.is_empty() || label.to_ascii_lowercase().contains(&needle);
 
             let list = ScrollArea::vertical()
-                .max_height(270.0)
+                .max_height(LIST_MAX_HEIGHT)
                 .auto_shrink([false, true]);
             let list = if !was_open || filter != filter_before {
                 // A new search or a reopened popup should start at the first
@@ -205,6 +219,24 @@ pub enum ListNav {
     Activate,
 }
 
+impl ListNav {
+    /// Shared selection arithmetic for list keyboard navigation. An empty
+    /// selection starts at the first row; `Activate` keeps the current
+    /// selection (or the first row) so the caller can act on it.
+    pub fn apply(self, selected: Option<usize>, len: usize) -> usize {
+        let last = len.saturating_sub(1);
+        match self {
+            Self::Up => selected.map_or(0, |current| current.saturating_sub(1)),
+            Self::Down => selected.map_or(0, |current| (current + 1).min(last)),
+            Self::PageUp => selected.map_or(0, |current| current.saturating_sub(10)),
+            Self::PageDown => selected.map_or(0, |current| (current + 10).min(last)),
+            Self::Home => 0,
+            Self::End => last,
+            Self::Activate => selected.unwrap_or(0),
+        }
+    }
+}
+
 /// A focusable but non-clickable region that makes a table/list a Tab stop.
 pub struct ListFocus {
     pub id: Id,
@@ -247,6 +279,19 @@ pub fn list_focus(
     claim_focus: bool,
     highlight: bool,
 ) -> ListFocus {
+    list_focus_with_tab(ui, theme, salt, claim_focus, highlight, true)
+}
+
+/// Like [`list_focus`], but lets the caller decide whether Tab stays locked to
+/// the list for manual handoff to a row action.
+pub fn list_focus_with_tab(
+    ui: &mut Ui,
+    theme: UiTheme,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    claim_focus: bool,
+    highlight: bool,
+    lock_tab: bool,
+) -> ListFocus {
     let rect = ui.available_rect_before_wrap();
     let id = ui.scope_id().with(("list-focus", salt));
     if claim_focus {
@@ -260,7 +305,7 @@ pub fn list_focus(
         memory.set_focus_lock_filter(
             id,
             egui::EventFilter {
-                tab: true,
+                tab: lock_tab,
                 vertical_arrows: true,
                 escape: true,
                 ..Default::default()
@@ -399,7 +444,7 @@ pub fn page_header(
     ui.add_space(6.0);
 }
 
-pub fn section_header(ui: &mut Ui, _theme: UiTheme, title: &str, actions: impl FnOnce(&mut Ui)) {
+pub fn section_header(ui: &mut Ui, title: &str, actions: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).size(15.0).strong());
         ui.with_layout(Layout::right_to_left(Align::Center), actions);
@@ -461,12 +506,175 @@ pub fn labeled_value(ui: &mut Ui, theme: UiTheme, label: &str, value: &str) {
     ui.label(RichText::new(value).size(14.0));
 }
 
+/// Muted form label used by the configuration and automation editors.
+pub fn field_label_text(theme: UiTheme, label: &str) -> RichText {
+    RichText::new(label).size(13.5).color(palette(theme).muted)
+}
+
+/// Draws a muted form label.
+pub fn field_label(ui: &mut Ui, theme: UiTheme, label: &str) {
+    ui.label(field_label_text(theme, label));
+}
+
+/// Draws the muted one-line help text that follows a form field.
+pub fn field_note(ui: &mut Ui, theme: UiTheme, note: &str) {
+    ui.label(RichText::new(note).small().color(palette(theme).muted));
+}
+
 /// A form control followed by a muted one-line description.
 pub fn field_with_note(ui: &mut Ui, theme: UiTheme, note: &str, add: impl FnOnce(&mut Ui)) {
     ui.vertical(|ui| {
         add(ui);
-        ui.label(RichText::new(note).small().color(palette(theme).muted));
+        field_note(ui, theme, note);
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeUnit {
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+    Weeks,
+}
+
+impl TimeUnit {
+    const ALL: [Self; 5] = [
+        Self::Seconds,
+        Self::Minutes,
+        Self::Hours,
+        Self::Days,
+        Self::Weeks,
+    ];
+
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Seconds => "s",
+            Self::Minutes => "m",
+            Self::Hours => "h",
+            Self::Days => "d",
+            Self::Weeks => "w",
+        }
+    }
+
+    const fn nanos(self) -> u128 {
+        match self {
+            Self::Seconds => 1_000_000_000,
+            Self::Minutes => 60_000_000_000,
+            Self::Hours => 3_600_000_000_000,
+            Self::Days => 86_400_000_000_000,
+            Self::Weeks => 604_800_000_000_000,
+        }
+    }
+}
+
+fn parse_duration_parts(value: &str) -> Option<(u64, TimeUnit)> {
+    let value = value.trim();
+    for unit in [
+        TimeUnit::Weeks,
+        TimeUnit::Days,
+        TimeUnit::Hours,
+        TimeUnit::Minutes,
+        TimeUnit::Seconds,
+    ] {
+        if let Some(amount) = value.strip_suffix(unit.suffix())
+            && let Ok(amount) = amount.trim().parse::<u64>()
+        {
+            return Some((amount, unit));
+        }
+    }
+    let nanos = value.parse::<HumanDuration>().ok()?.as_std().as_nanos();
+    if nanos == 0 {
+        return Some((0, TimeUnit::Seconds));
+    }
+    for unit in [
+        TimeUnit::Weeks,
+        TimeUnit::Days,
+        TimeUnit::Hours,
+        TimeUnit::Minutes,
+        TimeUnit::Seconds,
+    ] {
+        if nanos.is_multiple_of(unit.nanos()) {
+            return Some((u64::try_from(nanos / unit.nanos()).ok()?, unit));
+        }
+    }
+    None
+}
+
+/// Number-plus-unit duration editor shared by task and schedule forms.
+pub fn duration_editor(ui: &mut Ui, value: &mut String, minimum: std::time::Duration) -> bool {
+    let Some((mut amount, original_unit)) = parse_duration_parts(value) else {
+        let response = ui.add(
+            egui::TextEdit::singleline(value)
+                .hint_text("5m")
+                .desired_width(160.0),
+        );
+        return response.changed();
+    };
+    let min_nanos = minimum.as_nanos();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let response = ui.add(
+            egui::DragValue::new(&mut amount)
+                .range(1..=u64::MAX)
+                .speed(1.0),
+        );
+        let mut unit = original_unit;
+        egui::ComboBox::from_id_salt(ui.next_auto_id())
+            .selected_text(unit.suffix())
+            .width(56.0)
+            .show_ui(ui, |ui| {
+                for candidate in TimeUnit::ALL {
+                    ui.selectable_value(&mut unit, candidate, candidate.suffix());
+                }
+            });
+        let mut clamped = false;
+        let nanos = u128::from(amount) * unit.nanos();
+        if nanos < min_nanos {
+            amount = u64::try_from(min_nanos.div_ceil(unit.nanos()))
+                .unwrap_or(1)
+                .max(1);
+            clamped = true;
+        }
+        if response.changed() || unit != original_unit || clamped {
+            *value = format!("{amount} {}", unit.suffix());
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// A bordered group of related form controls with a section title.
+///
+/// Long editors split fields into groups instead of one flat form.
+pub fn control_group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+    control_group_inner(ui, title, false, add);
+}
+
+/// Same as [`control_group`], but the group fills the available width.
+/// Use this in dialogs where the group should align with the dialog edges.
+pub fn control_group_fill(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+    control_group_inner(ui, title, true, add);
+}
+
+fn control_group_inner(ui: &mut Ui, title: &str, fill: bool, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(2.0);
+    Frame::group(ui.style())
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                if fill {
+                    let width = ui.available_width();
+                    if width.is_finite() && width > 0.0 {
+                        ui.set_min_width(width);
+                    }
+                }
+                ui.label(RichText::new(title).strong());
+                ui.add_space(6.0);
+                add(ui);
+            });
+        });
+    ui.add_space(6.0);
 }
 
 pub fn copy_button(ui: &mut Ui, value: &str) -> bool {
@@ -822,6 +1030,38 @@ pub fn removable_chip(ui: &mut Ui, theme: UiTheme, text: &str, tone: Tone) -> bo
     removed
 }
 
+/// Width of a [`Ui::small_button`] with the given label, including padding.
+pub fn small_button_width(ui: &Ui, text: &str) -> f32 {
+    let font = TextStyle::Button.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_owned(), font, color));
+    galley.size().x + 2.0 * ui.spacing().button_padding.x
+}
+
+/// Single-line text field that grows with its contents up to `max_width`.
+///
+/// egui's `TextEdit` only accepts a fixed desired width, so this measures the
+/// current text (or hint) and applies the clamp before laying out the field.
+pub fn auto_width_text_edit(
+    ui: &mut Ui,
+    text: &mut String,
+    hint: &str,
+    min_width: f32,
+    max_width: f32,
+) -> Response {
+    let font_id = TextStyle::Body.resolve(ui.style());
+    let measured = if text.is_empty() { hint } else { text.as_str() };
+    let galley = ui.fonts_mut(|fonts| {
+        fonts.layout_no_wrap(measured.to_string(), font_id, Color32::PLACEHOLDER)
+    });
+    let width = (galley.size().x + 18.0).clamp(min_width, max_width);
+    ui.add(
+        TextEdit::singleline(text)
+            .hint_text(hint)
+            .desired_width(width),
+    )
+}
+
 /// Full-width read-only value field with a copy action. Long values scroll
 /// horizontally; multiline values wrap instead.
 pub fn copy_field(ui: &mut Ui, theme: UiTheme, label: &str, value: &str, multiline: bool) {
@@ -831,23 +1071,26 @@ pub fn copy_field(ui: &mut Ui, theme: UiTheme, label: &str, value: &str, multili
         copy_button(ui, value);
     });
     let available = (ui.available_width() - 10.0).max(120.0);
-    let mut text = value.to_string();
-    let mut edit = if multiline {
-        TextEdit::multiline(&mut text)
-            .desired_width(available)
-            .desired_rows(3)
-            .font(TextStyle::Monospace)
-            .interactive(false)
-    } else {
-        TextEdit::singleline(&mut text)
-            .desired_width(available)
-            .font(TextStyle::Monospace)
-            .interactive(false)
-    };
-    edit = edit
-        .text_color(palette.text)
-        .background_color(palette.input);
-    ui.add(edit);
+    egui::Frame::new()
+        .fill(palette.input)
+        .inner_margin(Margin::symmetric(6, 4))
+        .show(ui, |ui| {
+            ui.set_width(available);
+            let text = RichText::new(value).monospace().color(palette.text);
+            if multiline {
+                ui.add(Label::new(text).selectable(true).wrap());
+            } else {
+                egui::ScrollArea::horizontal()
+                    .id_salt(ui.next_auto_id())
+                    .show(ui, |ui| {
+                        ui.add(
+                            Label::new(text)
+                                .selectable(true)
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+            }
+        });
 }
 
 /// Fixed dialog header.
@@ -892,6 +1135,46 @@ pub fn dialog_footer(ui: &mut Ui, footer: impl FnOnce(&mut Ui)) {
 pub fn dialog_width(ui: &mut Ui, width: f32) {
     ui.set_min_width(width);
     ui.set_max_width(width);
+}
+
+/// Standard confirmation modal with Cancel and a destructive action.
+/// Returns `Some(true)` to confirm, `Some(false)` to cancel, or `None` while
+/// the dialog is still open.
+pub fn confirm_modal(
+    ctx: &Context,
+    theme: UiTheme,
+    id: &str,
+    title: &str,
+    detail: &str,
+    confirm_label: &str,
+) -> Option<bool> {
+    let palette = palette(theme);
+    let mut result = None;
+    let response = egui::Modal::new(Id::unique(id))
+        .frame(modal_frame(theme))
+        .show(ctx, |ui| {
+            dialog_width(ui, 400.0);
+            dialog_header(ui, theme, title, None);
+            dialog_body(ui, 180.0, |ui| {
+                ui.label(detail);
+            });
+            dialog_footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    result = Some(false);
+                }
+                if ui
+                    .button(RichText::new(confirm_label).color(palette.red))
+                    .clicked()
+                {
+                    result = Some(true);
+                }
+            });
+            false
+        });
+    if response.should_close() && result.is_none() {
+        result = Some(false);
+    }
+    result
 }
 
 /// Standard modal frame. `Modal` already supplies a backdrop and window frame.
@@ -988,6 +1271,13 @@ mod tests {
             assert_eq!(buffer.insert_text("xyz", egui::text::CharIndex(6)), 0);
         }
         assert_eq!(text, "ab 10 ");
+    }
+
+    #[test]
+    fn duration_parts_keep_the_literal_unit() {
+        assert_eq!(parse_duration_parts("60 m"), Some((60, TimeUnit::Minutes)));
+        assert_eq!(parse_duration_parts("60 s"), Some((60, TimeUnit::Seconds)));
+        assert_eq!(parse_duration_parts("1 h"), Some((1, TimeUnit::Hours)));
     }
 
     #[test]

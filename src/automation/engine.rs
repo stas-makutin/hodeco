@@ -2,22 +2,23 @@
 
 use crate::app::AppState;
 use crate::automation::command::{self, CaptureBudget};
-use crate::automation::runtime::AdmitError;
+use crate::automation::runtime::{AdmitError, RunCancelReason, RunControl};
 use crate::messages::StoreEvent;
 use crate::services::ServiceError;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use hodeco_contract::api::notifications::TaskRunFinishedNotification;
 use hodeco_contract::api::payloads::TaskRunNotification;
 use hodeco_contract::domain::{
-    ActionKind, ActionOutcome, MessageDirection, MessagePayload, MessageState, MessageTrigger,
-    NextCondition, NextTaskRecord, RunAction, RunChain, RunCommandAction, RunError,
-    RunMessageAction, RunOutcome, RunStage, RunSummary, RunTrigger, SelectorOutcome,
-    SelectorResult, TaskAction, TaskDefinition, TaskInfo, TaskRun, TaskRunTrigger, TriggerRef,
+    ActionKind, ActionOutcome, MessageState, MessageTrigger, NextCondition, NextTaskRecord,
+    RunAction, RunChain, RunCommandAction, RunError, RunMessageAction, RunOutcome, RunStage,
+    RunSummary, RunTrigger, SelectorOutcome, SelectorResult, TaskAction, TaskDefinition, TaskInfo,
+    TaskRun, TaskRunTrigger, TriggerRef,
 };
 use hodeco_contract::utils::{Base64Bytes, HumanDuration};
+use hodeco_schedule::jitter;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-use std::str::FromStr;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -46,7 +47,7 @@ impl FireError {
 }
 
 /// Fires a task from an external API call.
-pub async fn fire_manual(
+pub fn fire_manual(
     state: &AppState,
     task_id: &str,
     trigger_id: Option<String>,
@@ -66,7 +67,7 @@ pub async fn fire_manual(
         payload,
         metadata,
     });
-    fire(state, &task, trigger, root_chain(), true).await
+    fire(state, &task, trigger, root_chain())
 }
 
 fn root_chain() -> RunChain {
@@ -77,17 +78,36 @@ fn root_chain() -> RunChain {
     }
 }
 
-/// Fires a task with a typed trigger. Internal callers use `external = false`
-/// so disabled, busy, rate-limited, and payload errors become suppression
-/// counters instead of API errors.
-pub async fn fire(
+/// Computes the actual start delay once per run. The symmetric jitter is
+/// derived from the task ID and the fresh run ID, so each run gets a stable
+/// offset without an extra random dependency.
+fn effective_start_delay(task: &TaskDefinition, run_id: Uuid) -> std::time::Duration {
+    let Some(delay) = task.delay else {
+        return std::time::Duration::ZERO;
+    };
+    let mut total = TimeDelta::from_std(delay.as_std()).unwrap_or_else(|_| TimeDelta::zero());
+    if let Some(jitter) = task.jitter {
+        let mut seed = Vec::with_capacity(task.id.len() + 16);
+        seed.extend_from_slice(task.id.as_bytes());
+        seed.extend_from_slice(run_id.as_bytes());
+        total += jitter::offset(&seed, 0, 0, jitter.as_std());
+    }
+    total
+        .max(TimeDelta::zero())
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO)
+}
+
+/// Fires a task with a typed trigger. Disabled, busy, rate-limited, and
+/// payload errors are recorded as suppression counters. Admission and the
+/// notification are synchronous; the run itself is spawned onto the runtime.
+pub fn fire(
     state: &AppState,
     task: &TaskDefinition,
     trigger: RunTrigger,
     chain: RunChain,
-    external: bool,
 ) -> Result<Uuid, FireError> {
-    start(state, task, trigger, chain, external)
+    start(state, task, trigger, chain)
 }
 
 fn start(
@@ -95,7 +115,6 @@ fn start(
     task: &TaskDefinition,
     trigger: RunTrigger,
     chain: RunChain,
-    external: bool,
 ) -> Result<Uuid, FireError> {
     if !task.enabled {
         return Err(FireError::TaskDisabled);
@@ -108,9 +127,10 @@ fn start(
     }
 
     let now = Utc::now();
+    let run_id = Uuid::new_v4();
     let guard = match state
         .runtime
-        .try_start(&task.id, task.max_runs_per_minute, now)
+        .try_start(&task.id, run_id, task.max_runs_per_minute, now)
     {
         Ok(guard) => guard,
         Err(AdmitError::Busy) => {
@@ -126,9 +146,12 @@ fn start(
             return Err(FireError::TaskLimitExceeded);
         }
     };
+    let control = guard.control();
 
-    let run_id = Uuid::new_v4();
     let started_at = Utc::now();
+    let delay = effective_start_delay(task, run_id);
+    let delayed_until = (!delay.is_zero())
+        .then(|| started_at + TimeDelta::from_std(delay).unwrap_or_else(|_| TimeDelta::zero()));
     state.runtime.note_trigger_run(&task.id, trigger.id());
     let trigger_ref = TriggerRef {
         id: trigger.id().to_string(),
@@ -141,15 +164,24 @@ fn start(
             task_id: task.id.clone(),
             trigger: trigger_ref,
             started_at,
+            delayed_until,
         }));
 
     let state = state.clone();
     let task = task.clone();
     tokio::spawn(run_task_boxed(
-        state, task, trigger, run_id, started_at, chain, guard,
+        state,
+        task,
+        trigger,
+        run_id,
+        started_at,
+        delayed_until,
+        delay,
+        chain,
+        guard,
+        control,
     ));
 
-    let _ = external;
     Ok(run_id)
 }
 
@@ -160,48 +192,72 @@ fn run_task_boxed(
     trigger: RunTrigger,
     run_id: Uuid,
     started_at: DateTime<Utc>,
+    delayed_until: Option<DateTime<Utc>>,
+    delay: std::time::Duration,
     chain: RunChain,
     guard: crate::automation::runtime::RunGuard,
+    control: RunControl,
 ) -> futures_util::future::BoxFuture<'static, ()> {
     Box::pin(run_task(
-        state, task, trigger, run_id, started_at, chain, guard,
+        state,
+        task,
+        trigger,
+        run_id,
+        started_at,
+        delayed_until,
+        delay,
+        chain,
+        guard,
+        control,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_task(
     state: AppState,
     task: TaskDefinition,
     trigger: RunTrigger,
     run_id: Uuid,
     started_at: DateTime<Utc>,
+    delayed_until: Option<DateTime<Utc>>,
+    delay: std::time::Duration,
     chain: RunChain,
     guard: crate::automation::runtime::RunGuard,
+    control: RunControl,
 ) {
-    let mut cancellation = CancellationToken::new();
+    let cancellation = control.token();
     let timeout = task.run_timeout.as_std();
-    let timer_cancel = cancellation.clone();
+    let timer_control = control.clone();
     let timer = if timeout.is_zero() {
         None
     } else {
-        Some(tokio::spawn(async move {
+        Some(AbortOnDrop(Some(tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
-            timer_cancel.cancel();
-        }))
+            timer_control.cancel(RunCancelReason::Timeout);
+        }))))
     };
 
-    let execution = execute(
-        &state,
-        &task,
-        &trigger,
-        run_id,
-        started_at,
-        &chain,
-        &mut cancellation,
-    )
-    .await;
-    if let Some(timer) = timer {
-        timer.abort();
+    let wait = delayed_until.map_or(delay, |until| {
+        (until - Utc::now())
+            .to_std()
+            .unwrap_or(std::time::Duration::ZERO)
+    });
+    let during_delay = !wait.is_zero();
+    if during_delay {
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = cancellation.cancelled() => {}
+        }
     }
+    let execution = if control.is_cancelled() {
+        cancelled_execution(&task, control.reason(), during_delay)
+    } else {
+        execute(
+            &state, &task, &trigger, run_id, started_at, &chain, &control,
+        )
+        .await
+    };
+    drop(timer);
 
     let finished_at = Utc::now();
     let time = state.runtime.next_history_time(finished_at);
@@ -221,6 +277,7 @@ async fn run_task(
         task_id: task.id.clone(),
         time,
         started_at,
+        delayed_until,
         finished_at,
         trigger: TriggerRef {
             id: trigger.id().to_string(),
@@ -241,16 +298,49 @@ async fn run_task(
         error: execution.error,
     };
 
-    if task.history.max_rows > 0
-        && let Err(error) = state.history.append_async(run).await
-    {
-        warn!(error = %error, task = %task.id, "unable to append task history");
+    let run = Arc::new(run);
+    // Encode the record once: the feed accounts its byte size and the history
+    // store writes the same bytes to disk. A failed encoding records nothing
+    // on either side.
+    let record = crate::automation::history::encode_run(&run);
+    let encoded_size = record.as_ref().map_or(0, |record| record.len() as u64);
+    let dropped = state.run_feed.push_run(run.clone(), encoded_size);
+    if !dropped.is_empty() {
+        let _ = state
+            .events
+            .send(crate::events::Event::TaskRunDropped { run_ids: dropped });
+    }
+    if task.history.max_rows > 0 {
+        match record {
+            Ok(record) => {
+                if let Err(error) = state
+                    .history
+                    .append_async(run, record, task.history.clone())
+                    .await
+                {
+                    warn!(error = %error, task = %task.id, "unable to append task history");
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, task = %task.id, "unable to encode task history");
+            }
+        }
     }
     state.runtime.set_last_run(&task.id, summary.clone());
     let _ = state.events.send(crate::events::Event::TaskRunFinished(
         TaskRunFinishedNotification { run: summary },
     ));
     drop(guard);
+}
+
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
 }
 
 struct Execution {
@@ -261,6 +351,56 @@ struct Execution {
     error: Option<RunError>,
 }
 
+fn cancelled_execution(
+    task: &TaskDefinition,
+    reason: Option<RunCancelReason>,
+    during_delay: bool,
+) -> Execution {
+    let message = match (reason, during_delay) {
+        (Some(RunCancelReason::User), true) => {
+            "run cancelled by user during start delay".to_string()
+        }
+        (Some(RunCancelReason::User), false) => "run cancelled by user".to_string(),
+        (Some(RunCancelReason::Shutdown), true) => {
+            "run cancelled during start delay because the service is shutting down".to_string()
+        }
+        (Some(RunCancelReason::Shutdown), false) => {
+            "run cancelled because the service is shutting down".to_string()
+        }
+        (_, true) => format!(
+            "run timed out after {:?} during start delay",
+            task.run_timeout.as_std()
+        ),
+        (_, false) => format!("run timed out after {:?}", task.run_timeout.as_std()),
+    };
+    Execution {
+        actions: Vec::new(),
+        selector: None,
+        next_tasks: Vec::new(),
+        outcome: RunOutcome::Cancelled,
+        error: Some(RunError {
+            stage: RunStage::Actions,
+            message,
+        }),
+    }
+}
+
+/// Builds a cancelled execution while preserving whatever the run had already
+/// produced so partial progress is still recorded.
+fn cancelled_partial(
+    task: &TaskDefinition,
+    reason: Option<RunCancelReason>,
+    actions: Vec<RunAction>,
+    selector: Option<SelectorResult>,
+    next_tasks: Vec<NextTaskRecord>,
+) -> Execution {
+    let mut execution = cancelled_execution(task, reason, false);
+    execution.actions = actions;
+    execution.selector = selector;
+    execution.next_tasks = next_tasks;
+    execution
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     state: &AppState,
@@ -269,7 +409,7 @@ async fn execute(
     run_id: Uuid,
     started_at: DateTime<Utc>,
     chain: &RunChain,
-    cancellation: &mut CancellationToken,
+    control: &RunControl,
 ) -> Execution {
     let snapshot = state.automation.snapshot();
     let mut budget = CaptureBudget::new();
@@ -277,7 +417,7 @@ async fn execute(
     let mut first_error: Option<RunError> = None;
 
     for action in &task.actions {
-        if cancellation.is_cancelled() {
+        if control.is_cancelled() {
             break;
         }
         let result = execute_action(
@@ -290,7 +430,7 @@ async fn execute(
             started_at,
             chain,
             &mut budget,
-            cancellation.clone(),
+            control.token(),
         )
         .await;
         let failed = result.status == ActionOutcome::Failed;
@@ -309,22 +449,12 @@ async fn execute(
         }
     }
 
-    let cancelled = cancellation.is_cancelled();
     let mut selector = None;
     let mut selector_targets: Vec<(String, NextCondition, Option<u8>)> = Vec::new();
     let mut next_tasks = Vec::new();
 
-    if cancelled {
-        return Execution {
-            actions,
-            selector: None,
-            next_tasks,
-            outcome: RunOutcome::Cancelled,
-            error: Some(RunError {
-                stage: RunStage::Actions,
-                message: format!("run timed out after {:?}", task.run_timeout.as_std()),
-            }),
-        };
+    if control.is_cancelled() {
+        return cancelled_partial(task, control.reason(), actions, None, Vec::new());
     }
 
     if let Some(rule) = task
@@ -342,7 +472,7 @@ async fn execute(
             chain,
             &actions,
             &mut budget,
-            cancellation.clone(),
+            control.token(),
         )
         .await;
         if result.outcome == SelectorOutcome::Error {
@@ -367,6 +497,10 @@ async fn execute(
             }
         }
         selector = Some(result);
+    }
+
+    if control.is_cancelled() {
+        return cancelled_partial(task, control.reason(), actions, selector, Vec::new());
     }
 
     // Evaluate each non-command-result rule independently and deduplicate
@@ -395,6 +529,9 @@ async fn execute(
     let max_fan_out = state.config.task_engine.max_fan_out as usize;
     let mut started_children = 0;
     for (target, rule, selector_exit_code) in targets {
+        if control.is_cancelled() {
+            return cancelled_partial(task, control.reason(), actions, selector, next_tasks);
+        }
         if started_children >= max_fan_out {
             debug!(task = %task.id, "task fan-out limit reached");
             break;
@@ -429,7 +566,7 @@ async fn execute(
             parent_run_id: Some(run_id),
             depth: chain.depth + 1,
         };
-        match start(state, target_task, child_trigger, child_chain, false) {
+        match start(state, target_task, child_trigger, child_chain) {
             Ok(child_run) => {
                 started_children += 1;
                 next_tasks.push(NextTaskRecord {
@@ -515,7 +652,6 @@ async fn execute_action(
                         args: command_action.args.clone(),
                         exit_code: None,
                         stdout: None,
-                        stderr: None,
                         output_truncated: false,
                     }),
                     message: None,
@@ -569,7 +705,6 @@ async fn execute_action(
                         .collect(),
                     exit_code: outcome.exit_code,
                     stdout: outcome.stdout,
-                    stderr: outcome.stderr,
                     output_truncated: outcome.output_truncated,
                 }),
                 None,
@@ -577,25 +712,7 @@ async fn execute_action(
             )
         }
         ActionKind::Message(message_action) => {
-            let payload = match resolve_payload(&message_action.message.payload, trigger) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    return RunAction {
-                        id: action.id.clone(),
-                        started_at: action_started,
-                        finished_at: Utc::now(),
-                        status: ActionOutcome::Failed,
-                        command: None,
-                        message: Some(RunMessageAction {
-                            service: message_action.message.service.clone(),
-                            payload: Base64Bytes::default(),
-                            message_id: None,
-                            ttl: message_action.message.ttl,
-                        }),
-                        error: Some(error),
-                    };
-                }
-            };
+            let payload = message_action.message.payload.as_slice().to_vec();
             let ttl = message_action.message.ttl.map(HumanDuration::as_std);
             let sent = state
                 .registry
@@ -713,10 +830,6 @@ fn trigger_metadata(trigger: &RunTrigger) -> Value {
             "transport": trigger.transport,
             "entry": trigger.entry,
             "state": trigger.state.name(),
-            "direction": match trigger.direction {
-                MessageDirection::Incoming => "incoming",
-                MessageDirection::Outgoing => "outgoing",
-            },
         }),
         RunTrigger::Schedule(trigger) => json!({
             "scheduleId": trigger.schedule_id,
@@ -786,6 +899,11 @@ async fn run_selector(
                 "status": action.status,
                 "command": action.command.as_ref().map(|command| &command.command_id),
                 "exitCode": action.command.as_ref().and_then(|command| command.exit_code),
+                "output": action.command.as_ref().and_then(|command| command.stdout.as_ref()),
+                "outputTruncated": action
+                    .command
+                    .as_ref()
+                    .is_some_and(|command| command.output_truncated),
                 "error": action.error,
             })
         })
@@ -831,10 +949,7 @@ async fn run_selector(
                 SelectorOutcome::NoMatch
             }
         }
-        Some(code) => {
-            let _ = code;
-            SelectorOutcome::Error
-        }
+        Some(_) => SelectorOutcome::Error,
         None => SelectorOutcome::Error,
     };
     SelectorResult {
@@ -860,41 +975,11 @@ async fn run_selector(
     }
 }
 
-fn resolve_payload(payload: &MessagePayload, trigger: &RunTrigger) -> Result<Vec<u8>, String> {
-    match payload {
-        MessagePayload::Trigger => Ok(trigger
-            .payload()
-            .map(|payload| payload.as_slice().to_vec())
-            .unwrap_or_default()),
-        MessagePayload::Text { text } => Ok(text.as_bytes().to_vec()),
-        MessagePayload::Hex { hex } => decode_hex(hex),
-        MessagePayload::Base64 { base64 } => Base64Bytes::from_str(base64)
-            .map(Base64Bytes::into_inner)
-            .map_err(|error| format!("invalid base64 payload: {error}")),
-    }
-}
-
-fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
-    let compact: Vec<u8> = input
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect();
-    if !compact.len().is_multiple_of(2) {
-        return Err("hex payload must contain an even number of digits".to_string());
-    }
-    let mut bytes = Vec::with_capacity(compact.len() / 2);
-    for pair in compact.chunks(2) {
-        let text = std::str::from_utf8(pair).map_err(|_| "invalid hex payload".to_string())?;
-        bytes.push(u8::from_str_radix(text, 16).map_err(|_| "invalid hex payload".to_string())?);
-    }
-    Ok(bytes)
-}
-
 // ---------------------------------------------------------------------------
 // Message triggers
 // ---------------------------------------------------------------------------
 
-pub async fn handle_store_event(state: &AppState, event: &StoreEvent) {
+pub fn handle_store_event(state: &AppState, event: &StoreEvent) {
     let (message, key, transition) = match event {
         StoreEvent::New { key, message } => (message, key, MessageTransition::New),
         StoreEvent::StateChanged { key, message } => {
@@ -920,10 +1005,9 @@ pub async fn handle_store_event(state: &AppState, event: &StoreEvent) {
                 transport: key.transport.clone(),
                 entry: key.entry.clone(),
                 state: message.state,
-                direction: message.state.direction(),
                 payload: Some(message.payload.clone()),
             });
-            let _ = start(state, task, trigger_record, root_chain(), false);
+            let _ = start(state, task, trigger_record, root_chain());
             // One message run per task: a second matching trigger would only
             // be suppressed as busy.
             break;
@@ -1003,18 +1087,20 @@ pub fn task_info(state: &AppState, task: &TaskDefinition) -> TaskInfo {
     TaskInfo {
         task: task.clone(),
         running: state.runtime.running(&task.id),
+        running_run_id: state.runtime.running_run_id(&task.id),
         last_run: state
-            .history
+            .runtime
             .last_run(&task.id)
-            .or_else(|| state.runtime.last_run(&task.id)),
+            .or_else(|| state.history.last_run(&task.id)),
         next: state.runtime.next(&task.id),
         suppressed_runs,
         last_suppressed_reason,
     }
 }
 
-/// Constructs the selector payload shape for tests and documentation.
-pub fn selector_actions_example(actions: &[RunAction]) -> Value {
+/// Constructs the selector payload shape for tests.
+#[cfg(test)]
+fn selector_actions_example(actions: &[RunAction]) -> Value {
     Value::Array(
         actions
             .iter()
@@ -1024,6 +1110,11 @@ pub fn selector_actions_example(actions: &[RunAction]) -> Value {
                     "status": action.status,
                     "command": action.command.as_ref().map(|command| &command.command_id),
                     "exitCode": action.command.as_ref().and_then(|command| command.exit_code),
+                    "output": action.command.as_ref().and_then(|command| command.stdout.as_ref()),
+                    "outputTruncated": action
+                        .command
+                        .as_ref()
+                        .is_some_and(|command| command.output_truncated),
                     "error": action.error,
                 })
             })
@@ -1036,28 +1127,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_hex_and_base64_payloads() {
-        assert_eq!(decode_hex("01 02 0a").unwrap(), vec![1, 2, 10]);
-        assert!(decode_hex("0").is_err());
-        let trigger = RunTrigger::Manual(hodeco_contract::domain::ManualRunTrigger {
-            id: "manual".to_string(),
-            payload: Some(Base64Bytes::from(vec![9, 8])),
-            metadata: BTreeMap::new(),
-        });
+    fn start_delay_is_deterministic_and_bounded() {
+        let mut task = TaskDefinition {
+            id: "delayed".to_string(),
+            ..TaskDefinition::default()
+        };
+        task.delay = Some(HumanDuration::from_std(std::time::Duration::from_secs(10)));
+        task.jitter = Some(HumanDuration::from_std(std::time::Duration::from_secs(2)));
+        let run_id = Uuid::nil();
+        let first = effective_start_delay(&task, run_id);
+        let second = effective_start_delay(&task, run_id);
+        assert_eq!(first, second);
+        assert!(first >= std::time::Duration::from_secs(8));
+        assert!(first <= std::time::Duration::from_secs(12));
+
+        task.delay = None;
+        task.jitter = None;
         assert_eq!(
-            resolve_payload(&MessagePayload::Trigger, &trigger).unwrap(),
-            vec![9, 8]
+            effective_start_delay(&task, run_id),
+            std::time::Duration::ZERO
         );
-        assert_eq!(
-            resolve_payload(
-                &MessagePayload::Base64 {
-                    base64: "AQID".to_string()
-                },
-                &trigger
-            )
-            .unwrap(),
-            vec![1, 2, 3]
-        );
+    }
+
+    #[test]
+    fn selector_summary_includes_command_output() {
+        let action = RunAction {
+            id: "meter".to_string(),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            status: ActionOutcome::Succeeded,
+            command: Some(RunCommandAction {
+                command_id: "meter".to_string(),
+                executable: "meter".to_string(),
+                args: Vec::new(),
+                exit_code: Some(0),
+                stdout: Some(Base64Bytes::from(vec![0x01, 0x02])),
+                output_truncated: false,
+            }),
+            message: None,
+            error: None,
+        };
+        let value = selector_actions_example(&[action]);
+        assert_eq!(value[0]["output"], "AQI=");
+        assert_eq!(value[0]["outputTruncated"], false);
     }
 
     #[test]

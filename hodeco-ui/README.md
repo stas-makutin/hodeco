@@ -2,7 +2,9 @@
 
 `hodeco-ui` is the egui-based admin and diagnostics frontend for the
 [`hodeco`](../README.md) gateway. It is a separate Cargo workspace under
-`hodeco-ui/` and depends on `hodeco-contract` for the wire protocol.
+`hodeco-ui/` and uses `hodeco-contract` for the wire protocol,
+`hodeco-codec` for decoding and frame building, and `hodeco-schedule` for
+schedule previews and demo fixtures.
 
 Project documentation and published builds are in the [wiki](../../wiki) and
 [releases](../../releases). Maintainer release notes are in
@@ -67,6 +69,7 @@ Current build includes:
 | `src/model.rs` | pure display helpers and message-buffer logic |
 | `src/theme.rs`, `src/ui/` | theme, widgets, structured parameter editors |
 | `../hodeco-codec/` | pure Z-Wave/Parsed decoding, hex, bundled definitions, builder, entity catalog |
+| `../hodeco-schedule/` | shared calendar, solar, repeat, and jitter computation |
 
 The UI owns colours and rendering; `hodeco-codec` owns protocol decoding and
 frame construction. The UI never interprets Z-Wave bytes itself.

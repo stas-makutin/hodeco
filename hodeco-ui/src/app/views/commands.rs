@@ -5,7 +5,7 @@ use crate::ui::widgets;
 use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use hodeco_contract::domain::{CommandDefinition, CommandInfo};
-use hodeco_contract::utils::HumanDuration;
+use hodeco_contract::utils::{HumanDuration, id_from_name};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -43,9 +43,8 @@ impl CommandsUi {
 #[derive(Debug)]
 pub(crate) struct CommandEditor {
     pub draft: CommandDefinition,
-    pub original: Option<CommandDefinition>,
-    pub initial: CommandDefinition,
     pub is_new: bool,
+    pub id_auto: bool,
     pub executable: String,
     pub working_dir: String,
     pub args: String,
@@ -67,10 +66,9 @@ impl CommandEditor {
         let timeout = command.timeout.to_string();
         let args = command.args.join("\n");
         Self {
-            draft: command.clone(),
-            original: (!is_new).then_some(command.clone()),
-            initial: command,
+            draft: command,
             is_new,
+            id_auto: is_new,
             executable,
             working_dir,
             args,
@@ -108,14 +106,6 @@ impl CommandEditor {
         command.timeout =
             HumanDuration::from_str(self.timeout.trim()).map_err(|error| error.to_string())?;
         Ok(command)
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        let original = self.original.as_ref().unwrap_or(&self.initial);
-        match self.build() {
-            Ok(command) => &command != original,
-            Err(_) => true,
-        }
     }
 }
 
@@ -186,16 +176,7 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
     let mut action_focus_id = None;
     let mut activate = None;
     if let Some(nav) = nav {
-        let last = commands.len().saturating_sub(1);
-        let next = match nav {
-            widgets::ListNav::Up => selected.map_or(0, |current| current.saturating_sub(1)),
-            widgets::ListNav::Down => selected.map_or(0, |current| (current + 1).min(last)),
-            widgets::ListNav::PageUp => selected.map_or(0, |current| current.saturating_sub(10)),
-            widgets::ListNav::PageDown => selected.map_or(0, |current| (current + 10).min(last)),
-            widgets::ListNav::Home => 0,
-            widgets::ListNav::End => last,
-            widgets::ListNav::Activate => selected.unwrap_or(0),
-        };
+        let next = nav.apply(selected, commands.len());
         selected = Some(next);
         if nav == widgets::ListNav::Activate {
             activate = commands.get(next).map(|info| info.command.clone());
@@ -329,25 +310,51 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
     }
 
     if let Some(command_id) = app.commands.confirm_delete.clone() {
-        egui::Window::new("Delete command")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ui.ctx(), |ui| {
-                ui.label(format!("Delete command '{command_id}'?"));
-                ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
-                        app.delete_command(&command_id);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        app.commands.confirm_delete = None;
-                    }
-                });
-            });
+        let detail = format!("Delete command '{command_id}'?");
+        match widgets::confirm_modal(
+            ui.ctx(),
+            theme,
+            "delete-command",
+            "Delete command",
+            &detail,
+            "Delete command",
+        ) {
+            Some(true) => app.delete_command(&command_id),
+            Some(false) => app.commands.confirm_delete = None,
+            None => {}
+        }
     }
 }
 
+fn args_editor(ui: &mut Ui, value: &mut String) {
+    let mut lines: Vec<String> = value.lines().map(ToString::to_string).collect();
+    let mut remove = None;
+    for (index, line) in lines.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let remove_width = widgets::small_button_width(ui, "Remove");
+            let width = (ui.spacing().text_edit_width - remove_width - ui.spacing().item_spacing.x)
+                .max(120.0);
+            ui.add(
+                egui::TextEdit::singleline(line)
+                    .hint_text("argument")
+                    .desired_width(width),
+            );
+            if ui.small_button("Remove").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        lines.remove(index);
+    }
+    if ui.button("Add argument").clicked() {
+        lines.push(" ".to_string());
+    }
+    *value = lines.join("\n");
+}
+
 fn editor_modal(app: &mut App, ui: &mut Ui) {
+    let theme = app.theme;
     let palette = app.palette();
     let ready = app.gateway.phase() == crate::client::Phase::Ready;
     let Some(mut editor) = app.commands.editor.take() else {
@@ -357,177 +364,209 @@ fn editor_modal(app: &mut App, ui: &mut Ui) {
     let mut close = false;
     let mut save = false;
     let mut delete = false;
-    let mut discard = false;
 
-    egui::Window::new(if editor.is_new {
-        "New command"
-    } else {
-        "Edit command"
-    })
-    .collapsible(false)
-    .resizable(true)
-    .default_width(520.0)
-    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-    .show(ui.ctx(), |ui| {
-        egui::Grid::new("command-editor-grid")
-            .num_columns(2)
-            .spacing([10.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("Name");
-                widgets::field_with_note(
-                    ui,
-                    app.theme,
-                    "Display name in the commands list.",
-                    |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut editor.draft.name));
-                    },
-                );
-                ui.end_row();
-                ui.label("ID");
+    let response = egui::Modal::new(egui::Id::unique("hodeco-command-editor"))
+        .frame(widgets::modal_frame(theme))
+        .show(ui.ctx(), |ui| {
+            widgets::dialog_width(ui, 640.0);
+            widgets::dialog_header(
+                ui,
+                theme,
                 if editor.is_new {
-                    widgets::field_with_note(
-                        ui,
-                        app.theme,
-                        "Generated from the name when left empty; immutable after creation.",
-                        |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut editor.draft.id)
-                                    .hint_text("generated from the name"),
-                            );
-                        },
-                    );
+                    "New command"
                 } else {
-                    ui.label(RichText::new(&editor.draft.id).monospace());
-                }
-                ui.end_row();
-                ui.label("Executable");
-                widgets::field_with_note(
-                    ui,
-                    app.theme,
-                    "Absolute path, or a command found on PATH.",
-                    |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.executable)
-                                .hint_text("/usr/local/bin/tool"),
-                        );
-                    },
-                );
-                ui.end_row();
-                ui.label("Arguments");
-                widgets::field_with_note(
-                    ui,
-                    app.theme,
-                    "One argv entry per line; task arguments are appended after these.",
-                    |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut editor.args)
-                                .hint_text("one argument per line")
-                                .desired_rows(4)
-                                .code_editor(),
-                        );
-                    },
-                );
-                ui.end_row();
-                ui.label("Working directory");
-                widgets::field_with_note(
-                    ui,
-                    app.theme,
-                    "Optional; defaults to the service working directory.",
-                    |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.working_dir)
-                                .hint_text("service working directory"),
-                        );
-                    },
-                );
-                ui.end_row();
-                ui.label("Timeout");
-                widgets::field_with_note(
-                    ui,
-                    app.theme,
-                    "Maximum process runtime, for example 10s or 2m.",
-                    |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut editor.timeout)
-                                .hint_text("10s")
-                                .desired_width(120.0),
-                        );
-                    },
-                );
-                ui.end_row();
-                ui.label("Description");
-                widgets::field_with_note(ui, app.theme, "Optional notes for operators.", |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut editor.draft.description).desired_rows(2),
-                    );
+                    "Edit command"
+                },
+                Some("Reusable command invoked by task actions and selectors."),
+            );
+            widgets::dialog_body(ui, 520.0, |ui| {
+                ui.spacing_mut().text_edit_width = (ui.available_width() - 160.0).max(240.0);
+                widgets::control_group_fill(ui, "Identity", |ui| {
+                    egui::Grid::new("command-identity")
+                        .num_columns(2)
+                        .spacing([18.0, 4.0])
+                        .show(ui, |ui| {
+                            widgets::field_label(ui, theme, "Name");
+                            widgets::field_with_note(
+                                ui,
+                                app.theme,
+                                "Display name in the commands list.",
+                                |ui| {
+                                    let response =
+                                        ui.add(egui::TextEdit::singleline(&mut editor.draft.name));
+                                    if response.changed() && editor.is_new && editor.id_auto {
+                                        editor.draft.id =
+                                            id_from_name("command", editor.draft.name.trim());
+                                    }
+                                },
+                            );
+                            ui.end_row();
+                            widgets::field_label(ui, theme, "ID");
+                            if editor.is_new {
+                                widgets::field_with_note(
+                                    ui,
+                                    app.theme,
+                                    if editor.id_auto {
+                                        "Auto-generated from the name; edit to override."
+                                    } else {
+                                        "Custom ID; it cannot be changed after creation."
+                                    },
+                                    |ui| {
+                                        let response = ui.add(
+                                            egui::TextEdit::singleline(&mut editor.draft.id)
+                                                .hint_text("generated from the name"),
+                                        );
+                                        if response.changed() {
+                                            editor.id_auto = editor.draft.id.trim().is_empty();
+                                        }
+                                        if editor.id_auto && editor.draft.id.trim().is_empty() {
+                                            editor.draft.id =
+                                                id_from_name("command", editor.draft.name.trim());
+                                        }
+                                    },
+                                );
+                            } else {
+                                ui.label(RichText::new(&editor.draft.id).monospace());
+                            }
+                            ui.end_row();
+                            widgets::field_label(ui, theme, "Description");
+                            widgets::field_with_note(
+                                ui,
+                                app.theme,
+                                "Optional notes for operators.",
+                                |ui| {
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut editor.draft.description)
+                                            .desired_rows(2),
+                                    );
+                                },
+                            );
+                            ui.end_row();
+                        });
                 });
-                ui.end_row();
+                widgets::control_group_fill(ui, "Process", |ui| {
+                    egui::Grid::new("command-process")
+                        .num_columns(2)
+                        .spacing([18.0, 4.0])
+                        .show(ui, |ui| {
+                            widgets::field_label(ui, theme, "Executable");
+                            widgets::field_with_note(
+                                ui,
+                                app.theme,
+                                "Absolute path, or a command found on PATH.",
+                                |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut editor.executable)
+                                            .hint_text("/usr/local/bin/tool"),
+                                    );
+                                },
+                            );
+                            ui.end_row();
+                            widgets::field_label(ui, theme, "Arguments");
+                            widgets::field_with_note(
+                                ui,
+                                app.theme,
+                                "One argv entry per line; task arguments are appended after these.",
+                                |ui| {
+                                    args_editor(ui, &mut editor.args);
+                                },
+                            );
+                            ui.end_row();
+                            widgets::field_label(ui, theme, "Working directory");
+                            widgets::field_with_note(
+                                ui,
+                                app.theme,
+                                "Optional; defaults to the service working directory.",
+                                |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut editor.working_dir)
+                                            .hint_text("service working directory"),
+                                    );
+                                },
+                            );
+                            ui.end_row();
+                            widgets::field_label(ui, theme, "Timeout");
+                            widgets::field_with_note(
+                                ui,
+                                app.theme,
+                                "Maximum process runtime.",
+                                |ui| {
+                                    widgets::duration_editor(
+                                        ui,
+                                        &mut editor.timeout,
+                                        std::time::Duration::from_secs(1),
+                                    );
+                                },
+                            );
+                            ui.end_row();
+                        });
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Runs as: service account · input: one JSON document on stdin")
+                        .small()
+                        .color(palette.muted),
+                );
+                if !editor.used_by.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Used by").strong());
+                    for task in &editor.used_by {
+                        ui.label(task);
+                    }
+                }
+                if let Some(error) = &editor.error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(error).color(palette.red));
+                }
             });
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("Runs as: service account · input: one JSON document on stdin")
-                .small()
-                .color(palette.muted),
-        );
-        if !editor.used_by.is_empty() {
-            ui.add_space(6.0);
-            ui.label(RichText::new("Used by").strong());
-            for task in &editor.used_by {
-                ui.label(task);
-            }
-        }
-        if let Some(error) = &editor.error {
-            ui.add_space(6.0);
-            ui.label(RichText::new(error).color(palette.red));
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ready && !editor.saving, egui::Button::new("Save"))
-                .clicked()
-            {
-                save = true;
-            }
-            if ui.button("Cancel").clicked() {
-                close = true;
-            }
-            if ui
-                .add_enabled(editor.is_dirty(), egui::Button::new("Discard"))
-                .clicked()
-            {
-                discard = true;
-            }
-            if !editor.is_new {
-                let blocked = !editor.used_by.is_empty();
+            widgets::dialog_footer(ui, |ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
                 if ui
-                    .add_enabled(
-                        ready && !blocked,
-                        egui::Button::new(RichText::new("Delete").color(palette.red)),
-                    )
-                    .on_hover_text(if blocked {
-                        "Remove the command from its tasks first"
-                    } else {
-                        "Delete command"
-                    })
+                    .add_enabled(ready && !editor.saving, egui::Button::new("Save"))
                     .clicked()
                 {
-                    editor.confirm_delete = true;
+                    save = true;
                 }
-            }
-        });
-        if editor.confirm_delete {
-            ui.add_space(6.0);
-            ui.label("Delete this command?");
-            ui.horizontal(|ui| {
-                if ui.button("Delete").clicked() {
-                    delete = true;
-                }
-                if ui.button("Keep").clicked() {
-                    editor.confirm_delete = false;
+                if !editor.is_new {
+                    let blocked = !editor.used_by.is_empty();
+                    if ui
+                        .add_enabled(
+                            ready && !blocked,
+                            egui::Button::new(RichText::new("Delete").color(palette.red)),
+                        )
+                        .on_hover_text(if blocked {
+                            "Remove the command from its tasks first"
+                        } else {
+                            "Delete command"
+                        })
+                        .clicked()
+                    {
+                        editor.confirm_delete = true;
+                    }
                 }
             });
+            false
+        });
+    if response.should_close() && !save {
+        close = true;
+    }
+    if editor.confirm_delete {
+        let detail = format!("Delete command '{}'?", editor.draft.id);
+        match widgets::confirm_modal(
+            ui.ctx(),
+            theme,
+            "delete-command-editor",
+            "Delete command",
+            &detail,
+            "Delete command",
+        ) {
+            Some(true) => delete = true,
+            Some(false) => editor.confirm_delete = false,
+            None => {}
         }
-    });
+    }
 
     if save {
         match editor.build() {
@@ -546,17 +585,32 @@ fn editor_modal(app: &mut App, ui: &mut Ui) {
         let id = editor.draft.id.clone();
         app.delete_command(&id);
     }
-    if discard {
-        keep = false;
-    }
     if close {
-        if editor.is_dirty() {
-            editor.error = Some("Save, discard, or cancel the changes before closing.".to_string());
-        } else {
-            keep = false;
-        }
+        keep = false;
     }
     if keep {
         app.commands.editor = Some(editor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_timeout_written_by_the_duration_editor() {
+        let mut editor = CommandEditor::new(
+            CommandDefinition {
+                id: "test".to_string(),
+                name: "Test".to_string(),
+                executable: PathBuf::from("test"),
+                ..CommandDefinition::default()
+            },
+            true,
+            Vec::new(),
+        );
+        editor.timeout = "10 s".to_string();
+        let command = editor.build().unwrap();
+        assert_eq!(command.timeout.as_std(), std::time::Duration::from_secs(10));
     }
 }

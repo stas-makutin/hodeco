@@ -13,8 +13,9 @@ The project uses one version for the root workspace and one for the separate
 - `hodeco-ui/Cargo.toml` → `[workspace.package] version`
 
 All crates in the root workspace inherit the root version (`hodeco`,
-`hodeco-contract`, and `hodeco-codec`), and `hodeco-ui` inherits its workspace
-version. Tags use a `v` prefix: `v0.1.0`, or `v0.2.0-rc.1` for a pre-release.
+`hodeco-contract`, `hodeco-codec`, and `hodeco-schedule`), and `hodeco-ui`
+inherits its workspace version. Tags use a `v` prefix: `v0.2.0`, or
+`v0.2.0-rc.1` for a pre-release.
 
 The release workflow refuses to build or publish when the tag, root workspace,
 and UI versions do not agree.
@@ -27,9 +28,10 @@ and UI versions do not agree.
    repository only after the first page exists; the sync workflow cannot clone
    it before that.
 4. Create a **classic personal access token** with `repo` scope (or
-   `public_repo` for a public repository). Fine-grained tokens do not currently
-   grant wiki write access. Authorize the token for the organization's SSO if
-   required.
+   `public_repo` for a public repository). A fine-grained token also works when
+   it has **Contents: Read and write** on both the main repository and the
+   `.wiki.git` repository, and either token format is accepted by the sync
+   workflow. Authorize the token for the organization's SSO if required.
 5. Add the token as an Actions secret named `WIKI_TOKEN`
    (**Settings → Secrets and variables → Actions**).
 
@@ -59,7 +61,7 @@ UI. It runs on pushes to `master` or `main`; update the branch filter in
 4. Tag and push:
 
    ```sh
-   git tag -a v0.1.0 -m "hodeco 0.1.0"
+   git tag -a v0.2.0 -m "hodeco 0.2.0"
    git push origin master --follow-tags
    ```
 
@@ -127,9 +129,9 @@ Package documentation includes both `THIRD-PARTY-LICENSES.md` (backend) and
 Package filenames follow the normal conventions, for example:
 
 ```text
-hodeco_0.1.0_amd64.deb
-hodeco-0.1.0-1.x86_64.rpm
-hodeco_0.1.0_armhf.deb
+hodeco_0.2.0_amd64.deb
+hodeco-0.2.0-1.x86_64.rpm
+hodeco_0.2.0_armhf.deb
 ```
 
 Windows builds use the static MSVC CRT, so the ZIPs do not require the Visual
@@ -144,7 +146,7 @@ distro-independent fallback.
 Windows (portable, static CRT):
 
 ```powershell
-Expand-Archive hodeco-0.1.0-windows-x86_64.zip -DestinationPath hodeco
+Expand-Archive hodeco-0.2.0-windows-x86_64.zip -DestinationPath hodeco
 cd hodeco
 .\hodeco.exe run
 ```
@@ -152,17 +154,17 @@ cd hodeco
 Linux (portable):
 
 ```sh
-tar -xzf hodeco-0.1.0-linux-x86_64.tar.gz
-cd hodeco-0.1.0-linux-x86_64
+tar -xzf hodeco-0.2.0-linux-x86_64.tar.gz
+cd hodeco-0.2.0-linux-x86_64
 ./hodeco run --config config.yaml
 ```
 
 Linux package:
 
 ```sh
-sudo dpkg -i hodeco_0.1.0_amd64.deb
+sudo dpkg -i hodeco_0.2.0_amd64.deb
 # or
-sudo rpm -i hodeco-0.1.0-1.x86_64.rpm
+sudo rpm -i hodeco-0.2.0-1.x86_64.rpm
 ```
 
 Packages do not install or start the service automatically. Register the
@@ -186,7 +188,7 @@ sha256sum --check SHA256SUMS
 On Windows:
 
 ```powershell
-Get-FileHash .\hodeco-0.1.0-windows-x86_64.zip -Algorithm SHA256
+Get-FileHash .\hodeco-0.2.0-windows-x86_64.zip -Algorithm SHA256
 ```
 
 ## Troubleshooting

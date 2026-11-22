@@ -16,7 +16,7 @@ use hodeco_codec::entities;
 use hodeco_codec::hex::spaced_hex;
 use hodeco_contract::catalog::ZWAVE_PARAM_OUTGOING_MAX_TTL;
 use hodeco_contract::domain::{ProtocolInfo, ServiceInfo, ServiceRef};
-use hodeco_contract::utils::HumanDuration;
+use hodeco_contract::utils::{Base64Bytes, HumanDuration};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,8 +187,20 @@ pub enum SerialFieldState {
     Flags(u8),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuilderPurpose {
+    Send,
+    TaskMessage { action_index: usize },
+}
+
+enum BuilderOutcome {
+    Send(Vec<u8>),
+    UseMessage(Vec<u8>),
+}
+
 #[derive(Debug, Clone)]
 pub struct BuilderDialog {
+    pub purpose: BuilderPurpose,
     pub service: Option<ServiceRef>,
     pub protocol: String,
     pub operation: BuilderOperation,
@@ -226,6 +238,7 @@ pub fn new_builder(
         .or_else(|| protocols.first().map(|protocol| protocol.id.clone()))
         .unwrap_or_else(|| "zwave".to_string());
     BuilderDialog {
+        purpose: BuilderPurpose::Send,
         service: selected_service,
         protocol: protocol.clone(),
         operation: BuilderOperation::default_for_protocol(&protocol),
@@ -248,6 +261,257 @@ pub fn new_builder(
         ttl: String::new(),
         error: None,
     }
+}
+
+pub fn new_task_message_builder(
+    service: Option<ServiceRef>,
+    services: &[ServiceInfo],
+    protocols: &[ProtocolInfo],
+    action_index: usize,
+    current: &Base64Bytes,
+    ttl: Option<HumanDuration>,
+) -> BuilderDialog {
+    let service = service.filter(
+        |reference| !matches!(reference, ServiceRef::Alias { alias } if alias.trim().is_empty()),
+    );
+    let mut dialog = new_builder(service, services, protocols);
+    dialog.purpose = BuilderPurpose::TaskMessage { action_index };
+    dialog.ttl = ttl.map(|ttl| ttl.to_string()).unwrap_or_default();
+    let bytes = current.as_slice();
+    if !bytes.is_empty() && !restore_protocol_builder(&mut dialog, bytes) {
+        dialog.operation = BuilderOperation::RawMessage;
+        dialog.raw_payload = spaced_hex(bytes);
+    }
+    dialog
+}
+
+/// Reopens a composed payload in its protocol-specific builder when a parser
+/// exists, otherwise the caller falls back to raw message mode.
+fn restore_protocol_builder(dialog: &mut BuilderDialog, payload: &[u8]) -> bool {
+    match dialog.protocol.as_str() {
+        "zwave" => restore_zwave_builder(dialog, payload),
+        _ => false,
+    }
+}
+
+fn restore_zwave_builder(dialog: &mut BuilderDialog, payload: &[u8]) -> bool {
+    let original = dialog.clone();
+    if !restore_zwave_frame(dialog, payload) {
+        *dialog = original;
+        return false;
+    }
+    if dialog.build().ok().as_deref() != Some(payload) {
+        *dialog = original;
+        return false;
+    }
+    // Prefer structured command fields when they can reproduce the exact frame.
+    let raw = dialog.clone();
+    if restore_zwave_command(dialog) && dialog.build().ok().as_deref() == Some(payload) {
+        return true;
+    }
+    *dialog = raw;
+    true
+}
+
+fn restore_zwave_frame(dialog: &mut BuilderDialog, payload: &[u8]) -> bool {
+    if payload.len() < 4
+        || payload[0] != hodeco_codec::zwave::FRAME_SOF
+        || payload[2] != hodeco_codec::zwave::FRAME_REQUEST
+        || usize::from(payload[1]) + 2 != payload.len()
+    {
+        return false;
+    }
+    let decoded = hodeco_codec::zwave::decode(payload);
+    if decoded.frames.len() != 1
+        || decoded.frames[0].checksum_ok != Some(true)
+        || decoded.frames[0].range.start != 0
+        || decoded.frames[0].range.end != payload.len()
+    {
+        return false;
+    }
+
+    let command = payload[3];
+    let params = &payload[4..payload.len() - 1];
+    dialog.raw_payload.clear();
+    dialog.raw_serial.clear();
+    dialog.command_params.clear();
+    dialog.serial_params.clear();
+    dialog.serial_fields.clear();
+    dialog.command_class = None;
+    dialog.command_id = None;
+    match command {
+        hodeco_codec::zwave::SERIAL_SEND_DATA => restore_zwave_send_data(dialog, params),
+        hodeco_codec::zwave::SERIAL_SEND_DATA_MULTI => {
+            restore_zwave_send_data_multi(dialog, params)
+        }
+        _ => restore_zwave_serial_command(dialog, command, params),
+    }
+}
+
+fn restore_zwave_send_data(dialog: &mut BuilderDialog, params: &[u8]) -> bool {
+    if params.len() < 4 {
+        return false;
+    }
+    let node = params[0];
+    let data_len = usize::from(params[1]);
+    let data_end = 2 + data_len;
+    if data_len == 0 || params.len() != data_end + 2 {
+        return false;
+    }
+    let data = &params[2..data_end];
+    let tx_options = params[data_end];
+    let callback_id = params[data_end + 1];
+    let broadcast = node == codec::BROADCAST_NODE_ID && tx_options == codec::BROADCAST_TX_OPTIONS;
+    dialog.operation = if broadcast {
+        BuilderOperation::Special(SpecialOperation::Broadcast)
+    } else {
+        BuilderOperation::SerialCommand(hodeco_codec::zwave::SERIAL_SEND_DATA)
+    };
+    dialog.node = if broadcast {
+        String::new()
+    } else {
+        node.to_string()
+    };
+    dialog.nodes.clear();
+    dialog.callback_id = callback_id.to_string();
+    if !broadcast {
+        dialog
+            .serial_fields
+            .insert("txOptions".to_string(), SerialFieldState::Flags(tx_options));
+    }
+    dialog.raw_cc = spaced_hex(data);
+    true
+}
+
+fn restore_zwave_send_data_multi(dialog: &mut BuilderDialog, params: &[u8]) -> bool {
+    if params.is_empty() {
+        return false;
+    }
+    let node_count = usize::from(params[0]);
+    let nodes_end = 1 + node_count;
+    if node_count == 0 || params.len() < nodes_end + 3 {
+        return false;
+    }
+    let data_len = usize::from(params[nodes_end]);
+    let data_start = nodes_end + 1;
+    let data_end = data_start + data_len;
+    if data_len == 0 || params.len() != data_end + 2 {
+        return false;
+    }
+    let nodes = &params[1..nodes_end];
+    let data = &params[data_start..data_end];
+    let tx_options = params[data_end];
+    let callback_id = params[data_end + 1];
+    dialog.operation = BuilderOperation::SerialCommand(hodeco_codec::zwave::SERIAL_SEND_DATA_MULTI);
+    dialog.node.clear();
+    dialog.nodes = nodes
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    dialog.callback_id = callback_id.to_string();
+    dialog
+        .serial_fields
+        .insert("txOptions".to_string(), SerialFieldState::Flags(tx_options));
+    dialog.raw_cc = spaced_hex(data);
+    true
+}
+
+fn restore_zwave_serial_command(dialog: &mut BuilderDialog, command: u8, params: &[u8]) -> bool {
+    let definitions = definitions::current();
+    let Some(definition) = definitions.serial_command(command) else {
+        return false;
+    };
+    if !definition.no_request_parameters && !definition.fields.is_empty() {
+        return false;
+    }
+    dialog.operation = BuilderOperation::SerialCommand(command);
+    dialog.serial_params = spaced_hex(params);
+    true
+}
+
+fn restore_zwave_command(dialog: &mut BuilderDialog) -> bool {
+    let Ok(data) = hodeco_codec::parse_hex(&dialog.raw_cc) else {
+        return false;
+    };
+    if data.len() < 2 {
+        return false;
+    }
+    let class_id = data[0];
+    let command_id = data[1];
+    let params = &data[2..];
+    let definitions = definitions::current();
+    let Some(command) = definitions.command(class_id, command_id) else {
+        return false;
+    };
+    let tx_options = dialog.serial_fields.get("txOptions").cloned();
+    dialog.command_class = Some(class_id);
+    dialog.command_id = Some(command_id);
+    dialog.raw_cc.clear();
+    dialog.command_params.clear();
+    dialog.serial_params.clear();
+    dialog.serial_fields.clear();
+    if let Some(tx_options) = tx_options {
+        dialog
+            .serial_fields
+            .insert("txOptions".to_string(), tx_options);
+    }
+
+    match CommandPreset::from_ids(class_id, command_id) {
+        CommandPreset::BasicSet | CommandPreset::BasicReport => {
+            if params.len() != 1 {
+                return false;
+            }
+            dialog.value = params[0].to_string();
+        }
+        CommandPreset::BasicGet => {
+            if !params.is_empty() {
+                return false;
+            }
+        }
+        CommandPreset::SwitchBinarySet | CommandPreset::SwitchBinaryReport => {
+            if params.len() != 1 {
+                return false;
+            }
+            dialog.value = if params[0] == 0 { "0" } else { "255" }.to_string();
+        }
+        CommandPreset::SwitchMultilevelSet | CommandPreset::SwitchMultilevelReport => {
+            if params.len() != 1 {
+                return false;
+            }
+            dialog.value = params[0].to_string();
+        }
+        CommandPreset::SwitchMultilevelGet | CommandPreset::MeterGet => {
+            if !params.is_empty() {
+                return false;
+            }
+        }
+        CommandPreset::SwitchBinaryGet => {
+            if !params.is_empty() {
+                return false;
+            }
+        }
+        CommandPreset::MeterReport => {
+            if params.len() < 2 {
+                return false;
+            }
+            dialog.meter_type = format!("0x{:02x}", params[0]);
+            dialog.meter_value = spaced_hex(&params[1..]);
+        }
+        CommandPreset::SceneActivationSet => {
+            if params.len() != 2 {
+                return false;
+            }
+            dialog.scene_id = params[0].to_string();
+            dialog.dimming = params[1].to_string();
+        }
+        CommandPreset::Generic => {
+            if !command.fields.is_empty() || !params.is_empty() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 impl BuilderDialog {
@@ -1313,6 +1577,17 @@ fn flags_widget(ui: &mut Ui, field: &FieldDef, value: &mut u8) {
 pub(crate) fn show(app: &mut App, ctx: &Context, dialog: &mut BuilderDialog) -> bool {
     let mut keep_open = true;
     let theme = app.theme;
+    let task_message = matches!(&dialog.purpose, BuilderPurpose::TaskMessage { .. });
+    let title = if task_message {
+        "Compose message"
+    } else {
+        "Send message"
+    };
+    let description = if task_message {
+        "Build the message stored in this task action. Nothing is sent now."
+    } else {
+        "Build a payload for the selected service and send it."
+    };
     let modal_id = Id::unique("hodeco-builder");
     // The dialog only needs to sit above the app. Keeping it in Middle leaves
     // Foreground combo-box popups on top, so their lists stay interactive.
@@ -1322,12 +1597,7 @@ pub(crate) fn show(app: &mut App, ctx: &Context, dialog: &mut BuilderDialog) -> 
         .frame(widgets::modal_frame(theme))
         .show(ctx, |ui| {
             widgets::dialog_width(ui, 660.0);
-            widgets::dialog_header(
-                ui,
-                theme,
-                "Send message",
-                Some("Build a payload for the selected service and send it."),
-            );
+            widgets::dialog_header(ui, theme, title, Some(description));
 
             widgets::dialog_body(ui, 620.0, |ui| {
                 ui.label(RichText::new("Service").strong());
@@ -1882,32 +2152,78 @@ pub(crate) fn show(app: &mut App, ctx: &Context, dialog: &mut BuilderDialog) -> 
                 let built = dialog.build();
                 let ttl = dialog.ttl();
                 let ready = app.gateway.phase() == crate::client::Phase::Ready;
-                let enabled =
-                    built.is_ok() && ttl.is_ok() && dialog.service.is_some() && ready;
-                if ui
-                    .add_enabled(enabled, egui::Button::new("Send message"))
-                    .clicked()
-                    && let (Ok(frame), Ok(ttl)) = (&built, &ttl)
-                {
-                    action = Some((frame.clone(), *ttl));
-                }
-                if !ready {
-                    ui.label(
-                        RichText::new("sending requires a ready connection")
-                            .size(13.5)
-                            .color(app.palette().muted),
-                    );
+                let service_ready = dialog.service.is_some();
+                if task_message {
+                    if ui
+                        .add_enabled(
+                            built.is_ok() && ttl.is_ok() && service_ready,
+                            egui::Button::new("Use message"),
+                        )
+                        .clicked()
+                        && let Ok(frame) = &built
+                    {
+                        action = Some(BuilderOutcome::UseMessage(frame.clone()));
+                    }
+                } else {
+                    let enabled = built.is_ok() && ttl.is_ok() && service_ready && ready;
+                    if ui
+                        .add_enabled(enabled, egui::Button::new("Send message"))
+                        .clicked()
+                        && let Ok(frame) = &built
+                    {
+                        action = Some(BuilderOutcome::Send(frame.clone()));
+                    }
+                    if !ready {
+                        ui.label(
+                            RichText::new("sending requires a ready connection")
+                                .size(13.5)
+                                .color(app.palette().muted),
+                        );
+                    }
                 }
                 if let Ok(frame) = built {
                     widgets::copy_with_feedback(ui, &spaced_hex(&frame), "Copy bytes");
                 }
             });
 
-            if let Some((frame, ttl)) = action
+            if let Some(outcome) = action
                 && let Some(service) = dialog.service.clone()
             {
-                app.send_service_payload(&service, frame, ttl);
-                keep_open = false;
+                match dialog.purpose.clone() {
+                    BuilderPurpose::Send => {
+                        if let BuilderOutcome::Send(frame) = outcome {
+                            match dialog.ttl() {
+                                Ok(ttl) => {
+                                    app.send_service_payload(&service, frame, ttl);
+                                    keep_open = false;
+                                }
+                                Err(error) => dialog.error = Some(error),
+                            }
+                        }
+                    }
+                    BuilderPurpose::TaskMessage { action_index } => match dialog.ttl() {
+                        Ok(ttl) => {
+                            let payload = match outcome {
+                                BuilderOutcome::UseMessage(frame) => Some(Base64Bytes::from(frame)),
+                                BuilderOutcome::Send(_) => None,
+                            };
+                            if let Some(payload) = payload {
+                                if app.set_task_action_message(
+                                    action_index,
+                                    service,
+                                    payload,
+                                    ttl,
+                                ) {
+                                    keep_open = false;
+                                } else {
+                                    dialog.error =
+                                        Some("The task action no longer exists.".to_string());
+                                }
+                            }
+                        }
+                        Err(error) => dialog.error = Some(error),
+                    },
+                }
             }
         });
 
@@ -2032,6 +2348,77 @@ mod tests {
             BuilderOperation::default_for_protocol("zwave").kind(),
             OperationKind::SendData
         );
+    }
+
+    #[test]
+    fn restores_zwave_send_data_builder_state() {
+        let frame = codec::build_send_data(
+            5,
+            &codec::switch_binary_set(true),
+            codec::TX_OPTION_ACK,
+            0x21,
+        )
+        .unwrap();
+        let mut dialog = new_builder(None, &[], &[]);
+        assert!(restore_protocol_builder(&mut dialog, &frame));
+        assert_eq!(
+            dialog.operation,
+            BuilderOperation::SerialCommand(hodeco_codec::zwave::SERIAL_SEND_DATA)
+        );
+        assert_eq!(dialog.node, "5");
+        assert_eq!(dialog.command_class, Some(0x25));
+        assert_eq!(dialog.command_id, Some(0x01));
+        assert_eq!(dialog.value, "255");
+        assert_eq!(dialog.build().unwrap(), frame);
+    }
+
+    #[test]
+    fn restores_unknown_zwave_command_as_raw_command_class() {
+        let frame =
+            codec::build_send_data(7, &[0x99, 0x01, 0xaa], codec::TX_OPTION_ACK, 3).unwrap();
+        let mut dialog = new_builder(None, &[], &[]);
+        assert!(restore_protocol_builder(&mut dialog, &frame));
+        assert_eq!(
+            dialog.operation,
+            BuilderOperation::SerialCommand(hodeco_codec::zwave::SERIAL_SEND_DATA)
+        );
+        assert_eq!(dialog.command_class, None);
+        assert_eq!(dialog.raw_cc, "99 01 aa");
+        assert_eq!(dialog.build().unwrap(), frame);
+    }
+
+    #[test]
+    fn restores_zwave_send_data_multi_builder_state() {
+        let frame = codec::build_send_data_multi(&[2, 7], &codec::basic_set(0x63), 0, 4).unwrap();
+        let mut dialog = new_builder(None, &[], &[]);
+        assert!(restore_protocol_builder(&mut dialog, &frame));
+        assert_eq!(
+            dialog.operation,
+            BuilderOperation::SerialCommand(hodeco_codec::zwave::SERIAL_SEND_DATA_MULTI)
+        );
+        assert_eq!(dialog.nodes, "2, 7");
+        assert_eq!(dialog.command_class, Some(0x20));
+        assert_eq!(dialog.command_id, Some(0x01));
+        assert_eq!(dialog.value, "99");
+        assert_eq!(dialog.build().unwrap(), frame);
+    }
+
+    #[test]
+    fn task_message_builder_prefills_hex_as_raw_message() {
+        let dialog = new_task_message_builder(
+            None,
+            &[],
+            &[],
+            2,
+            &Base64Bytes::from(vec![0x01, 0x02]),
+            None,
+        );
+        assert_eq!(
+            dialog.purpose,
+            BuilderPurpose::TaskMessage { action_index: 2 }
+        );
+        assert_eq!(dialog.operation, BuilderOperation::RawMessage);
+        assert_eq!(dialog.raw_payload, "01 02");
     }
 
     #[test]

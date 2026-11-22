@@ -1,6 +1,6 @@
 ﻿[workspace]
-members = [".", "hodeco-contract", "hodeco-codec"]
-default-members = [".", "hodeco-contract"]
+members = [".", "hodeco-contract", "hodeco-codec", "hodeco-schedule"]
+default-members = [".", "hodeco-contract", "hodeco-schedule"]
 resolver = "3"
 
 [workspace.package]
@@ -22,6 +22,7 @@ license.workspace = true
 
 [dependencies]
 hodeco-contract = { path = "hodeco-contract", features = ["server-defaults"] }
+hodeco-schedule = { path = "hodeco-schedule" }
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 chrono-tz = "0.10"
@@ -33,9 +34,9 @@ parking_lot = "0.12"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml_ng = "0.10" # replace with yaml-rust2 = { version = "2.0", features = ["serde"] }
+serde_yaml_ng = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time", "io-util"] }
 tokio-serial = "5"
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
@@ -56,7 +57,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Services",
     "Win32_System_Registry",
     "Win32_System_EventLog",
-    "Win32_System_SystemInformation",
     "Win32_Security",
     "Win32_Foundation"
 ] }

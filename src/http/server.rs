@@ -18,10 +18,10 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
-use parking_lot::Mutex;
 use serde_json::json;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -29,7 +29,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use tower_http::compression::CompressionLayer;
-use tower_http::timeout::{TimeoutBody, TimeoutLayer};
+use tower_http::timeout::TimeoutBody;
 use tracing::{debug, error, info, warn};
 
 pub const RPC_BODY_LIMIT: usize = 512 * 1024;
@@ -44,8 +44,10 @@ struct HttpLimits {
     write_timeout: Duration,
 }
 
+#[derive(Clone)]
+struct RemoteAddr(SocketAddr);
+
 pub fn router(state: AppState) -> Router {
-    let timeout = state.config.http_server.read_timeout.as_std();
     let limits = HttpLimits {
         max_header_bytes: state.config.http_server.max_header_bytes as usize,
         read_timeout: state.config.http_server.read_timeout.as_std(),
@@ -58,10 +60,6 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/hooks/{task}", get(hook_handler).post(hook_handler))
         .layer(DefaultBodyLimit::max(RPC_BODY_LIMIT))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            timeout,
-        ))
         .with_state(state.clone());
 
     Router::new()
@@ -130,7 +128,11 @@ pub async fn serve(state: AppState, cancel: CancellationToken) -> Result<(), App
     info!(address = %local, "http server listening");
 
     let app = router(state);
-    let max_connections = config.max_connections.max(1) as usize;
+    let max_connections = if config.max_connections == 0 {
+        Semaphore::MAX_PERMITS
+    } else {
+        config.max_connections as usize
+    };
     let semaphore = Arc::new(Semaphore::new(max_connections));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut connections = JoinSet::new();
@@ -159,7 +161,7 @@ pub async fn serve(state: AppState, cancel: CancellationToken) -> Result<(), App
                     }
                     result = listener.accept() => result,
                 };
-                let (stream, _remote) = match accepted {
+                let (stream, remote) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => {
                         warn!(error = %error, "http connection accept failed");
@@ -175,9 +177,11 @@ pub async fn serve(state: AppState, cancel: CancellationToken) -> Result<(), App
                 let request_activity = activity.clone();
                 let permit_slot = PermitSlot::new(permit);
                 let request_permit = permit_slot.clone();
+                let remote_addr = RemoteAddr(remote);
                 let service = app.clone().map_request(move |mut request: Request<Incoming>| {
                     request_activity.touch();
                     request.extensions_mut().insert(request_permit.clone());
+                    request.extensions_mut().insert(remote_addr.clone());
                     request.map(Body::new)
                 });
                 let hyper_service = TowerToHyperService::new(service);
@@ -262,37 +266,56 @@ async fn drain_connections(connections: &mut JoinSet<()>, grace: Duration) {
 /// Carries the accepted HTTP connection permit into a WebSocket upgrade so the
 /// upgraded connection keeps counting against `maxConnections`.
 #[derive(Clone)]
-struct PermitSlot(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
+struct PermitSlot(Arc<tokio::sync::Mutex<Option<OwnedSemaphorePermit>>>);
 
 impl PermitSlot {
     fn new(permit: OwnedSemaphorePermit) -> Self {
-        Self(Arc::new(Mutex::new(Some(permit))))
+        Self(Arc::new(tokio::sync::Mutex::new(Some(permit))))
     }
 
-    fn take(&self) -> Option<OwnedSemaphorePermit> {
-        self.0.lock().take()
+    async fn take(&self) -> Option<OwnedSemaphorePermit> {
+        self.0.lock().await.take()
     }
 }
 
 #[derive(Clone)]
 struct ConnectionActivity {
-    last: Arc<Mutex<Instant>>,
+    inner: Arc<ConnectionActivityInner>,
+}
+
+struct ConnectionActivityInner {
+    start: Instant,
+    last_millis: AtomicU64,
 }
 
 impl ConnectionActivity {
     fn new() -> Self {
         Self {
-            last: Arc::new(Mutex::new(Instant::now())),
+            inner: Arc::new(ConnectionActivityInner {
+                start: Instant::now(),
+                last_millis: AtomicU64::new(0),
+            }),
         }
     }
 
     fn touch(&self) {
-        *self.last.lock() = Instant::now();
+        self.inner
+            .last_millis
+            .store(millis_since(self.inner.start), Ordering::Relaxed);
     }
 
     fn elapsed(&self) -> Duration {
-        self.last.lock().elapsed()
+        self.inner
+            .start
+            .elapsed()
+            .saturating_sub(Duration::from_millis(
+                self.inner.last_millis.load(Ordering::Relaxed),
+            ))
     }
+}
+
+fn millis_since(start: Instant) -> u64 {
+    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 async fn rpc_handler(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
@@ -347,9 +370,11 @@ async fn websocket_handler(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
-    let permit = permit_slot
-        .and_then(|Extension(slot)| slot.take())
-        .or_else(|| state.ws_limits.clone().try_acquire_owned().ok());
+    let permit = match permit_slot {
+        Some(Extension(slot)) => slot.take().await,
+        None => None,
+    }
+    .or_else(|| state.ws_limits.clone().try_acquire_owned().ok());
     let Some(permit) = permit else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -370,11 +395,15 @@ async fn health() -> impl IntoResponse {
 async fn hook_handler(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
+    remote: Option<Extension<RemoteAddr>>,
     method: axum::http::Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if state.is_shutting_down() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let Some(task) = state.automation.task(&task_id) else {
         return hook_error(StatusCode::NOT_FOUND, "taskNotFound");
     };
@@ -412,7 +441,7 @@ async fn hook_handler(
         method,
         path: uri.path().to_string(),
         query: uri.query().map(str::to_string),
-        remote: None,
+        remote: remote.map(|Extension(address)| address.0.ip().to_string()),
         headers: metadata_headers,
         payload: (!body.is_empty()).then(|| Base64Bytes::from(body.as_ref())),
     });
@@ -421,7 +450,7 @@ async fn hook_handler(
         parent_run_id: None,
         depth: 0,
     };
-    match engine::fire(&state, &task, trigger_record, chain, false).await {
+    match engine::fire(&state, &task, trigger_record, chain) {
         Ok(run_id) => (StatusCode::ACCEPTED, Json(json!({"runId": run_id}))).into_response(),
         Err(FireError::TaskDisabled) => hook_error(StatusCode::CONFLICT, "taskDisabled"),
         Err(FireError::TaskBusy) => hook_error(StatusCode::CONFLICT, "taskBusy"),

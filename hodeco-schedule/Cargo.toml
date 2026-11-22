@@ -1,0 +1,14 @@
+[package]
+name = "hodeco-schedule"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Schedule recurrence, solar, repeat, and jitter computation shared by the gateway and UI demo"
+publish = false
+
+[dependencies]
+hodeco-contract = { path = "../hodeco-contract" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"

@@ -1,6 +1,6 @@
 use crate::config::{
     Archive, Config, CorruptPolicy, FileSetConfig, HttpServerConfig, LogConfig, MessageLogConfig,
-    StaticAssetsConfig, TaskEngineConfig, TaskLogConfig,
+    RunFeedConfig, StaticAssetsConfig, TaskEngineConfig, TaskLogConfig,
 };
 use crate::utils::{FileMode, HumanDuration, Size};
 use std::path::PathBuf;
@@ -59,8 +59,6 @@ impl Default for TaskLogConfig {
     fn default() -> Self {
         Self {
             dir: PathBuf::from("tasks"),
-            max_size: Size::from_bytes(100 * 1024),
-            max_rows: 1_000,
             file_mode: FileMode::new(0o640),
             compaction_factor: 2.0,
             compact_interval: HumanDuration::from_std(Duration::from_secs(30 * 24 * 60 * 60)),
@@ -76,6 +74,16 @@ impl Default for TaskEngineConfig {
             max_concurrent_runs: 32,
             max_chain_depth: 16,
             max_fan_out: 16,
+            run_feed: RunFeedConfig::default(),
+        }
+    }
+}
+
+impl Default for RunFeedConfig {
+    fn default() -> Self {
+        Self {
+            max_rows: 1_000,
+            max_size: Size::from_bytes(4 * 1024 * 1024),
         }
     }
 }

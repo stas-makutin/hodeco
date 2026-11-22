@@ -141,7 +141,7 @@ impl eframe::App for Gallery {
                         },
                     );
 
-                    section(ui, theme, "Pills and status dots", |ui| {
+                    section(ui, "Pills and status dots", |ui| {
                         ui.horizontal_wrapped(|ui| {
                             for (tone, label) in [
                                 (Tone::Neutral, "Stopped"),
@@ -167,7 +167,7 @@ impl eframe::App for Gallery {
                         });
                     });
 
-                    section(ui, theme, "Banners", |ui| {
+                    section(ui, "Banners", |ui| {
                         widgets::banner(
                             ui,
                             theme,
@@ -200,7 +200,7 @@ impl eframe::App for Gallery {
                         );
                     });
 
-                    section(ui, theme, "Read-only fields", |ui| {
+                    section(ui, "Read-only fields", |ui| {
                         widgets::copy_field(
                             ui,
                             theme,
@@ -218,7 +218,7 @@ impl eframe::App for Gallery {
                         widgets::labeled_value(ui, theme, "Label", "Value");
                     });
 
-                    section(ui, theme, "Services table", |ui| {
+                    section(ui, "Services table", |ui| {
                         let services = [
                             ("ZW", "zwave", "serial", "COM4", ServiceState::Running),
                             ("GW", "zwave", "serial", "COM3", ServiceState::Error),
@@ -268,7 +268,7 @@ impl eframe::App for Gallery {
                             });
                     });
 
-                    section(ui, theme, "Structured parameter editor", |ui| {
+                    section(ui, "Structured parameter editor", |ui| {
                         ui.set_max_width(720.0);
                         self.params.ui(ui, theme);
                         ui.add_space(4.0);
@@ -284,7 +284,7 @@ impl eframe::App for Gallery {
                         }
                     });
 
-                    section(ui, theme, "Hex dump and parsed decoder", |ui| {
+                    section(ui, "Hex dump and parsed decoder", |ui| {
                         let frame = zwave::response(&[0x15, 6, 3, 0, 1, 0, 1]);
                         ui.label(
                             RichText::new(hex::spaced_hex(&frame))
@@ -340,7 +340,7 @@ impl eframe::App for Gallery {
                         }
                     });
 
-                    section(ui, theme, "Empty and loading states", |ui| {
+                    section(ui, "Empty and loading states", |ui| {
                         widgets::loading_state(ui, theme, "Loading messages…");
                         widgets::empty_state(
                             ui,
@@ -409,10 +409,10 @@ impl eframe::App for Gallery {
     }
 }
 
-fn section(ui: &mut Ui, theme: UiTheme, title: &str, body: impl FnOnce(&mut Ui)) {
+fn section(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
     ui.add_space(10.0);
     ui.separator();
-    widgets::section_header(ui, theme, title, |_ui| {});
+    widgets::section_header(ui, title, |_ui| {});
     body(ui);
     ui.add_space(2.0);
 }

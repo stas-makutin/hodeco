@@ -3,13 +3,17 @@ use crate::domain::{
     CommandDefinition, CommandInfo, DiscoveryInfo, Location, Message, MessageDirection,
     MessageOrder, MessageState, ParamDef, PayloadExpr, ProtocolInfo, RunOutcome, RunSummary,
     ScheduleDefinition, ScheduleInfo, ScheduleOccurrence, ServiceInfo, ServiceRef, ServiceStatus,
-    TaskDefinition, TaskInfo, TaskRun, TransportInfo, TriggerRef, TriggerType,
+    SolarEvent, TaskDefinition, TaskInfo, TaskRun, TransportInfo, TriggerRef, TriggerType,
 };
 use crate::utils::{Base64Bytes, HumanDuration};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
+
+fn is_default_order(order: &MessageOrder) -> bool {
+    *order == MessageOrder::default()
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,7 +216,7 @@ pub struct MessagesListParams {
     pub from: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default_order")]
     pub order: MessageOrder,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
@@ -265,12 +269,24 @@ pub struct TasksListResult {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TasksGetParams {
     pub task_id: String,
-    pub run_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TasksGetResult {
+    pub task: TaskInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksGetRunParams {
+    pub task_id: String,
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksGetRunResult {
     pub run: TaskRun,
 }
 
@@ -323,6 +339,13 @@ pub struct TasksFireResult {
     pub run_id: Uuid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksCancelRunParams {
+    pub task_id: String,
+    pub run_id: Uuid,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TasksHistoryParams {
@@ -338,13 +361,10 @@ pub struct TasksHistoryParams {
     pub from: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default_order")]
     pub order: MessageOrder,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-    /// Cursor returned by the previous page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next: Option<MessageTimeRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +385,45 @@ pub struct TasksHistoryResult {
     pub store_totals: Vec<TaskStoreTotal>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksRunFeedParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<TriggerType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcomes: Vec<RunOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "is_default_order")]
+    pub order: MessageOrder,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RunFeedTotals {
+    pub rows: u64,
+    pub bytes: u64,
+    pub max_rows: u32,
+    pub max_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TasksRunFeedResult {
+    pub runs: Vec<RunSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<MessageTimeRange>,
+    pub feed: RunFeedTotals,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TasksPurgeHistoryParams {
@@ -378,6 +437,8 @@ pub struct TaskRunNotification {
     pub task_id: String,
     pub trigger: TriggerRef,
     pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delayed_until: Option<DateTime<Utc>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +453,9 @@ pub struct SchedulesListResult {
     pub location: Option<Location>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    /// Host timezone used when neither the schedule nor the shared defaults set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +513,58 @@ pub struct SchedulesPreviewParams {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SchedulesPreviewResult {
     pub occurrences: Vec<ScheduleOccurrence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesSetDefaultsParams {
+    /// Omit or set to null to clear the shared location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    /// Omit or set to null to inherit the host timezone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesSetDefaultsResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesSolarPreviewParams {
+    pub location: Location,
+    pub date: NaiveDate,
+    /// Overrides the shared default; empty or omitted uses the server timezone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SolarPreviewEvent {
+    pub event: SolarEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+    /// Local wall-clock time (`HH:MM:SS`) when the event occurs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchedulesSolarPreviewResult {
+    pub date: NaiveDate,
+    /// Effective IANA timezone used for the local times.
+    pub timezone: String,
+    pub events: Vec<SolarPreviewEvent>,
 }
 
 // ---------------------------------------------------------------------------
@@ -640,11 +756,11 @@ mod tests {
 
         let result = ConfigUpdateResult {
             config,
-            restart_required: vec!["httpServer".to_string(), "services".to_string()],
+            restart_required: vec!["httpServer".to_string(), "log".to_string()],
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["restartRequired"][0], "httpServer");
-        assert_eq!(value["restartRequired"][1], "services");
+        assert_eq!(value["restartRequired"][1], "log");
     }
 
     #[test]

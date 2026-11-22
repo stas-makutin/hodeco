@@ -1,6 +1,5 @@
 use crate::app::AppState;
 use crate::automation::engine::{self, FireError};
-use crate::automation::schedule::{self, ScheduleContext};
 use crate::config::{
     ConfigError, restart_required, validate, validate_command, validate_schedule, validate_task,
     validate_task_id,
@@ -18,21 +17,25 @@ use hodeco_contract::api::payloads::{
     MessagesListResult, ProtocolInfoParams, ProtocolInfoResult, ProtocolParamsParams,
     ProtocolParamsResult, ProtocolsListResult, SchedulesAddParams, SchedulesAddResult,
     SchedulesGetParams, SchedulesGetResult, SchedulesListResult, SchedulesPreviewParams,
-    SchedulesPreviewResult, SchedulesRemoveParams, SchedulesUpdateParams, SchedulesUpdateResult,
-    ServerInfoResult, ServicesAddParams, ServicesAddResult, ServicesAliasParams,
-    ServicesAliasResult, ServicesListResult, ServicesParamsParams, ServicesParamsResult,
-    ServicesRemoveParams, ServicesSendParams, ServicesSendResult, ServicesStatusParams,
-    ServicesStatusResult, TasksAddParams, TasksAddResult, TasksFireParams, TasksFireResult,
-    TasksGetParams, TasksGetResult, TasksHistoryParams, TasksListResult, TasksPurgeHistoryParams,
-    TasksRemoveParams, TasksUpdateParams, TasksUpdateResult, TransportsListResult,
+    SchedulesPreviewResult, SchedulesRemoveParams, SchedulesSetDefaultsParams,
+    SchedulesSetDefaultsResult, SchedulesSolarPreviewParams, SchedulesSolarPreviewResult,
+    SchedulesUpdateParams, SchedulesUpdateResult, ServerInfoResult, ServicesAddParams,
+    ServicesAddResult, ServicesAliasParams, ServicesAliasResult, ServicesListResult,
+    ServicesParamsParams, ServicesParamsResult, ServicesRemoveParams, ServicesSendParams,
+    ServicesSendResult, ServicesStatusParams, ServicesStatusResult, SolarPreviewEvent,
+    TasksAddParams, TasksAddResult, TasksCancelRunParams, TasksFireParams, TasksFireResult,
+    TasksGetParams, TasksGetResult, TasksGetRunParams, TasksGetRunResult, TasksHistoryParams,
+    TasksListResult, TasksPurgeHistoryParams, TasksRemoveParams, TasksRunFeedParams,
+    TasksUpdateParams, TasksUpdateResult, TransportsListResult,
 };
 use hodeco_contract::api::{ApiError, ErrorCode, Method, Response};
 use hodeco_contract::config::{SchedulesFile, ServiceConfig};
 use hodeco_contract::domain::{
-    MessageDirection, MessageState, ParamValues, PayloadExpr, ServiceKey, ServiceRef,
+    MessageDirection, MessageState, ParamValues, PayloadExpr, ServiceKey, ServiceRef, SolarEvent,
     TaskDefinition,
 };
 use hodeco_contract::utils::{generated_id, id_from_name};
+use hodeco_schedule::{self as schedule, ScheduleContext};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -287,28 +290,26 @@ async fn dispatch(
                 .info(&params.service)
                 .ok()
                 .and_then(|info| info.alias);
-            if let Some(old_alias) = &old_alias
-                && params.alias.as_deref() != Some(old_alias.as_str())
-                && !tasks_using_service(
+            let used_by_old_alias = old_alias.as_ref().map(|old_alias| {
+                tasks_using_service(
                     state,
                     &ServiceRef::Alias {
                         alias: old_alias.clone(),
                     },
                     &key,
                 )
-                .is_empty()
+            });
+            if let Some(old_alias) = &old_alias
+                && params.alias.as_deref() != Some(old_alias.as_str())
+                && used_by_old_alias
+                    .as_ref()
+                    .is_some_and(|used_by| !used_by.is_empty())
             {
                 return Err(ApiError::new(
                     ErrorCode::InvalidParams,
                     "the service alias is referenced by tasks",
                 )
-                .with_details(json!({"usedBy": tasks_using_service(
-                    state,
-                    &ServiceRef::Alias {
-                        alias: old_alias.clone(),
-                    },
-                    &key,
-                )})));
+                .with_details(json!({"usedBy": used_by_old_alias.unwrap_or_default()})));
             }
             let previous = state.services_store.snapshot();
             let service = state
@@ -423,9 +424,17 @@ async fn dispatch(
                 .limit
                 .unwrap_or(DEFAULT_MESSAGE_LIMIT)
                 .clamp(1, MAX_MESSAGE_LIMIT) as usize;
-            let page = state
-                .store
-                .list(params.from, params.until, params.order, limit, &filter);
+            let store = state.store.clone();
+            let page = tokio::task::spawn_blocking(move || {
+                store.list(params.from, params.until, params.order, limit, &filter)
+            })
+            .await
+            .map_err(|error| {
+                ApiError::new(
+                    ErrorCode::InternalError,
+                    format!("message query task failed: {error}"),
+                )
+            })?;
             ok(MessagesListResult {
                 messages: page.messages,
                 next: page.next,
@@ -443,16 +452,31 @@ async fn dispatch(
         }
         Method::TasksGet => {
             let params: TasksGetParams = parse_params(method, params)?;
-            let run = state
-                .history
-                .get(&params.task_id, params.run_id)
-                .ok_or_else(|| {
-                    ApiError::new(ErrorCode::RunNotFound, "run not found").with_details(json!({
-                        "taskId": params.task_id,
-                        "runId": params.run_id,
-                    }))
-                })?;
-            ok(TasksGetResult { run })
+            let snapshot = state.automation.snapshot();
+            let Some(task) = snapshot.tasks.get(&params.task_id) else {
+                return Err(task_not_found(&params.task_id));
+            };
+            ok(TasksGetResult {
+                task: engine::task_info(state, task),
+            })
+        }
+        Method::TasksGetRun => {
+            let params: TasksGetRunParams = parse_params(method, params)?;
+            let run = match state.run_feed.get(&params.task_id, params.run_id) {
+                Some(run) => Some(run),
+                None => state
+                    .history
+                    .get(&params.task_id, params.run_id)
+                    .await
+                    .map_err(history_error)?,
+            }
+            .ok_or_else(|| {
+                ApiError::new(ErrorCode::RunNotFound, "run not found").with_details(json!({
+                    "taskId": params.task_id,
+                    "runId": params.run_id,
+                }))
+            })?;
+            ok(TasksGetRunResult { run })
         }
         Method::TasksAdd => {
             let params: TasksAddParams = parse_params(method, params)?;
@@ -555,8 +579,14 @@ async fn dispatch(
                 return Err(catalog_write_error(error));
             }
             state.runtime.forget_task(&params.task_id);
-            if let Err(error) = state.history.remove_task(&params.task_id) {
+            if let Err(error) = state.history.remove_task(&params.task_id).await {
                 warn!(error = %error, task = %params.task_id, "unable to remove task history");
+            }
+            let dropped = state.run_feed.remove_task(&params.task_id);
+            if !dropped.is_empty() {
+                let _ = state
+                    .events
+                    .send(crate::events::Event::TaskRunDropped { run_ids: dropped });
             }
             state.runtime.wake_scheduler();
             ok(Empty::default())
@@ -570,13 +600,27 @@ async fn dispatch(
                 params.payload,
                 params.metadata,
             )
-            .await
             .map_err(fire_error)?;
             ok(TasksFireResult { run_id })
         }
+        Method::TasksCancelRun => {
+            let params: TasksCancelRunParams = parse_params(method, params)?;
+            if !state.runtime.cancel_run(&params.task_id, params.run_id) {
+                return Err(ApiError::new(ErrorCode::RunNotFound, "run is not active")
+                    .with_details(json!({
+                        "taskId": params.task_id,
+                        "runId": params.run_id,
+                    })));
+            }
+            ok(Empty::default())
+        }
         Method::TasksHistory => {
             let params: TasksHistoryParams = parse_params(method, params)?;
-            ok(state.history.list(&params))
+            ok(state.history.list(&params).await.map_err(history_error)?)
+        }
+        Method::TasksRunFeed => {
+            let params: TasksRunFeedParams = parse_params(method, params)?;
+            ok(state.run_feed.list(&params))
         }
         Method::TasksPurgeHistory => {
             let params: TasksPurgeHistoryParams = parse_params(method, params)?;
@@ -598,9 +642,17 @@ async fn dispatch(
             state
                 .history
                 .purge(&params.task_id)
+                .await
                 .map_err(history_error)?;
+            let dropped = state.run_feed.remove_task(&params.task_id);
+            if !dropped.is_empty() {
+                let _ = state
+                    .events
+                    .send(crate::events::Event::TaskRunDropped { run_ids: dropped });
+            }
             state.runtime.reset_rate(&params.task_id);
             state.runtime.reset_trigger_runs(&params.task_id);
+            state.runtime.clear_last_run(&params.task_id);
             state.runtime.wake_scheduler();
             ok(Empty::default())
         }
@@ -622,6 +674,7 @@ async fn dispatch(
                 schedules,
                 location: snapshot.location,
                 timezone: snapshot.timezone.clone(),
+                system_timezone: state.system_timezone.clone(),
             })
         }
         Method::SchedulesGet => {
@@ -757,6 +810,102 @@ async fn dispatch(
             )
             .map_err(validation_error)?;
             ok(SchedulesPreviewResult { occurrences })
+        }
+        Method::SchedulesSetDefaults => {
+            let params: SchedulesSetDefaultsParams = parse_params(method, params)?;
+            let _guard = state.automation.lock().await;
+            let snapshot = state.automation.snapshot();
+            let timezone = params
+                .timezone
+                .map(|timezone| timezone.trim().to_string())
+                .filter(|timezone| !timezone.is_empty());
+            if let Some(timezone) = &timezone
+                && timezone.parse::<chrono_tz::Tz>().is_err()
+            {
+                return Err(validation_error(format!(
+                    "timezone '{timezone}' is not an IANA timezone"
+                )));
+            }
+            if let Some(location) = params.location
+                && !location.is_valid()
+            {
+                return Err(validation_error(
+                    "location must be latitude, longitude, and optional elevation in range"
+                        .to_string(),
+                ));
+            }
+            let defaults = SchedulesFile {
+                location: params.location,
+                timezone: timezone.clone(),
+                schedules: Vec::new(),
+            };
+            for schedule in snapshot.schedules.values() {
+                validate_schedule(schedule, &defaults).map_err(validation_error)?;
+            }
+            state
+                .automation
+                .set_schedule_defaults(params.location, timezone.clone());
+            if let Err(error) = state.automation.save_schedules().await {
+                state.automation.replace_snapshot(snapshot);
+                return Err(catalog_write_error(error));
+            }
+            state.runtime.wake_scheduler();
+            ok(SchedulesSetDefaultsResult {
+                location: params.location,
+                timezone,
+            })
+        }
+        Method::SchedulesSolarPreview => {
+            let params: SchedulesSolarPreviewParams = parse_params(method, params)?;
+            if !params.location.is_valid() {
+                return Err(validation_error(
+                    "location must be latitude, longitude, and optional elevation in range"
+                        .to_string(),
+                ));
+            }
+            let snapshot = state.automation.snapshot();
+            let timezone = match params
+                .timezone
+                .as_deref()
+                .map(str::trim)
+                .filter(|timezone| !timezone.is_empty())
+            {
+                Some(timezone) => timezone.parse::<chrono_tz::Tz>().map_err(|_| {
+                    validation_error(format!("timezone '{timezone}' is not an IANA timezone"))
+                })?,
+                None => schedule_context(&snapshot)
+                    .default_timezone
+                    .map(Ok)
+                    .unwrap_or_else(schedule::system_timezone)
+                    .map_err(validation_error)?,
+            };
+            let mut events = Vec::with_capacity(SolarEvent::ALL.len());
+            for event in SolarEvent::ALL {
+                let at = schedule::solar_event(params.date, event, params.location, timezone, 0)
+                    .map_err(validation_error)?;
+                events.push(match at {
+                    Some(at) => SolarPreviewEvent {
+                        event,
+                        at: Some(at),
+                        local: Some(at.with_timezone(&timezone).format("%H:%M:%S").to_string()),
+                        reason: None,
+                    },
+                    None => SolarPreviewEvent {
+                        event,
+                        at: None,
+                        local: None,
+                        reason: Some(
+                            "The sun does not cross this altitude on the selected date."
+                                .to_string(),
+                        ),
+                    },
+                });
+            }
+            ok(SchedulesSolarPreviewResult {
+                date: params.date,
+                timezone: timezone.name().to_string(),
+                events,
+            })
         }
         Method::CommandsList => {
             let snapshot = state.automation.snapshot();
@@ -1076,10 +1225,8 @@ fn fire_error(error: FireError) -> ApiError {
 }
 
 fn history_error(error: crate::automation::history::HistoryError) -> ApiError {
-    ApiError::new(
-        ErrorCode::InternalError,
-        format!("task history operation failed: {error}"),
-    )
+    warn!(error = %error, "task history operation failed");
+    ApiError::new(ErrorCode::InternalError, "task history operation failed")
 }
 
 fn catalog_write_error(error: ConfigError) -> ApiError {
@@ -1131,7 +1278,6 @@ fn service_error(error: ServiceError) -> ApiError {
             format!("transport '{transport}' is not supported for protocol '{protocol}'"),
         )
         .with_details(json!({"protocol": protocol, "transport": transport})),
-        ServiceError::Protocol(message) => ApiError::new(ErrorCode::ProtocolError, message),
         ServiceError::Transport(message) => ApiError::new(ErrorCode::TransportError, message),
         ServiceError::InvalidParams(error) => {
             ApiError::new(ErrorCode::InvalidParams, error.to_string())
@@ -1142,16 +1288,6 @@ fn service_error(error: ServiceError) -> ApiError {
         ServiceError::DiscoveryBusy => {
             ApiError::new(ErrorCode::DiscoveryBusy, "discovery service is busy")
         }
-        ServiceError::NoDiscovery {
-            protocol,
-            transport,
-        } => ApiError::new(
-            ErrorCode::InvalidParams,
-            format!(
-                "discovery is not supported for protocol '{protocol}' over transport '{transport}'"
-            ),
-        )
-        .with_details(json!({"protocol": protocol, "transport": transport})),
     }
 }
 

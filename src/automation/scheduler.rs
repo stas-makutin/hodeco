@@ -6,22 +6,26 @@
 
 use crate::app::AppState;
 use crate::automation::engine;
-use crate::automation::schedule::{ScheduleContext, ScheduleCursor};
 use chrono::Utc;
 use hodeco_contract::domain::{
     NextFire, RunChain, RunTrigger, ScheduleDefinition, ScheduleOccurrence, ScheduleRunTrigger,
     ScheduleTrigger, TaskDefinition, TriggerType,
 };
+use hodeco_schedule::{ScheduleContext, ScheduleCursor};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-const TICK: Duration = Duration::from_millis(250);
+/// Upper bound on the idle sleep so wall-clock changes and any missed wakeup
+/// are reconciled promptly without polling every schedule continuously.
+const MAX_IDLE: Duration = Duration::from_secs(60);
+const MIN_SLEEP: Duration = Duration::from_millis(10);
 
 struct TriggerCursor {
     schedule: ScheduleDefinition,
+    context: ScheduleContext,
     cursor: ScheduleCursor,
     next: Option<ScheduleOccurrence>,
     exhausted: bool,
@@ -30,23 +34,38 @@ struct TriggerCursor {
 
 pub async fn run(state: AppState, cancel: CancellationToken) {
     let mut cursors: BTreeMap<(String, String), TriggerCursor> = BTreeMap::new();
-    let mut ticker = tokio::time::interval(TICK);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = state.runtime.scheduler_wake() => {}
-            _ = ticker.tick() => {}
-        }
-
         if cancel.is_cancelled() {
             break;
         }
 
         reconcile(&state, &mut cursors).await;
         fire_due(&state, &mut cursors).await;
+
+        let wait = next_wait(&cursors);
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = state.runtime.scheduler_wake() => {}
+            _ = tokio::time::sleep(wait) => {}
+        }
     }
+}
+
+fn next_wait(cursors: &BTreeMap<(String, String), TriggerCursor>) -> Duration {
+    let now = Utc::now();
+    let Some(next) = cursors
+        .values()
+        .filter_map(|cursor| cursor.next.as_ref())
+        .map(|occurrence| occurrence.at)
+        .min()
+    else {
+        return MAX_IDLE;
+    };
+    (next - now)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+        .clamp(MIN_SLEEP, MAX_IDLE)
 }
 
 async fn reconcile(state: &AppState, cursors: &mut BTreeMap<(String, String), TriggerCursor>) {
@@ -84,8 +103,10 @@ async fn reconcile(state: &AppState, cursors: &mut BTreeMap<(String, String), Tr
                 state.runtime.trigger_runs(&task.id, &trigger.id) >= u64::from(maximum)
             });
             let entry = cursors.get(&key);
-            let changed = entry.is_none_or(|entry| entry.schedule != *schedule);
-            if changed || (maxed && !entry.is_some_and(|entry| entry.maxed)) {
+            let changed =
+                entry.is_none_or(|entry| entry.schedule != *schedule || entry.context != context);
+            let reset_after_limit = !maxed && entry.is_some_and(|entry| entry.maxed);
+            if changed || reset_after_limit || (maxed && !entry.is_some_and(|entry| entry.maxed)) {
                 let cursor = match ScheduleCursor::new(schedule.clone(), context, now, true, false)
                 {
                     Ok(cursor) => cursor,
@@ -103,6 +124,7 @@ async fn reconcile(state: &AppState, cursors: &mut BTreeMap<(String, String), Tr
                     key.clone(),
                     TriggerCursor {
                         schedule: schedule.clone(),
+                        context,
                         cursor,
                         next: None,
                         exhausted: false,
@@ -188,7 +210,7 @@ async fn fire_due(state: &AppState, cursors: &mut BTreeMap<(String, String), Tri
         if !task.enabled {
             continue;
         }
-        fire_schedule(state, task, trigger, &occurrence).await;
+        fire_schedule(state, task, trigger, &occurrence);
         if let Some(entry) = cursors.get_mut(&(task_id.clone(), trigger_id.clone())) {
             match entry.cursor.advance() {
                 Ok(Some(next)) => entry.next = Some(next),
@@ -207,7 +229,7 @@ async fn fire_due(state: &AppState, cursors: &mut BTreeMap<(String, String), Tri
     }
 }
 
-async fn fire_schedule(
+fn fire_schedule(
     state: &AppState,
     task: &TaskDefinition,
     trigger: &ScheduleTrigger,
@@ -228,7 +250,7 @@ async fn fire_schedule(
         parent_run_id: None,
         depth: 0,
     };
-    if let Err(error) = engine::fire(state, task, trigger_record, chain, false).await {
+    if let Err(error) = engine::fire(state, task, trigger_record, chain) {
         debug!(
             task = %task.id,
             trigger = %trigger.id,

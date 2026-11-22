@@ -1,6 +1,6 @@
 pub mod types;
 
-pub use types::{Event, Topic, UnknownTopic};
+pub use types::{Event, Topic};
 
 use tokio::sync::broadcast;
 

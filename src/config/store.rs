@@ -30,6 +30,7 @@ impl ConfigStore {
         *self.config() = config;
     }
 
+    #[cfg(test)]
     pub fn update(&self, update: impl FnOnce(&mut Config)) {
         let mut config = self.config();
         update(&mut config);

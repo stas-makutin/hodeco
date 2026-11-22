@@ -8,7 +8,9 @@ use hodeco_contract::api::Response;
 use hodeco_contract::api::notifications::Notification;
 use serde_json::Value;
 
-pub use gateway::{Gateway, GatewayEvent, MessagePageKind, Phase, RequestTag, backoff};
+pub use gateway::{
+    Gateway, GatewayEvent, MessagePageKind, Phase, RequestTag, RunPageKind, backoff,
+};
 pub use transport::{LiveTransport, Transport, TransportEvent, Wake};
 
 /// A message received on the WebSocket, classified by shape.

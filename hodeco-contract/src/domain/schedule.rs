@@ -1,8 +1,8 @@
 //! Schedule catalog and recurrence DTOs.
 //!
-//! A schedule is a single rule plus optional loop, allow/deny windows,
-//! exceptions, and jitter. A task trigger references a schedule by ID; the
-//! scheduler computes occurrences in the server process.
+//! A schedule is a single recurrence rule plus optional repeat chain,
+//! allow/deny windows, exceptions, and jitter. A task trigger references a
+//! schedule by ID; the scheduler computes occurrences in the server process.
 
 use crate::domain::task::OneOrMany;
 use crate::utils::HumanDuration;
@@ -121,15 +121,6 @@ impl<'de> Deserialize<'de> for Location {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct ScheduleDefaults {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<Location>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct ScheduleDefinition {
@@ -144,18 +135,29 @@ pub struct ScheduleDefinition {
     pub from: Option<ScheduleDate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<ScheduleDate>,
+    #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
+    pub at: OneOrMany<AtSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on: Option<ScheduleRule>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "loop")]
-    pub loop_rule: Option<LoopRule>,
+    pub every: Option<ScheduleEvery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub days: Vec<DaySpec>,
+    #[serde(default, skip_serializing_if = "is_any_day_match")]
+    pub day_match: DayMatch,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub months: Vec<Month>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub years: Vec<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<HumanDuration>,
+    /// Offsets from each base occurrence. Each entry creates one extra run.
+    #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
+    pub repeat_at: OneOrMany<HumanDuration>,
     #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
     pub allow: OneOrMany<TimeWindow>,
     #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
     pub deny: OneOrMany<TimeWindow>,
     #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
     pub except: OneOrMany<DateRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jitter: Option<HumanDuration>,
 }
 
 impl Default for ScheduleDefinition {
@@ -168,13 +170,33 @@ impl Default for ScheduleDefinition {
             location: None,
             from: None,
             until: None,
-            on: None,
-            loop_rule: None,
+            at: OneOrMany::Many(Vec::new()),
+            every: None,
+            days: Vec::new(),
+            day_match: DayMatch::Any,
+            months: Vec::new(),
+            years: Vec::new(),
+            jitter: None,
+            repeat_at: OneOrMany::Many(Vec::new()),
             allow: OneOrMany::Many(Vec::new()),
             deny: OneOrMany::Many(Vec::new()),
             except: OneOrMany::Many(Vec::new()),
-            jitter: None,
         }
+    }
+}
+
+impl ScheduleDefinition {
+    /// Repeat offsets in ascending order, ignoring zero-length values.
+    pub fn repeat_offsets(&self) -> Vec<std::time::Duration> {
+        let mut offsets: Vec<_> = self
+            .repeat_at
+            .iter()
+            .map(|duration| duration.as_std())
+            .filter(|duration| !duration.is_zero())
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
     }
 }
 
@@ -231,9 +253,10 @@ impl<'de> Deserialize<'de> for ScheduleDate {
     }
 }
 
-/// `on.every` interval. Sub-day units use elapsed time; day, week, month, and
-/// year units are anchored at the local `from` date so DST does not shift the
-/// boundary.
+/// `every` interval. Duration intervals (seconds, minutes, hours, or any
+/// longer duration expressed with those units) use elapsed time; day, week,
+/// month, and year units are anchored at the local `from` date so DST does not
+/// shift the boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleEvery {
     Duration(HumanDuration),
@@ -283,8 +306,11 @@ impl ScheduleEvery {
         Ok(Self::Duration(duration))
     }
 
-    pub fn is_sub_day(self) -> bool {
-        matches!(self, Self::Duration(duration) if duration.as_std() < std::time::Duration::from_secs(86_400))
+    /// True when the interval is continuous elapsed time instead of a calendar
+    /// unit. Any [`Self::Duration`] qualifies, including values of 24 hours or
+    /// more expressed with `s`, `m`, or `h`.
+    pub fn uses_elapsed_time(self) -> bool {
+        matches!(self, Self::Duration(_))
     }
 
     pub fn duration(self) -> Option<std::time::Duration> {
@@ -322,36 +348,6 @@ impl<'de> Deserialize<'de> for ScheduleEvery {
     {
         let value = String::deserialize(deserializer)?;
         Self::parse(&value).map_err(de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct ScheduleRule {
-    #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
-    pub at: OneOrMany<AtSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub every: Option<ScheduleEvery>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub days: Vec<DaySpec>,
-    #[serde(default)]
-    pub day_match: DayMatch,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub months: Vec<Month>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub years: Vec<i32>,
-}
-
-impl Default for ScheduleRule {
-    fn default() -> Self {
-        Self {
-            at: OneOrMany::Many(Vec::new()),
-            every: None,
-            days: Vec::new(),
-            day_match: DayMatch::Any,
-            months: Vec::new(),
-            years: Vec::new(),
-        }
     }
 }
 
@@ -604,7 +600,7 @@ impl DaySpec {
             compact.split_at(split)
         };
         if let Ok(nth) = nth_text.parse::<i8>()
-            && (1..=5).contains(&nth.abs())
+            && (1..=5).contains(&nth.unsigned_abs())
             && let Some(weekday) = parse_weekday(weekday_text)
         {
             return Ok(Self::NthWeekday { nth, weekday });
@@ -914,41 +910,11 @@ impl<'de> Deserialize<'de> for DateRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct LoopRule {
-    pub every: OneOrMany<HumanDuration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repeat: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jitter: Option<HumanDuration>,
-}
-
-impl Default for LoopRule {
-    fn default() -> Self {
-        Self {
-            every: OneOrMany::Many(Vec::new()),
-            repeat: None,
-            jitter: None,
-        }
-    }
-}
-
-impl LoopRule {
-    pub fn intervals(&self) -> Vec<std::time::Duration> {
-        self.every
-            .iter()
-            .map(|duration| duration.as_std())
-            .filter(|duration| !duration.is_zero())
-            .collect()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OccurrenceKind {
     Scheduled,
-    Loop,
+    Repeat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -957,9 +923,23 @@ pub struct ScheduleOccurrence {
     pub at: DateTime<chrono::Utc>,
     pub local: String,
     pub kind: OccurrenceKind,
+    /// One-based index of the repeat after its base occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_index: Option<u32>,
+    /// Only present when the candidate was filtered out; omitted for normal
+    /// executable occurrences and for `schedules.list` / `schedules.get`.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub skipped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_any_day_match(value: &DayMatch) -> bool {
+    *value == DayMatch::Any
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1018,6 +998,34 @@ impl<'de> Deserialize<'de> for StringOrNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omits_false_skipped_from_occurrences() {
+        let at = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let normal = ScheduleOccurrence {
+            at,
+            local: "2026-01-01 09:00:00 UTC".to_string(),
+            kind: OccurrenceKind::Scheduled,
+            repeat_index: None,
+            skipped: false,
+            reason: None,
+        };
+        let value = serde_json::to_value(&normal).unwrap();
+        assert!(value.get("skipped").is_none());
+        assert!(value.get("reason").is_none());
+        assert!(value.get("repeatIndex").is_none());
+
+        let filtered = ScheduleOccurrence {
+            skipped: true,
+            reason: Some("denied by time window".to_string()),
+            ..normal
+        };
+        let value = serde_json::to_value(&filtered).unwrap();
+        assert_eq!(value["skipped"], true);
+        assert_eq!(value["reason"], "denied by time window");
+    }
 
     #[test]
     fn parses_location_arrays_and_objects() {
@@ -1082,6 +1090,20 @@ mod tests {
                 weekday: Weekday::Fri
             }
         );
+        assert_eq!(
+            DaySpec::parse("last monday").unwrap(),
+            DaySpec::NthWeekday {
+                nth: -1,
+                weekday: Weekday::Mon
+            }
+        );
+        assert_eq!(
+            DaySpec::parse("-2mon").unwrap(),
+            DaySpec::NthWeekday {
+                nth: -2,
+                weekday: Weekday::Mon
+            }
+        );
     }
 
     #[test]
@@ -1104,8 +1126,10 @@ mod tests {
             ScheduleEvery::Months(1)
         );
         assert_eq!(ScheduleEvery::parse("2y").unwrap(), ScheduleEvery::Years(2));
-        assert!(ScheduleEvery::parse("30m").unwrap().is_sub_day());
-        assert!(!ScheduleEvery::parse("1d").unwrap().is_sub_day());
+        assert!(ScheduleEvery::parse("30m").unwrap().uses_elapsed_time());
+        assert!(ScheduleEvery::parse("30h").unwrap().uses_elapsed_time());
+        assert!(ScheduleEvery::parse("1800m").unwrap().uses_elapsed_time());
+        assert!(!ScheduleEvery::parse("1d").unwrap().uses_elapsed_time());
     }
 
     #[test]
@@ -1119,12 +1143,9 @@ schedules:
     timezone: Europe/Berlin
     from: 2026-01-01
     until: 2026-12-31
-    on:
-      at: "sunset - 15m"
-      days: [mon, tue, wed, thu, fri]
-    loop:
-      every: 30m
-      repeat: 2
+    at: "sunset - 15m"
+    days: [mon, tue, wed, thu, fri]
+    repeatAt: [30m, 1h]
 "#;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -1137,9 +1158,17 @@ schedules:
         assert_eq!(file.location.unwrap().elevation, Some(34.0));
         assert_eq!(file.timezone.as_deref(), Some("Europe/Berlin"));
         assert_eq!(file.schedules[0].id, "before-sunset");
+        let offsets: Vec<_> = file.schedules[0]
+            .repeat_at
+            .iter()
+            .map(|offset| offset.as_std())
+            .collect();
         assert_eq!(
-            file.schedules[0].loop_rule.as_ref().unwrap().repeat,
-            Some(2)
+            offsets,
+            vec![
+                std::time::Duration::from_secs(30 * 60),
+                std::time::Duration::from_secs(60 * 60)
+            ]
         );
     }
 }

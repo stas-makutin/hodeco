@@ -1,8 +1,8 @@
 //! Editable configuration draft and save state.
 
 use hodeco_contract::config::{
-    Archive, Config, CorruptPolicy, HttpServerConfig, LogConfig, MessageLogConfig,
-    StaticAssetsConfig,
+    Archive, Config, CorruptPolicy, FileSetConfig, HttpServerConfig, LogConfig, MessageLogConfig,
+    RunFeedConfig, StaticAssetsConfig, TaskEngineConfig, TaskLogConfig,
 };
 use hodeco_contract::utils::{FileMode, HumanDuration, Size};
 use std::path::PathBuf;
@@ -10,7 +10,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Default)]
 pub struct ConfigUi {
     pub draft: Option<ConfigDraft>,
-    pub base: Option<Config>,
     pub dirty: bool,
     pub saving: bool,
     pub error: Option<String>,
@@ -21,7 +20,6 @@ pub struct ConfigUi {
 impl ConfigUi {
     pub fn load(&mut self, config: &Config) {
         self.draft = Some(ConfigDraft::from_config(config));
-        self.base = Some(config.clone());
         self.dirty = false;
         self.saving = false;
         self.error = None;
@@ -34,11 +32,10 @@ impl ConfigUi {
     }
 
     pub fn build(&mut self) -> Result<Config, String> {
-        let base = self.base.clone().unwrap_or_default();
         self.draft
             .as_mut()
             .ok_or_else(|| "configuration is not loaded".to_string())?
-            .build_config(base)
+            .build_config()
     }
 }
 
@@ -48,6 +45,9 @@ pub struct ConfigDraft {
     pub log: LogDraft,
     pub http_server: HttpDraft,
     pub message_log: MessageLogDraft,
+    pub task_log: TaskLogDraft,
+    pub files: FilesDraft,
+    pub task_engine: TaskEngineDraft,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +95,38 @@ pub struct MessageLogDraft {
     pub on_corrupt: CorruptPolicy,
 }
 
+#[derive(Debug, Clone)]
+pub struct TaskLogDraft {
+    pub dir: String,
+    pub file_mode: String,
+    pub compaction_factor: String,
+    pub compact_interval: String,
+    pub on_corrupt: CorruptPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct FilesDraft {
+    pub services: String,
+    pub tasks: String,
+    pub schedules: String,
+    pub commands: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskEngineDraft {
+    pub max_trigger_payload_size: String,
+    pub max_concurrent_runs: String,
+    pub max_chain_depth: String,
+    pub max_fan_out: String,
+    pub run_feed: RunFeedDraft,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunFeedDraft {
+    pub max_rows: String,
+    pub max_size: String,
+}
+
 impl ConfigDraft {
     pub fn from_config(config: &Config) -> Self {
         Self {
@@ -135,6 +167,29 @@ impl ConfigDraft {
                 compact_interval: config.message_log.compact_interval.to_string(),
                 on_corrupt: config.message_log.on_corrupt,
             },
+            task_log: TaskLogDraft {
+                dir: config.task_log.dir.display().to_string(),
+                file_mode: config.task_log.file_mode.to_string(),
+                compaction_factor: config.task_log.compaction_factor.to_string(),
+                compact_interval: config.task_log.compact_interval.to_string(),
+                on_corrupt: config.task_log.on_corrupt,
+            },
+            files: FilesDraft {
+                services: config.files.services.display().to_string(),
+                tasks: config.files.tasks.display().to_string(),
+                schedules: config.files.schedules.display().to_string(),
+                commands: config.files.commands.display().to_string(),
+            },
+            task_engine: TaskEngineDraft {
+                max_trigger_payload_size: config.task_engine.max_trigger_payload_size.to_string(),
+                max_concurrent_runs: config.task_engine.max_concurrent_runs.to_string(),
+                max_chain_depth: config.task_engine.max_chain_depth.to_string(),
+                max_fan_out: config.task_engine.max_fan_out.to_string(),
+                run_feed: RunFeedDraft {
+                    max_rows: config.task_engine.run_feed.max_rows.to_string(),
+                    max_size: config.task_engine.run_feed.max_size.to_string(),
+                },
+            },
         }
     }
 
@@ -142,13 +197,13 @@ impl ConfigDraft {
     /// Parsing is used so whitespace or equivalent duration/size spellings do
     /// not keep the form dirty. Invalid input counts as dirty.
     pub fn differs_from(&mut self, config: &Config) -> bool {
-        match self.build_config(config.clone()) {
+        match self.build_config() {
             Ok(built) => built != *config,
             Err(_) => true,
         }
     }
 
-    pub fn build_config(&mut self, base: Config) -> Result<Config, String> {
+    pub fn build_config(&mut self) -> Result<Config, String> {
         Ok(Config {
             working_dir: PathBuf::from(&self.working_dir),
             log: LogConfig {
@@ -204,21 +259,60 @@ impl ConfigDraft {
                     &self.message_log.auto_persist,
                     "messageLog.autoPersist",
                 )?,
-                compaction_factor: self
-                    .message_log
-                    .compaction_factor
-                    .trim()
-                    .parse()
-                    .map_err(|error| format!("messageLog.compactionFactor: {error}"))?,
+                compaction_factor: parse_factor(
+                    &self.message_log.compaction_factor,
+                    "messageLog.compactionFactor",
+                )?,
                 compact_interval: parse_duration(
                     &self.message_log.compact_interval,
                     "messageLog.compactInterval",
                 )?,
                 on_corrupt: self.message_log.on_corrupt,
             },
-            files: base.files,
-            task_log: base.task_log,
-            task_engine: base.task_engine,
+            files: FileSetConfig {
+                services: PathBuf::from(&self.files.services),
+                tasks: PathBuf::from(&self.files.tasks),
+                schedules: PathBuf::from(&self.files.schedules),
+                commands: PathBuf::from(&self.files.commands),
+            },
+            task_log: TaskLogConfig {
+                dir: PathBuf::from(&self.task_log.dir),
+                file_mode: parse_file_mode(&self.task_log.file_mode, "taskLog.fileMode")?,
+                compaction_factor: parse_factor(
+                    &self.task_log.compaction_factor,
+                    "taskLog.compactionFactor",
+                )?,
+                compact_interval: parse_duration(
+                    &self.task_log.compact_interval,
+                    "taskLog.compactInterval",
+                )?,
+                on_corrupt: self.task_log.on_corrupt,
+            },
+            task_engine: TaskEngineConfig {
+                max_trigger_payload_size: parse_size(
+                    &self.task_engine.max_trigger_payload_size,
+                    "taskEngine.maxTriggerPayloadSize",
+                )?,
+                max_concurrent_runs: parse_u32(
+                    &self.task_engine.max_concurrent_runs,
+                    "taskEngine.maxConcurrentRuns",
+                )?,
+                max_chain_depth: parse_u32(
+                    &self.task_engine.max_chain_depth,
+                    "taskEngine.maxChainDepth",
+                )?,
+                max_fan_out: parse_u32(&self.task_engine.max_fan_out, "taskEngine.maxFanOut")?,
+                run_feed: RunFeedConfig {
+                    max_rows: parse_u32(
+                        &self.task_engine.run_feed.max_rows,
+                        "taskEngine.runFeed.maxRows",
+                    )?,
+                    max_size: parse_size(
+                        &self.task_engine.run_feed.max_size,
+                        "taskEngine.runFeed.maxSize",
+                    )?,
+                },
+            },
         })
     }
 }
@@ -258,6 +352,13 @@ fn parse_u32(value: &str, field: &str) -> Result<u32, String> {
         .map_err(|error| format!("{field}: {error}"))
 }
 
+fn parse_factor(value: &str, field: &str) -> Result<f64, String> {
+    value
+        .trim()
+        .parse()
+        .map_err(|error| format!("{field}: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,7 +367,7 @@ mod tests {
     fn drafts_roundtrip_the_wire_configuration() {
         let config = Config::default();
         let mut draft = ConfigDraft::from_config(&config);
-        assert_eq!(draft.build_config(config.clone()).unwrap(), config);
+        assert_eq!(draft.build_config().unwrap(), config);
     }
 
     #[test]
@@ -284,18 +385,38 @@ mod tests {
         let config = Config::default();
         let mut draft = ConfigDraft::from_config(&config);
         draft.http_server.port = "not-a-port".to_string();
-        let error = draft.build_config(config).unwrap_err();
+        let error = draft.build_config().unwrap_err();
         assert!(error.contains("httpServer.port"), "{error}");
     }
 
     #[test]
-    fn non_editable_sections_are_preserved() {
-        let mut config = Config::default();
-        config.task_engine.max_chain_depth = 9;
-        config.files.tasks = PathBuf::from("custom-tasks.yaml");
+    fn task_log_fields_are_editable() {
+        let config = Config::default();
         let mut draft = ConfigDraft::from_config(&config);
-        let built = draft.build_config(config.clone()).unwrap();
-        assert_eq!(built.task_engine.max_chain_depth, 9);
+        draft.task_log.compaction_factor = "3.0".to_string();
+        draft.task_log.compact_interval = "7 d".to_string();
+        let built = draft.build_config().unwrap();
+        assert_eq!(built.task_log.compaction_factor, 3.0);
+        let expected: HumanDuration = "7 d".parse().unwrap();
+        assert_eq!(built.task_log.compact_interval, expected);
+        assert_eq!(built.task_log.dir, config.task_log.dir);
+    }
+
+    #[test]
+    fn task_engine_and_files_are_editable() {
+        let config = Config::default();
+        let mut draft = ConfigDraft::from_config(&config);
+        draft.task_engine.max_chain_depth = "12".to_string();
+        draft.task_engine.run_feed.max_rows = "750".to_string();
+        draft.task_engine.run_feed.max_size = "8 MiB".to_string();
+        draft.files.tasks = "custom-tasks.yaml".to_string();
+        let built = draft.build_config().unwrap();
+        assert_eq!(built.task_engine.max_chain_depth, 12);
+        assert_eq!(built.task_engine.run_feed.max_rows, 750);
+        assert_eq!(
+            built.task_engine.run_feed.max_size,
+            Size::from_bytes(8 * 1024 * 1024)
+        );
         assert_eq!(built.files.tasks, PathBuf::from("custom-tasks.yaml"));
     }
 }

@@ -7,14 +7,14 @@
 mod views;
 
 use crate::client::endpoint;
-use crate::client::{Gateway, GatewayEvent, MessagePageKind, Phase, RequestTag, Wake};
+use crate::client::{Gateway, GatewayEvent, MessagePageKind, Phase, RequestTag, RunPageKind, Wake};
 use crate::model::{
     self, EXPECTED_PROTOCOL_VERSION, MESSAGE_NOTIFICATION_BATCH, MESSAGE_PAGE_LIMIT, MESSAGE_STATES,
 };
 use crate::startup::Startup;
 use crate::theme::{UiTheme, palette};
 use crate::ui::widgets::{self, Toast, Tone};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use eframe::Frame;
 use egui::{Align, Context, Layout, Margin, RichText, Ui};
 use hodeco_codec::filter;
@@ -23,17 +23,19 @@ use hodeco_contract::api::payloads::{
     CommandsAddResult, CommandsListResult, CommandsUpdateResult, ConfigUpdateResult,
     DiscoveryGetResult, DiscoveryStartResult, MessageTimeRange, MessagesGetResult,
     MessagesListResult, ProtocolParamsResult, ProtocolsListResult, SchedulesAddResult,
-    SchedulesListResult, SchedulesPreviewResult, SchedulesUpdateResult, ServerInfoResult,
-    ServicesAddResult, ServicesAliasResult, ServicesListResult, ServicesParamsResult,
-    ServicesSendResult, ServicesStatusResult, TasksAddResult, TasksFireResult, TasksHistoryResult,
-    TasksListResult, TasksUpdateResult, TransportsListResult,
+    SchedulesListResult, SchedulesPreviewResult, SchedulesSetDefaultsResult,
+    SchedulesSolarPreviewResult, SchedulesUpdateResult, ServerInfoResult, ServicesAddResult,
+    ServicesAliasResult, ServicesListResult, ServicesParamsResult, ServicesSendResult,
+    ServicesStatusResult, TasksAddResult, TasksFireResult, TasksGetRunResult, TasksHistoryResult,
+    TasksListResult, TasksRunFeedResult, TasksUpdateResult, TransportsListResult,
 };
 use hodeco_contract::api::{ApiError, Method};
 use hodeco_contract::config::Config;
 use hodeco_contract::domain::{
-    CommandDefinition, DiscoveryInfo, DiscoveryState, Message, MessageDirection, MessageOrder,
-    MessageState, ParamDef, ParamValues, PayloadExpr, PayloadOffset, PayloadOp, ProtocolInfo,
-    ScheduleDefinition, ServiceInfo, ServiceRef, ServiceState, TaskDefinition, TransportInfo,
+    ActionKind, CommandDefinition, DiscoveryInfo, DiscoveryState, Location, Message,
+    MessageDirection, MessageOrder, MessageState, ParamDef, ParamValues, PayloadExpr,
+    PayloadOffset, PayloadOp, ProtocolInfo, ScheduleDefinition, ServiceInfo, ServiceRef,
+    ServiceState, TaskDefinition, TransportInfo,
 };
 use hodeco_contract::utils::{Base64Bytes, HumanDuration};
 use serde::de::DeserializeOwned;
@@ -44,7 +46,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use web_time::Instant;
 
-use views::builder::{BuilderDialog, new_builder};
+use views::builder::{BuilderDialog, new_builder, new_task_message_builder};
 
 // ---------------------------------------------------------------------------
 // Navigation and shared UI state
@@ -1130,6 +1132,45 @@ impl App {
         ))));
     }
 
+    pub(crate) fn open_task_message_builder(
+        &mut self,
+        service: Option<ServiceRef>,
+        action_index: usize,
+        payload: Base64Bytes,
+        ttl: Option<HumanDuration>,
+    ) {
+        self.dialog = Some(Dialog::Builder(Box::new(new_task_message_builder(
+            service,
+            &self.services,
+            &self.protocols,
+            action_index,
+            &payload,
+            ttl,
+        ))));
+    }
+
+    pub(crate) fn set_task_action_message(
+        &mut self,
+        action_index: usize,
+        service: ServiceRef,
+        payload: Base64Bytes,
+        ttl: Option<HumanDuration>,
+    ) -> bool {
+        let Some(editor) = self.tasks.editor.as_mut() else {
+            return false;
+        };
+        let Some(action) = editor.draft.actions.get_mut(action_index) else {
+            return false;
+        };
+        let ActionKind::Message(message) = &mut action.kind else {
+            return false;
+        };
+        message.message.service = service;
+        message.message.payload = payload;
+        message.message.ttl = ttl;
+        true
+    }
+
     pub(crate) fn open_message(&mut self, id: Uuid) {
         let message = self.messages.message_by_id(id).cloned().or_else(|| {
             self.messages
@@ -1415,6 +1456,22 @@ impl App {
         }
     }
 
+    pub(crate) fn cancel_task_run(&mut self, task_id: &str, run_id: Uuid) {
+        if !self.runs.cancelling.insert(run_id) {
+            return;
+        }
+        if !self.rpc(
+            RequestTag::TaskCancel {
+                task_id: task_id.to_string(),
+                run_id,
+            },
+            Method::TasksCancelRun,
+            json!({ "taskId": task_id, "runId": run_id }),
+        ) {
+            self.runs.cancelling.remove(&run_id);
+        }
+    }
+
     pub(crate) fn purge_task_history(&mut self, task_id: &str) {
         self.rpc(
             RequestTag::TaskPurgeHistory {
@@ -1431,18 +1488,24 @@ impl App {
             None => (
                 ScheduleDefinition {
                     name: "New schedule".to_string(),
-                    on: Some(hodeco_contract::domain::ScheduleRule {
-                        at: hodeco_contract::domain::OneOrMany::One(
-                            hodeco_contract::domain::AtSpec::Text("09:00".to_string()),
-                        ),
-                        ..Default::default()
-                    }),
+                    at: hodeco_contract::domain::OneOrMany::One(
+                        hodeco_contract::domain::AtSpec::Text("09:00".to_string()),
+                    ),
                     ..ScheduleDefinition::default()
                 },
                 true,
             ),
         };
-        self.schedules.editor = Some(views::schedules::ScheduleEditor::new(schedule, is_new));
+        let fallback_timezone = self
+            .schedules
+            .defaults_timezone
+            .clone()
+            .or_else(|| self.schedules.system_timezone.clone());
+        self.schedules.editor = Some(views::schedules::ScheduleEditor::new(
+            schedule,
+            is_new,
+            fallback_timezone,
+        ));
     }
 
     pub(crate) fn save_schedule(&mut self, schedule: ScheduleDefinition, is_new: bool) -> bool {
@@ -1474,6 +1537,95 @@ impl App {
         ) {
             self.schedules.confirm_delete = None;
         }
+    }
+
+    pub(crate) fn open_schedule_defaults(&mut self) {
+        self.schedules.defaults_editor = Some(views::schedules::ScheduleDefaultsEditor::new(
+            self.schedules.defaults_location,
+            self.schedules.defaults_timezone.clone(),
+        ));
+    }
+
+    pub(crate) fn open_location_dialog(&mut self, target: views::schedules::LocationTarget) {
+        let (location, timezone) = match target {
+            views::schedules::LocationTarget::Defaults => {
+                let editor = self.schedules.defaults_editor.as_ref();
+                let location = editor
+                    .and_then(|editor| {
+                        views::schedules::parse_location(&editor.location)
+                            .ok()
+                            .flatten()
+                    })
+                    .or(self.schedules.defaults_location);
+                let timezone = editor
+                    .filter(|editor| editor.timezone_custom)
+                    .map(|editor| editor.timezone.trim().to_string())
+                    .unwrap_or_default();
+                (location, timezone)
+            }
+            views::schedules::LocationTarget::Schedule => {
+                let editor = self.schedules.editor.as_ref();
+                let location = editor
+                    .and_then(|editor| {
+                        views::schedules::parse_location(&editor.location)
+                            .ok()
+                            .flatten()
+                    })
+                    .or(self.schedules.defaults_location);
+                let timezone = editor
+                    .filter(|editor| editor.timezone_custom)
+                    .map(|editor| editor.timezone.trim().to_string())
+                    .filter(|timezone| !timezone.is_empty())
+                    .or_else(|| self.schedules.defaults_timezone.clone())
+                    .unwrap_or_default();
+                (location, timezone)
+            }
+        };
+        self.schedules.location_dialog = Some(views::schedules::LocationDialog::new(
+            target, location, timezone,
+        ));
+    }
+
+    pub(crate) fn preview_solar(
+        &mut self,
+        location: Location,
+        date: NaiveDate,
+        timezone: String,
+        generation: u64,
+    ) -> bool {
+        let mut params = json!({
+            "location": location,
+            "date": date.format("%Y-%m-%d").to_string(),
+        });
+        if !timezone.trim().is_empty() {
+            params["timezone"] = json!(timezone.trim());
+        }
+        self.rpc(
+            RequestTag::SolarPreview { generation },
+            Method::SchedulesSolarPreview,
+            params,
+        )
+    }
+
+    pub(crate) fn save_schedule_defaults(
+        &mut self,
+        location: Option<Location>,
+        timezone: Option<String>,
+    ) -> bool {
+        let mut params = serde_json::Map::new();
+        if let Some(location) = location
+            && let Ok(value) = serde_json::to_value(location)
+        {
+            params.insert("location".to_string(), value);
+        }
+        if let Some(timezone) = timezone {
+            params.insert("timezone".to_string(), Value::String(timezone));
+        }
+        self.rpc(
+            RequestTag::ScheduleSetDefaults,
+            Method::SchedulesSetDefaults,
+            Value::Object(params),
+        )
     }
 
     pub(crate) fn preview_schedule(
@@ -1547,49 +1699,164 @@ impl App {
     }
 
     pub(crate) fn refresh_runs(&mut self) {
+        self.request_run_feed(RunPageKind::Refresh);
+    }
+
+    pub(crate) fn load_older_runs(&mut self) {
+        self.request_run_feed(RunPageKind::Older);
+    }
+
+    pub(crate) fn load_newer_runs(&mut self) {
+        self.request_run_feed(RunPageKind::Newer);
+    }
+
+    fn request_run_feed(&mut self, kind: RunPageKind) {
+        if kind != RunPageKind::Refresh && self.runs.loading {
+            return;
+        }
+        if kind == RunPageKind::Older
+            && (self.runs.loading_older
+                || self.runs.loading_newer
+                || self.runs.older_next.is_none())
+        {
+            return;
+        }
+        if kind == RunPageKind::Newer
+            && (self.runs.loading_newer
+                || self.runs.loading_older
+                || self.runs.newer_next.is_none())
+        {
+            return;
+        }
         self.runs.generation = self.runs.generation.wrapping_add(1);
         let generation = self.runs.generation;
-        let params =
-            serde_json::to_value(views::runs::history_params(self)).unwrap_or_else(|_| json!({}));
+        let params = match views::runs::run_feed_params(self, kind) {
+            Ok(params) => params,
+            Err(error) => {
+                self.runs.error = Some(error);
+                return;
+            }
+        };
+        let params = serde_json::to_value(params).unwrap_or_else(|_| json!({}));
         if self.rpc(
-            RequestTag::TaskHistory {
-                generation,
-                append: false,
-            },
-            Method::TasksHistory,
+            RequestTag::TaskRunFeed { generation, kind },
+            Method::TasksRunFeed,
             params,
         ) {
-            self.runs.loading = true;
-            self.runs.loading_more = false;
-            self.runs.next = None;
+            match kind {
+                RunPageKind::Refresh => {
+                    self.runs.loading = true;
+                    self.runs.older_next = None;
+                    self.runs.newer_next = None;
+                    self.runs.scroll_to_bottom =
+                        self.runs.selected.is_none() && self.runs.selected_running.is_none();
+                }
+                RunPageKind::Older => self.runs.loading_older = true,
+                RunPageKind::Newer => self.runs.loading_newer = true,
+            }
             self.runs.error = None;
+        } else {
+            self.runs.loading = false;
+            self.runs.loading_older = false;
+            self.runs.loading_newer = false;
+            self.runs.error = Some("The gateway is not connected.".to_string());
         }
     }
 
-    pub(crate) fn load_more_runs(&mut self) {
-        let Some(next) = self.runs.next.clone() else {
-            return;
-        };
-        self.runs.generation = self.runs.generation.wrapping_add(1);
-        let generation = self.runs.generation;
-        let mut params = views::runs::history_params(self);
-        params.next = Some(next);
-        let params = serde_json::to_value(params).unwrap_or_else(|_| json!({}));
-        if self.rpc(
-            RequestTag::TaskHistory {
-                generation,
-                append: true,
-            },
-            Method::TasksHistory,
-            params,
-        ) {
-            self.runs.loading_more = true;
-            self.runs.error = None;
+    fn apply_run_feed_page(&mut self, kind: RunPageKind, page: TasksRunFeedResult) {
+        for run in &page.runs {
+            self.runs.running.retain(|running| running.id != run.id);
         }
+        self.runs.feed_rows = page.feed.rows;
+        self.runs.feed_bytes = page.feed.bytes;
+        self.runs.feed_max_rows = page.feed.max_rows;
+        self.runs.feed_max_size = page.feed.max_size;
+        let cap = views::runs::RUN_LIST_CAP.min(self.runs.feed_max_rows.max(1) as usize);
+
+        match kind {
+            RunPageKind::Refresh => {
+                self.runs.runs = views::runs::sorted_runs(page.runs);
+                self.runs.older_next = page.next;
+                self.runs.newer_next = None;
+                self.runs.scroll_anchor = None;
+                self.runs.scroll_to_bottom =
+                    self.runs.selected.is_none() && self.runs.selected_running.is_none();
+                self.runs.at_bottom = true;
+            }
+            RunPageKind::Older => {
+                self.runs.scroll_anchor = self.runs.runs.first().map(|run| run.id);
+                let mut merged = page.runs;
+                merged.extend(std::mem::take(&mut self.runs.runs));
+                self.runs.runs = views::runs::sorted_runs(merged);
+                self.runs.older_next = page.next;
+                if self.runs.runs.len() > cap {
+                    let excess = self.runs.runs.len() - cap;
+                    let first_removed = self.runs.runs[self.runs.runs.len() - excess].time;
+                    self.runs.runs.truncate(cap);
+                    self.runs.newer_next = Some(MessageTimeRange {
+                        from: Some(first_removed),
+                        until: self.runs.newer_next.as_ref().and_then(|next| next.until),
+                    });
+                }
+            }
+            RunPageKind::Newer => {
+                let mut merged = std::mem::take(&mut self.runs.runs);
+                merged.extend(page.runs);
+                self.runs.runs = views::runs::sorted_runs(merged);
+                self.runs.newer_next = page.next;
+                if self.runs.runs.len() > cap {
+                    let excess = self.runs.runs.len() - cap;
+                    let until = self.runs.runs[excess - 1]
+                        .time
+                        .checked_add_signed(chrono::TimeDelta::nanoseconds(1));
+                    self.runs.runs.drain(0..excess);
+                    self.runs.older_next = Some(MessageTimeRange {
+                        from: self.runs.older_next.as_ref().and_then(|next| next.from),
+                        until,
+                    });
+                }
+                if self.runs.selected.is_none() {
+                    self.runs.scroll_to_bottom = true;
+                }
+            }
+        }
+
+        if !self.runs.pending_feed.is_empty() || !self.runs.pending_dropped.is_empty() {
+            let mut merged = std::mem::take(&mut self.runs.runs);
+            merged.extend(std::mem::take(&mut self.runs.pending_feed));
+            self.runs.runs = views::runs::sorted_runs(merged);
+            if !self.runs.pending_dropped.is_empty() {
+                let dropped = std::mem::take(&mut self.runs.pending_dropped);
+                self.runs.runs.retain(|run| !dropped.contains(&run.id));
+            }
+            if self.runs.runs.len() > cap {
+                let excess = self.runs.runs.len() - cap;
+                let until = self.runs.runs[excess - 1]
+                    .time
+                    .checked_add_signed(chrono::TimeDelta::nanoseconds(1));
+                self.runs.runs.drain(0..excess);
+                self.runs.older_next = Some(MessageTimeRange {
+                    from: self.runs.older_next.as_ref().and_then(|next| next.from),
+                    until,
+                });
+            }
+        }
+
+        self.runs.selected_index = self.runs.selected.as_ref().and_then(|(task, run)| {
+            self.runs
+                .runs
+                .iter()
+                .position(|candidate| candidate.task_id == *task && candidate.id == *run)
+        });
+        if self.runs.selected.is_some() && self.runs.selected_index.is_none() {
+            views::runs::clear_run_selection(self);
+        }
+        self.runs.error = None;
     }
 
     pub(crate) fn select_run(&mut self, task_id: &str, run_id: Uuid) {
         self.runs.selected = Some((task_id.to_string(), run_id));
+        self.runs.selected_running = None;
         self.runs.selected_index = self
             .runs
             .runs
@@ -1603,7 +1870,7 @@ impl App {
                 task_id: task_id.to_string(),
                 run_id,
             },
-            Method::TasksGet,
+            Method::TasksGetRun,
             json!({ "taskId": task_id, "runId": run_id }),
         ) {
             self.runs.detail_loading = false;
@@ -1611,8 +1878,17 @@ impl App {
         }
     }
 
-    pub(crate) fn open_runs_for_task(&mut self, task_id: &str) {
-        views::tasks::switch_to_runs(self, task_id);
+    pub(crate) fn open_task_history(&mut self, task_id: &str) {
+        let name = self
+            .tasks
+            .tasks
+            .iter()
+            .find(|info| info.task.id == task_id)
+            .map(|info| info.task.name.clone())
+            .unwrap_or_else(|| task_id.to_string());
+        let mut history = views::task_history::TaskHistoryUi::new(task_id.to_string(), name);
+        views::task_history::request_page(self, &mut history, RunPageKind::Refresh);
+        self.tasks.history = Some(history);
     }
 
     pub(crate) fn request_tab(&mut self, tab: Tab) {
@@ -2603,6 +2879,7 @@ impl App {
                 self.tasks.loading = false;
                 self.tasks.error = None;
                 self.tasks.selected = None;
+                self.tasks.history = None;
                 self.schedules.schedules.clear();
                 self.schedules.loading = false;
                 self.schedules.error = None;
@@ -2612,13 +2889,25 @@ impl App {
                 self.commands.error = None;
                 self.commands.selected = None;
                 self.runs.runs.clear();
+                self.runs.running.clear();
                 self.runs.loading = false;
-                self.runs.loading_more = false;
-                self.runs.next = None;
+                self.runs.loading_older = false;
+                self.runs.loading_newer = false;
+                self.runs.older_next = None;
+                self.runs.newer_next = None;
+                self.runs.feed_rows = 0;
+                self.runs.feed_bytes = 0;
+                self.runs.at_bottom = true;
+                self.runs.scroll_to_bottom = false;
+                self.runs.scroll_anchor = None;
                 self.runs.detail = None;
                 self.runs.selected = None;
+                self.runs.selected_running = None;
                 self.runs.selected_index = None;
+                self.runs.cancelling.clear();
                 self.runs.pending_new = 0;
+                self.runs.pending_feed.clear();
+                self.runs.pending_dropped.clear();
                 if let Some(Dialog::Message(dialog)) = &mut self.dialog
                     && dialog.loading
                 {
@@ -2723,6 +3012,34 @@ impl App {
                     self.tasks
                         .tasks
                         .sort_by(|left, right| left.task.name.cmp(&right.task.name));
+                    if self.gateway.is_demo() {
+                        let running: Vec<String> = self
+                            .tasks
+                            .tasks
+                            .iter()
+                            .filter(|info| info.running)
+                            .map(|info| info.task.id.clone())
+                            .collect();
+                        for task_id in running {
+                            if self.runs.running.iter().any(|run| run.task_id == task_id) {
+                                continue;
+                            }
+                            self.runs.running.push(views::runs::RunningRun {
+                                id: self
+                                    .tasks
+                                    .task(&task_id)
+                                    .and_then(|info| info.running_run_id)
+                                    .unwrap_or_else(Uuid::new_v4),
+                                task_id,
+                                trigger: hodeco_contract::domain::TriggerRef {
+                                    id: "demo".to_string(),
+                                    kind: hodeco_contract::domain::TriggerType::Manual,
+                                },
+                                started_at: Utc::now(),
+                                delayed_until: None,
+                            });
+                        }
+                    }
                 }
                 Err(error) => {
                     self.tasks.loading = false;
@@ -2731,13 +3048,12 @@ impl App {
             },
             RequestTag::TaskAdd => match parse_result::<TasksAddResult>(result) {
                 Ok(added) => {
-                    self.tasks
-                        .tasks
-                        .retain(|info| info.task.id != added.task.task.id);
-                    self.tasks.tasks.push(added.task);
-                    self.tasks
-                        .tasks
-                        .sort_by(|left, right| left.task.name.cmp(&right.task.name));
+                    replace_sorted(
+                        &mut self.tasks.tasks,
+                        added.task,
+                        |info| info.task.id.as_str(),
+                        |info| info.task.name.as_str(),
+                    );
                     self.tasks.editor = None;
                     self.toast(Tone::Success, "Task created.");
                 }
@@ -2751,13 +3067,12 @@ impl App {
             },
             RequestTag::TaskUpdate => match parse_result::<TasksUpdateResult>(result) {
                 Ok(updated) => {
-                    self.tasks
-                        .tasks
-                        .retain(|info| info.task.id != updated.task.task.id);
-                    self.tasks.tasks.push(updated.task.clone());
-                    self.tasks
-                        .tasks
-                        .sort_by(|left, right| left.task.name.cmp(&right.task.name));
+                    replace_sorted(
+                        &mut self.tasks.tasks,
+                        updated.task.clone(),
+                        |info| info.task.id.as_str(),
+                        |info| info.task.name.as_str(),
+                    );
                     if let Some(editor) = self.tasks.editor.as_mut() {
                         editor.saving = false;
                         editor.original = Some(updated.task.task.clone());
@@ -2806,39 +3121,128 @@ impl App {
                     }
                 }
             }
+            RequestTag::TaskCancel { run_id, .. } => {
+                self.runs.cancelling.remove(&run_id);
+                self.toast(Tone::Success, "Cancellation requested.");
+            }
             RequestTag::TaskPurgeHistory { .. } => {
                 self.refresh_tasks();
                 self.refresh_runs();
                 self.toast(Tone::Success, "Task history purged.");
             }
-            RequestTag::TaskHistory { generation, append } => {
+            RequestTag::TaskRunFeed { generation, kind } => {
                 if generation != self.runs.generation {
                     return;
                 }
                 self.runs.loading = false;
-                self.runs.loading_more = false;
-                match parse_result::<TasksHistoryResult>(result) {
-                    Ok(history) => {
-                        if append {
-                            self.runs.runs.extend(history.runs);
-                        } else {
-                            self.runs.runs = history.runs;
-                        }
-                        self.runs.next = history.next;
-                        self.runs.selected_index =
-                            self.runs.selected.as_ref().and_then(|(task, run)| {
-                                self.runs.runs.iter().position(|candidate| {
-                                    candidate.task_id == *task && candidate.id == *run
-                                })
-                            });
-                        self.runs.error = None;
-                    }
+                self.runs.loading_older = false;
+                self.runs.loading_newer = false;
+                match parse_result::<TasksRunFeedResult>(result) {
+                    Ok(page) => self.apply_run_feed_page(kind, page),
                     Err(error) => self.runs.error = Some(error),
                 }
             }
-            RequestTag::TaskRunGet { .. } => {
+            RequestTag::TaskHistoryPage { generation, kind } => {
+                let Some(dialog) = &mut self.tasks.history else {
+                    return;
+                };
+                if generation != dialog.generation {
+                    return;
+                }
+                dialog.loading = false;
+                dialog.loading_older = false;
+                dialog.loading_newer = false;
+                match parse_result::<TasksHistoryResult>(result) {
+                    Ok(page) => {
+                        let cap = views::task_history::WINDOW_CAP;
+                        match kind {
+                            RunPageKind::Refresh => {
+                                dialog.runs = views::runs::sorted_runs(page.runs);
+                                dialog.older_next = page.next;
+                                dialog.newer_next = None;
+                                dialog.scroll_anchor = None;
+                                dialog.scroll_to_bottom = dialog.selected.is_none();
+                                dialog.at_bottom = true;
+                            }
+                            RunPageKind::Older => {
+                                dialog.scroll_anchor = dialog.runs.first().map(|run| run.id);
+                                let mut merged = page.runs;
+                                merged.extend(std::mem::take(&mut dialog.runs));
+                                dialog.runs = views::runs::sorted_runs(merged);
+                                dialog.older_next = page.next;
+                                if dialog.runs.len() > cap {
+                                    let excess = dialog.runs.len() - cap;
+                                    let from = dialog.runs[dialog.runs.len() - excess].time;
+                                    dialog.runs.truncate(cap);
+                                    dialog.newer_next = Some(MessageTimeRange {
+                                        from: Some(from),
+                                        until: dialog
+                                            .newer_next
+                                            .as_ref()
+                                            .and_then(|next| next.until),
+                                    });
+                                }
+                            }
+                            RunPageKind::Newer => {
+                                let mut merged = std::mem::take(&mut dialog.runs);
+                                merged.extend(page.runs);
+                                dialog.runs = views::runs::sorted_runs(merged);
+                                dialog.newer_next = page.next;
+                                if dialog.runs.len() > cap {
+                                    let excess = dialog.runs.len() - cap;
+                                    let until = dialog.runs[excess - 1]
+                                        .time
+                                        .checked_add_signed(chrono::TimeDelta::nanoseconds(1));
+                                    dialog.runs.drain(0..excess);
+                                    dialog.older_next = Some(MessageTimeRange {
+                                        from: dialog.older_next.as_ref().and_then(|next| next.from),
+                                        until,
+                                    });
+                                }
+                                if dialog.selected.is_none() {
+                                    dialog.scroll_to_bottom = true;
+                                }
+                            }
+                        }
+                        if dialog
+                            .selected
+                            .is_some_and(|id| !dialog.runs.iter().any(|run| run.id == id))
+                        {
+                            dialog.selected = None;
+                            dialog.detail = None;
+                        }
+                        dialog.error = None;
+                    }
+                    Err(error) => dialog.error = Some(error),
+                }
+            }
+            RequestTag::TaskHistoryRunGet { task_id, run_id } => {
+                let Some(dialog) = &mut self.tasks.history else {
+                    return;
+                };
+                if dialog.task_id != task_id || dialog.selected != Some(run_id) {
+                    return;
+                }
+                dialog.detail_loading = false;
+                match parse_result::<TasksGetRunResult>(result) {
+                    Ok(result) => {
+                        dialog.detail = Some(result.run);
+                        dialog.detail_error = None;
+                    }
+                    Err(error) => dialog.detail_error = Some(error),
+                }
+            }
+            RequestTag::TaskRunGet { task_id, run_id } => {
+                if !self
+                    .runs
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(task, run)| task == &task_id && *run == run_id)
+                {
+                    return;
+                }
                 self.runs.detail_loading = false;
-                match parse_result::<hodeco_contract::api::payloads::TasksGetResult>(result) {
+                match parse_result::<TasksGetRunResult>(result) {
                     Ok(fetched) => {
                         self.runs.detail = Some(fetched.run);
                         self.runs.detail_error = None;
@@ -2851,6 +3255,9 @@ impl App {
                     self.schedules.loading = false;
                     self.schedules.error = None;
                     self.schedules.schedules = list.schedules;
+                    self.schedules.defaults_location = list.location;
+                    self.schedules.defaults_timezone = list.timezone;
+                    self.schedules.system_timezone = list.system_timezone;
                     self.schedules
                         .schedules
                         .sort_by(|left, right| left.schedule.name.cmp(&right.schedule.name));
@@ -2862,13 +3269,12 @@ impl App {
             },
             RequestTag::ScheduleAdd => match parse_result::<SchedulesAddResult>(result) {
                 Ok(added) => {
-                    self.schedules
-                        .schedules
-                        .retain(|info| info.schedule.id != added.schedule.schedule.id);
-                    self.schedules.schedules.push(added.schedule);
-                    self.schedules
-                        .schedules
-                        .sort_by(|left, right| left.schedule.name.cmp(&right.schedule.name));
+                    replace_sorted(
+                        &mut self.schedules.schedules,
+                        added.schedule,
+                        |info| info.schedule.id.as_str(),
+                        |info| info.schedule.name.as_str(),
+                    );
                     self.schedules.editor = None;
                     self.toast(Tone::Success, "Schedule created.");
                 }
@@ -2882,13 +3288,12 @@ impl App {
             },
             RequestTag::ScheduleUpdate => match parse_result::<SchedulesUpdateResult>(result) {
                 Ok(updated) => {
-                    self.schedules
-                        .schedules
-                        .retain(|info| info.schedule.id != updated.schedule.schedule.id);
-                    self.schedules.schedules.push(updated.schedule.clone());
-                    self.schedules
-                        .schedules
-                        .sort_by(|left, right| left.schedule.name.cmp(&right.schedule.name));
+                    replace_sorted(
+                        &mut self.schedules.schedules,
+                        updated.schedule.clone(),
+                        |info| info.schedule.id.as_str(),
+                        |info| info.schedule.name.as_str(),
+                    );
                     if let Some(editor) = self.schedules.editor.as_mut() {
                         editor.saving = false;
                         editor.original = Some(updated.schedule.schedule.clone());
@@ -2932,7 +3337,43 @@ impl App {
                             editor.preview = preview.occurrences;
                             editor.preview_error = None;
                         }
-                        Err(error) => editor.preview_error = Some(error),
+                        Err(error) => {
+                            editor.preview.clear();
+                            editor.preview_error = Some(error);
+                        }
+                    }
+                }
+            }
+            RequestTag::ScheduleSetDefaults => {
+                match parse_result::<SchedulesSetDefaultsResult>(result) {
+                    Ok(defaults) => {
+                        self.schedules.defaults_editor = None;
+                        self.schedules.defaults_location = defaults.location;
+                        self.schedules.defaults_timezone = defaults.timezone;
+                        self.toast(Tone::Success, "Schedule defaults saved.");
+                        self.refresh_schedules();
+                        self.refresh_tasks();
+                    }
+                    Err(error) => {
+                        if let Some(editor) = self.schedules.defaults_editor.as_mut() {
+                            editor.saving = false;
+                            editor.error = Some(error.clone());
+                        }
+                        self.toast(Tone::Error, error);
+                    }
+                }
+            }
+            RequestTag::SolarPreview { generation } => {
+                if let Some(dialog) = self.schedules.location_dialog.as_mut()
+                    && dialog.preview_generation == generation
+                {
+                    dialog.previewing = false;
+                    match parse_result::<SchedulesSolarPreviewResult>(result) {
+                        Ok(preview) => {
+                            dialog.preview = Some(preview);
+                            dialog.preview_error = None;
+                        }
+                        Err(error) => dialog.preview_error = Some(error),
                     }
                 }
             }
@@ -2952,13 +3393,12 @@ impl App {
             },
             RequestTag::CommandAdd => match parse_result::<CommandsAddResult>(result) {
                 Ok(added) => {
-                    self.commands
-                        .commands
-                        .retain(|info| info.command.id != added.command.command.id);
-                    self.commands.commands.push(added.command);
-                    self.commands
-                        .commands
-                        .sort_by(|left, right| left.command.name.cmp(&right.command.name));
+                    replace_sorted(
+                        &mut self.commands.commands,
+                        added.command,
+                        |info| info.command.id.as_str(),
+                        |info| info.command.name.as_str(),
+                    );
                     self.commands.editor = None;
                     self.toast(Tone::Success, "Command created.");
                 }
@@ -2972,16 +3412,14 @@ impl App {
             },
             RequestTag::CommandUpdate => match parse_result::<CommandsUpdateResult>(result) {
                 Ok(updated) => {
-                    self.commands
-                        .commands
-                        .retain(|info| info.command.id != updated.command.command.id);
-                    self.commands.commands.push(updated.command.clone());
-                    self.commands
-                        .commands
-                        .sort_by(|left, right| left.command.name.cmp(&right.command.name));
+                    replace_sorted(
+                        &mut self.commands.commands,
+                        updated.command.clone(),
+                        |info| info.command.id.as_str(),
+                        |info| info.command.name.as_str(),
+                    );
                     if let Some(editor) = self.commands.editor.as_mut() {
                         editor.saving = false;
-                        editor.original = Some(updated.command.command.clone());
                         editor.draft = updated.command.command;
                         editor.error = None;
                     }
@@ -3302,14 +3740,48 @@ impl App {
                 }
                 self.toast(Tone::Error, error.message);
             }
-            RequestTag::TaskHistory { generation, .. } if *generation == self.runs.generation => {
+            RequestTag::TaskCancel { run_id, .. } => {
+                self.runs.cancelling.remove(run_id);
+                self.toast(Tone::Error, error.message.clone());
+            }
+            RequestTag::TaskRunFeed { generation, .. } if *generation == self.runs.generation => {
                 self.runs.loading = false;
-                self.runs.loading_more = false;
+                self.runs.loading_older = false;
+                self.runs.loading_newer = false;
                 self.runs.error = Some(error.message.clone());
             }
-            RequestTag::TaskRunGet { .. } => {
-                self.runs.detail_loading = false;
-                self.runs.detail_error = Some(error.message.clone());
+            RequestTag::TaskHistoryPage { generation, .. } => {
+                let Some(dialog) = &mut self.tasks.history else {
+                    return;
+                };
+                if *generation != dialog.generation {
+                    return;
+                }
+                dialog.loading = false;
+                dialog.loading_older = false;
+                dialog.loading_newer = false;
+                dialog.error = Some(error.message.clone());
+            }
+            RequestTag::TaskHistoryRunGet { task_id, run_id } => {
+                let Some(dialog) = &mut self.tasks.history else {
+                    return;
+                };
+                if dialog.task_id != *task_id || dialog.selected != Some(*run_id) {
+                    return;
+                }
+                dialog.detail_loading = false;
+                dialog.detail_error = Some(error.message.clone());
+            }
+            RequestTag::TaskRunGet { task_id, run_id } => {
+                if self
+                    .runs
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(task, run)| task == task_id && run == run_id)
+                {
+                    self.runs.detail_loading = false;
+                    self.runs.detail_error = Some(error.message.clone());
+                }
             }
             RequestTag::SchedulesList => {
                 self.schedules.loading = false;
@@ -3321,6 +3793,21 @@ impl App {
                     editor.error = Some(error.message.clone());
                 }
                 self.toast(Tone::Error, error.message);
+            }
+            RequestTag::ScheduleSetDefaults => {
+                if let Some(editor) = self.schedules.defaults_editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(error.message.clone());
+                }
+                self.toast(Tone::Error, error.message);
+            }
+            RequestTag::SolarPreview { generation } => {
+                if let Some(dialog) = self.schedules.location_dialog.as_mut()
+                    && dialog.preview_generation == *generation
+                {
+                    dialog.previewing = false;
+                    dialog.preview_error = Some(error.message.clone());
+                }
             }
             RequestTag::SchedulePreview { generation } => {
                 if let Some(editor) = self.schedules.editor.as_mut()
@@ -3445,14 +3932,48 @@ impl App {
                 }
             }
             RequestTag::TaskFire => self.tasks.firing = false,
-            RequestTag::TaskHistory { .. } => {
+            RequestTag::TaskCancel { run_id, .. } => {
+                self.runs.cancelling.remove(run_id);
+                self.toast(Tone::Error, format!("{label} timed out"));
+            }
+            RequestTag::TaskRunFeed { generation, .. } if *generation == self.runs.generation => {
                 self.runs.loading = false;
-                self.runs.loading_more = false;
+                self.runs.loading_older = false;
+                self.runs.loading_newer = false;
                 self.runs.error = Some(format!("{label} timed out"));
             }
-            RequestTag::TaskRunGet { .. } => {
-                self.runs.detail_loading = false;
-                self.runs.detail_error = Some(format!("{label} timed out"));
+            RequestTag::TaskHistoryPage { generation, .. } => {
+                let Some(dialog) = &mut self.tasks.history else {
+                    return;
+                };
+                if *generation != dialog.generation {
+                    return;
+                }
+                dialog.loading = false;
+                dialog.loading_older = false;
+                dialog.loading_newer = false;
+                dialog.error = Some(format!("{label} timed out"));
+            }
+            RequestTag::TaskHistoryRunGet { task_id, run_id } => {
+                let Some(dialog) = &mut self.tasks.history else {
+                    return;
+                };
+                if dialog.task_id != *task_id || dialog.selected != Some(*run_id) {
+                    return;
+                }
+                dialog.detail_loading = false;
+                dialog.detail_error = Some(format!("{label} timed out"));
+            }
+            RequestTag::TaskRunGet { task_id, run_id } => {
+                if self
+                    .runs
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(task, run)| task == task_id && run == run_id)
+                {
+                    self.runs.detail_loading = false;
+                    self.runs.detail_error = Some(format!("{label} timed out"));
+                }
             }
             RequestTag::SchedulesList => {
                 self.schedules.loading = false;
@@ -3462,6 +3983,20 @@ impl App {
                 if let Some(editor) = self.schedules.editor.as_mut() {
                     editor.saving = false;
                     editor.error = Some(format!("{label} timed out"));
+                }
+            }
+            RequestTag::ScheduleSetDefaults => {
+                if let Some(editor) = self.schedules.defaults_editor.as_mut() {
+                    editor.saving = false;
+                    editor.error = Some(format!("{label} timed out"));
+                }
+            }
+            RequestTag::SolarPreview { generation } => {
+                if let Some(dialog) = self.schedules.location_dialog.as_mut()
+                    && dialog.preview_generation == *generation
+                {
+                    dialog.previewing = false;
+                    dialog.preview_error = Some(format!("{label} timed out"));
                 }
             }
             RequestTag::SchedulePreview { .. } => {
@@ -3558,11 +4093,35 @@ impl App {
                     .find(|info| info.task.id == update.task_id)
                 {
                     info.running = true;
+                    info.running_run_id = Some(update.run_id);
+                }
+                self.runs.running.retain(|run| run.id != update.run_id);
+                self.runs.running.insert(
+                    0,
+                    views::runs::RunningRun {
+                        id: update.run_id,
+                        task_id: update.task_id.clone(),
+                        trigger: update.trigger.clone(),
+                        started_at: update.started_at,
+                        delayed_until: update.delayed_until,
+                    },
+                );
+                if self.runs.at_bottom
+                    && self.runs.selected.is_none()
+                    && self.runs.selected_running.is_none()
+                {
+                    self.runs.scroll_anchor = None;
+                    self.runs.scroll_to_bottom = true;
                 }
             }
             Notification::TaskRunFinished(update) => {
-                let task_id = update.run.task_id.clone();
-                let run_id = update.run.id;
+                let summary = update.run;
+                let task_id = summary.task_id.clone();
+                let run_id = summary.id;
+                let demo_cancelled = self.gateway.is_demo()
+                    && summary.outcome == hodeco_contract::domain::RunOutcome::Cancelled;
+                self.runs.running.retain(|run| run.id != run_id);
+                self.runs.cancelling.remove(&run_id);
                 if let Some(info) = self
                     .tasks
                     .tasks
@@ -3570,18 +4129,59 @@ impl App {
                     .find(|info| info.task.id == task_id)
                 {
                     info.running = false;
-                    info.last_run = Some(update.run.clone());
+                    info.running_run_id = None;
+                    if !demo_cancelled {
+                        info.last_run = Some(summary.clone());
+                    }
                 }
-                if self.runs.filter_matches(&update.run) {
-                    if self.runs.selected.is_none() {
-                        self.runs.runs.retain(|run| run.id != run_id);
-                        self.runs.runs.insert(0, update.run);
-                        self.runs.runs.truncate(500);
+                if !demo_cancelled && self.runs.filter_matches(&summary) {
+                    if self.runs.loading {
+                        self.runs.pending_feed.push(summary.clone());
+                    }
+                    self.runs.runs.retain(|run| run.id != run_id);
+                    let index = self
+                        .runs
+                        .runs
+                        .partition_point(|run| run.time <= summary.time);
+                    self.runs.runs.insert(index, summary);
+                    let cap =
+                        views::runs::RUN_LIST_CAP.min(self.runs.feed_max_rows.max(1) as usize);
+                    if self.runs.runs.len() > cap {
+                        let excess = self.runs.runs.len() - cap;
+                        let until = self.runs.runs[excess - 1]
+                            .time
+                            .checked_add_signed(chrono::TimeDelta::nanoseconds(1));
+                        self.runs.runs.drain(0..excess);
+                        self.runs.older_next = Some(MessageTimeRange {
+                            from: self.runs.older_next.as_ref().and_then(|next| next.from),
+                            until,
+                        });
+                    }
+                    let was_selected_running = self.runs.selected_running == Some(run_id);
+                    if self.runs.at_bottom
+                        && self.runs.selected.is_none()
+                        && (self.runs.selected_running.is_none() || was_selected_running)
+                    {
+                        self.runs.scroll_anchor = None;
+                        self.runs.scroll_to_bottom = true;
                     } else {
                         self.runs.pending_new += 1;
                     }
                 }
-                if self
+                if demo_cancelled {
+                    if self.runs.selected_running == Some(run_id)
+                        || self
+                            .runs
+                            .selected
+                            .as_ref()
+                            .is_some_and(|(task, run)| task == &task_id && *run == run_id)
+                    {
+                        views::runs::clear_run_selection(self);
+                    }
+                } else if self.runs.selected_running == Some(run_id) {
+                    self.runs.selected_running = None;
+                    self.select_run(&task_id, run_id);
+                } else if self
                     .runs
                     .selected
                     .as_ref()
@@ -3589,6 +4189,32 @@ impl App {
                 {
                     self.select_run(&task_id, run_id);
                 }
+                self.refresh_tasks();
+            }
+            Notification::TaskRunDropped(update) => {
+                let dropped: std::collections::HashSet<Uuid> =
+                    update.run_ids.iter().copied().collect();
+                self.runs.runs.retain(|run| !dropped.contains(&run.id));
+                self.runs
+                    .pending_feed
+                    .retain(|run| !dropped.contains(&run.id));
+                if self
+                    .runs
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(_, run)| dropped.contains(run))
+                {
+                    views::runs::clear_run_selection(self);
+                }
+                if self.runs.loading || self.runs.loading_older || self.runs.loading_newer {
+                    self.runs.pending_dropped.extend(dropped);
+                }
+                self.runs.selected_index = self.runs.selected.as_ref().and_then(|(task, run)| {
+                    self.runs
+                        .runs
+                        .iter()
+                        .position(|candidate| candidate.task_id == *task && candidate.id == *run)
+                });
             }
             Notification::DiscoveryFinished(update) => {
                 let state = update.discovery.state;
@@ -4040,48 +4666,27 @@ fn parse_result<T: DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|error| format!("invalid response payload: {error}"))
 }
 
+/// Replaces the row with the same ID in `items` (when present) with `incoming`
+/// and keeps the list sorted by display name.
+fn replace_sorted<T>(
+    items: &mut Vec<T>,
+    incoming: T,
+    id: impl Fn(&T) -> &str,
+    name: impl Fn(&T) -> &str,
+) {
+    items.retain(|item| id(item) != id(&incoming));
+    items.push(incoming);
+    items.sort_by(|left, right| name(left).cmp(name(right)));
+}
+
 pub(crate) fn tag_label(tag: &RequestTag) -> String {
     match tag {
         RequestTag::Subscribe => "subscription".to_string(),
-        RequestTag::ServerInfo => "server.info".to_string(),
-        RequestTag::ProtocolList => "protocols.list".to_string(),
-        RequestTag::TransportList => "transports.list".to_string(),
-        RequestTag::Config => "config.get".to_string(),
-        RequestTag::ConfigUpdate => "config.update".to_string(),
-        RequestTag::ServiceList => "services.list".to_string(),
-        RequestTag::MessagesPage { .. } => "messages.list".to_string(),
         RequestTag::MessageSearch { .. } => "messages.list (find)".to_string(),
         RequestTag::MessageBatch { .. } => "messages.list (notifications)".to_string(),
         RequestTag::MessageAnchor { .. } => "messages.list (anchor)".to_string(),
-        RequestTag::MessageGet { .. } => "messages.get".to_string(),
-        RequestTag::ServiceAdd => "services.add".to_string(),
-        RequestTag::ServiceRemove => "services.remove".to_string(),
-        RequestTag::ServiceAlias => "services.alias".to_string(),
-        RequestTag::ServiceStatus { .. } => "services.status".to_string(),
-        RequestTag::ServiceParams { .. } => "services.params".to_string(),
-        RequestTag::ServiceSend => "services.send".to_string(),
-        RequestTag::DiscoveryStart => "discovery.start".to_string(),
-        RequestTag::DiscoveryGet => "discovery.get".to_string(),
-        RequestTag::DiscoveryCancel => "discovery.cancel".to_string(),
-        RequestTag::ProtocolParams { .. } => "protocols.params".to_string(),
-        RequestTag::TasksList => "tasks.list".to_string(),
-        RequestTag::TaskAdd => "tasks.add".to_string(),
-        RequestTag::TaskUpdate => "tasks.update".to_string(),
-        RequestTag::TaskRemove { .. } => "tasks.remove".to_string(),
-        RequestTag::TaskFire => "tasks.fire".to_string(),
-        RequestTag::TaskPurgeHistory { .. } => "tasks.purgeHistory".to_string(),
-        RequestTag::TaskHistory { .. } => "tasks.history".to_string(),
-        RequestTag::TaskRunGet { .. } => "tasks.get".to_string(),
-        RequestTag::SchedulesList => "schedules.list".to_string(),
-        RequestTag::ScheduleAdd => "schedules.add".to_string(),
-        RequestTag::ScheduleUpdate => "schedules.update".to_string(),
-        RequestTag::ScheduleRemove { .. } => "schedules.remove".to_string(),
-        RequestTag::SchedulePreview { .. } => "schedules.preview".to_string(),
-        RequestTag::CommandsList => "commands.list".to_string(),
-        RequestTag::CommandAdd => "commands.add".to_string(),
-        RequestTag::CommandUpdate => "commands.update".to_string(),
-        RequestTag::CommandRemove { .. } => "commands.remove".to_string(),
         RequestTag::RawConsole => "console request".to_string(),
+        other => other.method().as_str().to_string(),
     }
 }
 

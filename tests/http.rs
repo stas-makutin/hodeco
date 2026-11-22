@@ -22,7 +22,7 @@ use hodeco::services::discovery::{DiscoveryBackend, DiscoveryRegistry};
 use hodeco::services::registry::ServiceRegistry;
 use hodeco_contract::config::{Config, ServicesFile, TaskLogConfig};
 use hodeco_contract::domain::{DiscoveryEntry, MessageState, ParamValues, ServiceKey};
-use hodeco_contract::utils::HumanDuration;
+use hodeco_contract::utils::{Base64Bytes, HumanDuration};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -64,6 +64,15 @@ fn app_with_state(
     config_store: ConfigStore,
     services_path: Option<PathBuf>,
 ) -> (AppState, CancellationToken) {
+    let catalog_dir = std::env::temp_dir().join(format!("hodeco-http-{}", uuid::Uuid::new_v4()));
+    app_with_state_in(config_store, services_path, catalog_dir)
+}
+
+fn app_with_state_in(
+    config_store: ConfigStore,
+    services_path: Option<PathBuf>,
+    catalog_dir: PathBuf,
+) -> (AppState, CancellationToken) {
     let cancel = CancellationToken::new();
     let store = Arc::new(MessageStore::new(1024 * 1024));
     let registry = Arc::new(ServiceRegistry::with_defaults(store.clone(), &cancel));
@@ -73,7 +82,6 @@ fn app_with_state(
     let config = config_store.snapshot();
     let ws_limit = config.http_server.max_connections.max(1) as usize;
     let services_store = Arc::new(ServicesStore::new(services_path, Vec::new()));
-    let catalog_dir = std::env::temp_dir().join(format!("hodeco-http-{}", uuid::Uuid::new_v4()));
     let automation = Arc::new(AutomationStore::new(
         AutomationSnapshot {
             tasks: Default::default(),
@@ -91,6 +99,9 @@ fn app_with_state(
     ));
     let history_dir = catalog_dir.join("history");
     let history = Arc::new(HistoryStore::new(TaskLogConfig::default(), history_dir));
+    let run_feed = Arc::new(hodeco::automation::feed::RunFeed::new(
+        &config.task_engine.run_feed,
+    ));
     let runtime = Arc::new(TaskRuntime::new(config.task_engine.max_concurrent_runs));
     let state = AppState {
         config: Arc::new(config),
@@ -99,6 +110,7 @@ fn app_with_state(
         automation,
         runtime,
         history,
+        run_feed,
         registry,
         discovery,
         store,
@@ -108,6 +120,7 @@ fn app_with_state(
         shutting_down: Arc::new(AtomicBool::new(false)),
         ws_limits: Arc::new(tokio::sync::Semaphore::new(ws_limit)),
         started_at: Utc::now(),
+        system_timezone: None,
     };
     (state, cancel)
 }
@@ -140,6 +153,28 @@ fn rpc_request(body: impl Into<Body>) -> Request<Body> {
 
 fn body_json(body: &[u8]) -> Value {
     serde_json::from_slice(body).expect("JSON response")
+}
+
+async fn rpc_json(state: &AppState, method: &str, params: Value) -> Value {
+    let request = json!({ "id": "test", "method": method, "params": params });
+    let (status, _headers, body) = send(state, rpc_request(request.to_string())).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    body["result"].clone()
+}
+
+async fn poll_feed(state: &AppState, expected: usize) -> Vec<Value> {
+    let mut runs = Vec::new();
+    for _ in 0..80 {
+        let result = rpc_json(state, "tasks.runFeed", json!({ "limit": 50 })).await;
+        runs = result["runs"].as_array().cloned().unwrap_or_default();
+        if runs.len() >= expected {
+            return runs;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    runs
 }
 
 #[tokio::test]
@@ -724,7 +759,7 @@ async fn exposes_pair_specific_parameter_definitions() {
         .iter()
         .find(|definition| definition["name"] == "dataBits")
         .expect("dataBits definition");
-    assert_eq!(data_bits["const"], false);
+    assert!(data_bits.get("const").is_none());
     assert!(
         params
             .iter()
@@ -1262,7 +1297,7 @@ async fn task_crud_fire_and_history_round_trip() {
     let (status, _headers, body) = send(
         &state,
         rpc_request(
-            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"test-task","name":"Test task"}}}"#,
+            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"test-task","name":"Test task","history":{"maxRows":1000,"maxSize":"100 KiB"}}}}"#,
         ),
     )
     .await;
@@ -1270,6 +1305,17 @@ async fn task_crud_fire_and_history_round_trip() {
     let body = body_json(&body);
     assert!(body["error"].is_null(), "{body}");
     assert_eq!(body["result"]["task"]["task"]["id"], "test-task");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"1b","method":"tasks.get","params":{"taskId":"test-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(body["result"]["task"]["task"]["id"], "test-task");
+    assert!(body["result"]["task"].get("run").is_none());
 
     let (status, _headers, body) = send(
         &state,
@@ -1308,7 +1354,7 @@ async fn task_crud_fire_and_history_round_trip() {
     let (status, _headers, body) = send(
         &state,
         rpc_request(format!(
-            r#"{{"id":"4","method":"tasks.get","params":{{"taskId":"test-task","runId":"{run_id}"}}}}"#
+            r#"{{"id":"4","method":"tasks.getRun","params":{{"taskId":"test-task","runId":"{run_id}"}}}}"#
         )),
     )
     .await;
@@ -1350,6 +1396,72 @@ async fn task_crud_fire_and_history_round_trip() {
 }
 
 #[tokio::test]
+async fn task_start_delay_is_applied_and_recorded() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"delayed-task","name":"Delayed","delay":"150ms","history":{"maxRows":1000,"maxSize":"100 KiB"}}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let fired_at = Instant::now();
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"tasks.fire","params":{"taskId":"delayed-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    let run_id = body["result"]["runId"].as_str().unwrap().to_string();
+
+    let mut run = Value::Null;
+    for _ in 0..80 {
+        let (status, _headers, body) = send(
+            &state,
+            rpc_request(
+                json!({
+                    "id": "3",
+                    "method": "tasks.getRun",
+                    "params": {"taskId": "delayed-task", "runId": run_id.clone()}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        if body["error"].is_null() {
+            run = body["result"]["run"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(fired_at.elapsed() >= Duration::from_millis(120), "{run}");
+    assert_eq!(run["summary"]["outcome"], "succeeded", "{run}");
+    assert!(
+        run["actions"].as_array().is_some_and(Vec::is_empty),
+        "{run}"
+    );
+
+    let started_at =
+        chrono::DateTime::parse_from_rfc3339(run["summary"]["startedAt"].as_str().unwrap())
+            .unwrap();
+    let delayed_until =
+        chrono::DateTime::parse_from_rfc3339(run["summary"]["delayedUntil"].as_str().unwrap())
+            .unwrap();
+    let finished_at =
+        chrono::DateTime::parse_from_rfc3339(run["summary"]["finishedAt"].as_str().unwrap())
+            .unwrap();
+    assert!(delayed_until - started_at >= chrono::TimeDelta::milliseconds(145));
+    assert!(finished_at >= delayed_until);
+}
+
+#[tokio::test]
 async fn http_hook_starts_a_task_and_checks_the_secret() {
     let (state, _cancel) = app(Config::default());
     let task = hodeco_contract::domain::TaskDefinition {
@@ -1364,8 +1476,11 @@ async fn http_hook_starts_a_task_and_checks_the_secret() {
         )],
         ..Default::default()
     };
-    let mut snapshot = state.automation.snapshot();
-    snapshot.tasks.insert(task.id.clone(), task);
+    let snapshot = {
+        let mut snapshot = (*state.automation.snapshot()).clone();
+        snapshot.tasks.insert(task.id.clone(), task);
+        Arc::new(snapshot)
+    };
     state.automation.replace_snapshot(snapshot);
 
     let request = Request::builder()
@@ -1409,7 +1524,7 @@ async fn schedule_crud_and_preview_round_trip() {
     let (status, _headers, body) = send(
         &state,
         rpc_request(
-            r#"{"id":"1","method":"schedules.add","params":{"schedule":{"id":"morning","name":"Morning","timezone":"UTC","on":{"at":"09:00"}}}}"#,
+            r#"{"id":"1","method":"schedules.add","params":{"schedule":{"id":"morning","name":"Morning","timezone":"UTC","at":"09:00"}}}"#,
         ),
     )
     .await;
@@ -1430,7 +1545,7 @@ async fn schedule_crud_and_preview_round_trip() {
     let (status, _headers, body) = send(
         &state,
         rpc_request(
-            r#"{"id":"3","method":"schedules.preview","params":{"schedule":{"id":"morning","name":"Morning","timezone":"UTC","on":{"at":"09:00"}},"limit":3}}"#,
+            r#"{"id":"3","method":"schedules.preview","params":{"schedule":{"id":"morning","name":"Morning","timezone":"UTC","at":"09:00"},"limit":3}}"#,
         ),
     )
     .await;
@@ -1446,6 +1561,330 @@ async fn schedule_crud_and_preview_round_trip() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body_json(&body)["error"].is_null());
+}
+
+#[tokio::test]
+async fn schedule_defaults_round_trip_and_validate_timezone() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"schedules.setDefaults","params":{"timezone":"Europe/Berlin","location":[52.52,13.405,34]}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(body["result"]["timezone"], "Europe/Berlin");
+    assert_eq!(body["result"]["location"][2], 34.0);
+
+    let (_status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"schedules.list"}"#),
+    )
+    .await;
+    let body = body_json(&body);
+    assert_eq!(body["result"]["timezone"], "Europe/Berlin");
+    assert_eq!(body["result"]["location"][0], 52.52);
+
+    let (_status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"3","method":"schedules.setDefaults","params":{"timezone":"Mars/Olympus"}}"#,
+        ),
+    )
+    .await;
+    let body = body_json(&body);
+    assert_eq!(body["error"]["code"], "configInvalid");
+}
+
+#[tokio::test]
+async fn solar_preview_reports_events_for_a_local_date() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"schedules.solarPreview","params":{"location":[52.52,13.405,34],"date":"2026-06-21","timezone":"Europe/Berlin"}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(body["result"]["timezone"], "Europe/Berlin");
+    assert_eq!(body["result"]["date"], "2026-06-21");
+    let events = body["result"]["events"].as_array().unwrap();
+    assert_eq!(events.len(), 6);
+    assert_eq!(events[0]["event"], "sunrise");
+    assert!(
+        events.iter().all(|event| event["local"].is_string()),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_delayed_run_stops_it_and_reports_the_reason() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"delayed-cancel","name":"Delayed cancel","delay":"30s","history":{"maxRows":1000,"maxSize":"100 KiB"}}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"tasks.fire","params":{"taskId":"delayed-cancel"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    let run_id = body["result"]["runId"].as_str().unwrap().to_string();
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "3",
+                "method": "tasks.cancelRun",
+                "params": {"taskId": "delayed-cancel", "runId": run_id}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let mut run = Value::Null;
+    for _ in 0..80 {
+        let (status, _headers, body) = send(
+            &state,
+            rpc_request(
+                json!({
+                    "id": "4",
+                    "method": "tasks.getRun",
+                    "params": {"taskId": "delayed-cancel", "runId": run_id}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        if body["error"].is_null() {
+            run = body["result"]["run"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(run["summary"]["outcome"], "cancelled", "{run}");
+    assert!(
+        run["summary"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("cancelled by user during start delay")),
+        "{run}"
+    );
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "5",
+                "method": "tasks.cancelRun",
+                "params": {"taskId": "delayed-cancel", "runId": run_id}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(&body)["error"]["code"], "runNotFound", "{body:?}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "6",
+                "method": "tasks.cancelRun",
+                "params": {"taskId": "delayed-cancel", "runId": uuid::Uuid::new_v4()}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(&body)["error"]["code"], "runNotFound", "{body:?}");
+}
+
+#[tokio::test]
+async fn cancelling_a_running_command_kills_it_and_skips_remaining_actions() {
+    let (state, _cancel) = app(Config::default());
+    #[cfg(windows)]
+    let (executable, args) = ("ping", vec!["-n", "30", "127.0.0.1"]);
+    #[cfg(not(windows))]
+    let (executable, args) = ("sleep", vec!["30"]);
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "1",
+                "method": "commands.add",
+                "params": {"command": {
+                    "id": "slow-command",
+                    "name": "Slow",
+                    "executable": executable,
+                    "args": args,
+                    "timeout": "60s"
+                }}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "2",
+                "method": "tasks.add",
+                "params": {"task": {"id": "child-task", "name": "Child"}}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "2b",
+                "method": "tasks.add",
+                "params": {"task": {
+                    "id": "slow-task",
+                    "name": "Slow task",
+                    "failFast": false,
+                    "history": {"maxRows": 1000, "maxSize": "100 KiB"},
+                    "actions": [
+                        {"id": "slow", "command": "slow-command"},
+                        {"id": "unreachable", "command": "slow-command"}
+                    ],
+                    "next": [{"when": "always", "tasks": "child-task"}]
+                }}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let fired_at = Instant::now();
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"3","method":"tasks.fire","params":{"taskId":"slow-task"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    let run_id = body["result"]["runId"].as_str().unwrap().to_string();
+
+    let mut running_run_id = None;
+    for _ in 0..80 {
+        let (status, _headers, body) =
+            send(&state, rpc_request(r#"{"id":"4","method":"tasks.list"}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        running_run_id = body["result"]["tasks"]
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|task| task["task"]["id"] == "slow-task"))
+            .and_then(|task| task["runningRunId"].as_str())
+            .map(str::to_string);
+        if running_run_id.as_deref() == Some(run_id.as_str()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(running_run_id.as_deref(), Some(run_id.as_str()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "5",
+                "method": "tasks.cancelRun",
+                "params": {"taskId": "slow-task", "runId": run_id}
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let mut run = Value::Null;
+    for _ in 0..120 {
+        let (status, _headers, body) = send(
+            &state,
+            rpc_request(
+                json!({
+                    "id": "6",
+                    "method": "tasks.getRun",
+                    "params": {"taskId": "slow-task", "runId": run_id}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body = body_json(&body);
+        if body["error"].is_null() {
+            run = body["result"]["run"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(run["summary"]["outcome"], "cancelled", "{run}");
+    assert_eq!(run["summary"]["actionCount"], 1, "{run}");
+    assert_eq!(run["summary"]["nextCount"], 0, "{run}");
+    assert_eq!(run["nextTasks"], json!([]), "{run}");
+    assert_eq!(run["actions"][0]["status"], "failed", "{run}");
+    assert!(
+        run["actions"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("cancelled")),
+        "{run}"
+    );
+    assert!(
+        run["summary"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("cancelled by user")),
+        "{run}"
+    );
+    assert!(fired_at.elapsed() < Duration::from_secs(5), "{run}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"7","method":"tasks.history","params":{"taskIds":["child-task"]}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert_eq!(body["result"]["runs"], json!([]), "{body}");
 }
 
 #[tokio::test]
@@ -1477,6 +1916,7 @@ async fn task_command_action_captures_output_and_history() {
         "task": {
             "id": "echo-task",
             "name": "Echo task",
+            "history": {"maxRows": 1000, "maxSize": "100 KiB"},
             "actions": [{"id": "run", "command": "echo", "output": "capture"}]
         }
     });
@@ -1517,7 +1957,7 @@ async fn task_command_action_captures_output_and_history() {
                 rpc_request(
                     json!({
                         "id": "5",
-                        "method": "tasks.get",
+                        "method": "tasks.getRun",
                         "params": {"taskId": "echo-task", "runId": run_id}
                     })
                     .to_string(),
@@ -1535,9 +1975,12 @@ async fn task_command_action_captures_output_and_history() {
     }
     assert_eq!(run["summary"]["outcome"], "succeeded", "{run}");
     assert_eq!(run["actions"][0]["status"], "succeeded", "{run}");
+    let encoded = run["actions"][0]["command"]["stdout"]
+        .as_str()
+        .unwrap_or("");
+    let stdout = encoded.parse::<Base64Bytes>().expect("base64 stdout");
     assert!(
-        run["actions"][0]["command"]["stdout"]
-            .as_str()
+        std::str::from_utf8(stdout.as_slice())
             .unwrap_or("")
             .contains("hello"),
         "{run}"
@@ -1553,7 +1996,11 @@ async fn next_rule_starts_a_child_task_and_records_the_chain() {
             json!({
                 "id": "child",
                 "method": "tasks.add",
-                "params": {"task": {"id": "child-task", "name": "Child"}}
+                "params": {"task": {
+                    "id": "child-task",
+                    "name": "Child",
+                    "history": {"maxRows": 1000, "maxSize": "100 KiB"}
+                }}
             }),
         ),
         (
@@ -1564,6 +2011,7 @@ async fn next_rule_starts_a_child_task_and_records_the_chain() {
                 "params": {"task": {
                     "id": "parent-task",
                     "name": "Parent",
+                    "history": {"maxRows": 1000, "maxSize": "100 KiB"},
                     "next": [{"when": "always", "tasks": "child-task"}]
                 }}
             }),
@@ -1606,7 +2054,7 @@ async fn next_rule_starts_a_child_task_and_records_the_chain() {
                 rpc_request(
                     json!({
                         "id": "5",
-                        "method": "tasks.get",
+                        "method": "tasks.getRun",
                         "params": {"taskId": "parent-task", "runId": run_id}
                     })
                     .to_string(),
@@ -1637,6 +2085,41 @@ async fn next_rule_starts_a_child_task_and_records_the_chain() {
 }
 
 #[tokio::test]
+async fn schedule_preview_exposes_repeat_occurrences() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"schedules.preview","params":{"schedule":{"id":"repeat","name":"Repeat","timezone":"UTC","at":"09:00","repeatAt":["30m","1h"]},"limit":3}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    let occurrences = body["result"]["occurrences"].as_array().unwrap();
+    assert_eq!(occurrences.len(), 3, "{body}");
+    assert_eq!(occurrences[0]["kind"], "scheduled", "{body}");
+    assert_eq!(occurrences[1]["kind"], "repeat", "{body}");
+    assert_eq!(occurrences[1]["repeatIndex"], 1, "{body}");
+    assert!(
+        occurrences[1]["local"]
+            .as_str()
+            .unwrap()
+            .contains("09:30:00"),
+        "{body}"
+    );
+    assert_eq!(occurrences[2]["repeatIndex"], 2, "{body}");
+    assert!(
+        occurrences[2]["local"]
+            .as_str()
+            .unwrap()
+            .contains("10:00:00"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn scheduler_fires_a_second_interval_schedule() {
     let (state, _cancel) = app(Config::default());
     let from = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
@@ -1646,7 +2129,7 @@ async fn scheduler_fires_a_second_interval_schedule() {
             "name": "Tick",
             "timezone": "UTC",
             "from": from,
-            "on": {"every": "1s"}
+            "every": "1s"
         }
     });
     let (status, _headers, body) = send(
@@ -1661,6 +2144,7 @@ async fn scheduler_fires_a_second_interval_schedule() {
         "task": {
             "id": "tick-task",
             "name": "Tick task",
+            "history": {"maxRows": 1000, "maxSize": "100 KiB"},
             "triggers": [{"id": "tick-trigger", "type": "schedule", "schedule": "tick"}]
         }
     });
@@ -1740,4 +2224,334 @@ async fn task_history_can_be_disabled_with_max_rows_zero() {
         body_json(&body)["result"]["tasks"][0]["lastRun"].is_object(),
         "runtime last run should still be visible"
     );
+}
+
+#[tokio::test]
+async fn task_history_is_disabled_by_default() {
+    let (state, _cancel) = app(Config::default());
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"default-history","name":"Default history"}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null(), "{body:?}");
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"2","method":"tasks.get","params":{"taskId":"default-history"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert_eq!(
+        body["result"]["task"]["task"]["history"]["maxRows"], 0,
+        "{body}"
+    );
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"3","method":"tasks.fire","params":{"taskId":"default-history"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["error"].is_null());
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"4","method":"tasks.history","params":{"taskIds":["default-history"]}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(&body)["result"]["runs"], json!([]));
+
+    let (status, _headers, body) =
+        send(&state, rpc_request(r#"{"id":"5","method":"tasks.list"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_json(&body)["result"]["tasks"][0]["lastRun"].is_object());
+}
+
+#[tokio::test]
+async fn run_feed_pages_and_serves_recent_detail() {
+    let (state, _cancel) = app(Config::default());
+    for task_id in ["feed-a", "feed-b", "feed-c"] {
+        rpc_json(
+            &state,
+            "tasks.add",
+            json!({ "task": { "id": task_id, "name": task_id } }),
+        )
+        .await;
+        rpc_json(&state, "tasks.fire", json!({ "taskId": task_id })).await;
+    }
+
+    let runs = poll_feed(&state, 3).await;
+    assert_eq!(runs.len(), 3, "{runs:?}");
+
+    let newest = rpc_json(&state, "tasks.runFeed", json!({ "limit": 2 })).await;
+    let newest_runs = newest["runs"].as_array().unwrap();
+    assert_eq!(newest_runs.len(), 2, "{newest}");
+    assert_eq!(newest["feed"]["rows"], 3, "{newest}");
+    assert_eq!(newest["feed"]["maxRows"], 1000, "{newest}");
+    assert_eq!(newest["feed"]["maxSize"], 4 * 1024 * 1024, "{newest}");
+    let next = newest["next"].clone();
+    assert!(next.is_object(), "{newest}");
+
+    let older = rpc_json(
+        &state,
+        "tasks.runFeed",
+        json!({
+            "from": next["from"],
+            "until": next["until"],
+            "limit": 2
+        }),
+    )
+    .await;
+    assert_eq!(older["runs"].as_array().unwrap().len(), 1, "{older}");
+
+    let run = &newest_runs[0];
+    let task_id = run["taskId"].as_str().unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    let detail = rpc_json(
+        &state,
+        "tasks.getRun",
+        json!({ "taskId": task_id, "runId": run_id }),
+    )
+    .await;
+    assert_eq!(detail["run"]["summary"]["id"], run["id"], "{detail}");
+
+    rpc_json(&state, "tasks.purgeHistory", json!({ "taskId": task_id })).await;
+    let after = rpc_json(&state, "tasks.runFeed", json!({})).await;
+    assert_eq!(after["feed"]["rows"], 2, "{after}");
+    assert!(
+        after["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().all(|run| run["taskId"] != task_id)),
+        "{after}"
+    );
+}
+
+#[tokio::test]
+async fn task_history_paging_matches_messages_list() {
+    let (state, _cancel) = app(Config::default());
+    for task_id in ["page-a", "page-b", "page-c"] {
+        rpc_json(
+            &state,
+            "tasks.add",
+            json!({ "task": {
+                "id": task_id,
+                "name": task_id,
+                "history": { "maxRows": 1000, "maxSize": "100 KiB" }
+            }}),
+        )
+        .await;
+        rpc_json(&state, "tasks.fire", json!({ "taskId": task_id })).await;
+    }
+    poll_feed(&state, 3).await;
+
+    let mut history = Value::Null;
+    for _ in 0..80 {
+        history = rpc_json(&state, "tasks.history", json!({ "limit": 2 })).await;
+        if history["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.len() == 2)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        history["runs"].as_array().map(Vec::len),
+        Some(2),
+        "{history}"
+    );
+    let next = history["next"].clone();
+    assert!(next["from"].is_null(), "{history}");
+    assert!(next["until"].is_string(), "{history}");
+
+    let older = rpc_json(
+        &state,
+        "tasks.history",
+        json!({
+            "from": next["from"],
+            "until": next["until"],
+            "limit": 2
+        }),
+    )
+    .await;
+    assert_eq!(older["runs"].as_array().map(Vec::len), Some(1), "{older}");
+
+    let oldest = rpc_json(&state, "tasks.history", json!({ "order": 1, "limit": 2 })).await;
+    assert_eq!(oldest["runs"].as_array().map(Vec::len), Some(2), "{oldest}");
+    assert!(oldest["next"]["from"].is_string(), "{oldest}");
+    assert!(oldest["next"]["until"].is_null(), "{oldest}");
+}
+
+#[tokio::test]
+async fn run_feed_eviction_emits_dropped_event() {
+    let mut config = Config::default();
+    config.task_engine.run_feed.max_rows = 1;
+    let (state, _cancel) = app(config);
+    let mut events = state.events.subscribe();
+    for task_id in ["evict-a", "evict-b"] {
+        rpc_json(
+            &state,
+            "tasks.add",
+            json!({ "task": { "id": task_id, "name": task_id } }),
+        )
+        .await;
+        rpc_json(&state, "tasks.fire", json!({ "taskId": task_id })).await;
+        if task_id == "evict-a" {
+            poll_feed(&state, 1).await;
+        }
+    }
+
+    for _ in 0..80 {
+        let feed = rpc_json(&state, "tasks.runFeed", json!({})).await;
+        if feed["runs"]
+            .as_array()
+            .and_then(|runs| runs.first())
+            .is_some_and(|run| run["taskId"] == "evict-b")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let dropped = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let Ok(event) = events.recv().await else {
+                return Vec::new();
+            };
+            if let hodeco::events::Event::TaskRunDropped { run_ids } = event {
+                return run_ids;
+            }
+        }
+    })
+    .await
+    .expect("dropped event timeout");
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+}
+
+#[tokio::test]
+async fn only_persistent_history_survives_restart() {
+    let dir = std::env::temp_dir().join(format!("hodeco-http-restart-{}", uuid::Uuid::new_v4()));
+    let config = Config::default();
+    let (state, cancel) =
+        app_with_state_in(ConfigStore::new(None, config.clone()), None, dir.clone());
+    for (task_id, history) in [
+        ("memory-task", json!({ "maxRows": 0, "maxSize": "0 B" })),
+        (
+            "file-task",
+            json!({ "maxRows": 1000, "maxSize": "100 KiB" }),
+        ),
+    ] {
+        rpc_json(
+            &state,
+            "tasks.add",
+            json!({ "task": {
+                "id": task_id,
+                "name": task_id,
+                "history": history
+            }}),
+        )
+        .await;
+        rpc_json(&state, "tasks.fire", json!({ "taskId": task_id })).await;
+    }
+    let runs = poll_feed(&state, 2).await;
+    let memory_run = runs
+        .iter()
+        .find(|run| run["taskId"] == "memory-task")
+        .unwrap()["id"]
+        .clone();
+    let file_run = runs
+        .iter()
+        .find(|run| run["taskId"] == "file-task")
+        .unwrap()["id"]
+        .clone();
+
+    for _ in 0..80 {
+        let history = rpc_json(&state, "tasks.history", json!({ "taskIds": ["file-task"] })).await;
+        if history["runs"]
+            .as_array()
+            .is_some_and(|runs| !runs.is_empty())
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cancel.cancel();
+    drop(state);
+
+    let (state, _cancel) = app_with_state_in(ConfigStore::new(None, config), None, dir);
+    for (task_id, history) in [
+        ("memory-task", json!({ "maxRows": 0, "maxSize": "0 B" })),
+        (
+            "file-task",
+            json!({ "maxRows": 1000, "maxSize": "100 KiB" }),
+        ),
+    ] {
+        rpc_json(
+            &state,
+            "tasks.add",
+            json!({ "task": {
+                "id": task_id,
+                "name": task_id,
+                "history": history
+            }}),
+        )
+        .await;
+    }
+    let snapshot = state.automation.snapshot();
+    let history = snapshot
+        .tasks
+        .iter()
+        .map(|(task_id, task)| (task_id.clone(), task.history.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    state.history.load_with_history(&history).unwrap();
+
+    let feed = rpc_json(&state, "tasks.runFeed", json!({})).await;
+    assert_eq!(feed["runs"], json!([]), "{feed}");
+
+    let memory_history = rpc_json(
+        &state,
+        "tasks.history",
+        json!({ "taskIds": ["memory-task"] }),
+    )
+    .await;
+    assert_eq!(memory_history["runs"], json!([]), "{memory_history}");
+
+    let file_history = rpc_json(&state, "tasks.history", json!({ "taskIds": ["file-task"] })).await;
+    assert_eq!(
+        file_history["runs"].as_array().map(Vec::len),
+        Some(1),
+        "{file_history}"
+    );
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            json!({
+                "id": "memory-get",
+                "method": "tasks.getRun",
+                "params": { "taskId": "memory-task", "runId": memory_run }
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(&body)["error"]["code"], "runNotFound");
+
+    let detail = rpc_json(
+        &state,
+        "tasks.getRun",
+        json!({ "taskId": "file-task", "runId": file_run }),
+    )
+    .await;
+    assert_eq!(detail["run"]["summary"]["id"], file_run, "{detail}");
 }

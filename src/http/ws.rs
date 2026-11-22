@@ -12,8 +12,9 @@ use hodeco_contract::api::notifications::{
     ServiceStateChangedNotification,
 };
 use hodeco_contract::api::{ApiError, ErrorCode, Notification, Response};
-use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval_at};
@@ -30,7 +31,7 @@ pub async fn handle(socket: WebSocket, state: AppState) {
     let (sink, stream) = socket.split();
     let (outgoing, outgoing_rx) = mpsc::channel(OUTGOING_QUEUE_CAPACITY);
     let (close_tx, close_rx) = watch::channel::<Option<CloseFrame>>(None);
-    let last_pong = Arc::new(Mutex::new(Instant::now()));
+    let last_pong = Arc::new(AtomicU64::new(now_millis()));
     let cancel = CancellationToken::new();
 
     let mut writer = tokio::spawn(writer_loop(
@@ -58,7 +59,7 @@ async fn read_loop(
     state: &AppState,
     outgoing: &mpsc::Sender<String>,
     close_tx: &watch::Sender<Option<CloseFrame>>,
-    last_pong: &Mutex<Instant>,
+    last_pong: &AtomicU64,
     cancel: &CancellationToken,
 ) {
     let mut events = state.events.subscribe();
@@ -193,7 +194,7 @@ async fn writer_loop(
     mut sink: SplitSink<WebSocket, Message>,
     mut outgoing: mpsc::Receiver<String>,
     mut close: watch::Receiver<Option<CloseFrame>>,
-    last_pong: Arc<Mutex<Instant>>,
+    last_pong: Arc<AtomicU64>,
     cancel: CancellationToken,
 ) {
     let mut ping = interval_at(TokioInstant::now() + PING_INTERVAL, PING_INTERVAL);
@@ -231,7 +232,8 @@ async fn writer_loop(
                 }
             }
             _ = ping.tick() => {
-                let idle = last_pong.lock().elapsed() >= IDLE_TIMEOUT;
+                let idle = now_millis().saturating_sub(last_pong.load(Ordering::Relaxed))
+                    >= IDLE_TIMEOUT.as_millis() as u64;
                 if idle {
                     let _ = sink
                         .send(Message::Close(Some(CloseFrame {
@@ -281,8 +283,18 @@ fn request_close(close_tx: &watch::Sender<Option<CloseFrame>>, code: u16, reason
     });
 }
 
-fn touch(last_pong: &Mutex<Instant>) {
-    *last_pong.lock() = Instant::now();
+fn touch(last_pong: &AtomicU64) {
+    last_pong.store(now_millis(), Ordering::Relaxed);
+}
+
+fn now_millis() -> u64 {
+    static CLOCK: OnceLock<Instant> = OnceLock::new();
+    CLOCK
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn notification(event: Event) -> Notification {
@@ -305,6 +317,9 @@ fn notification(event: Event) -> Notification {
         }
         Event::TaskRunStarted(notification) => Notification::TaskRunStarted(notification),
         Event::TaskRunFinished(notification) => Notification::TaskRunFinished(notification),
+        Event::TaskRunDropped { run_ids } => Notification::TaskRunDropped(
+            hodeco_contract::api::notifications::TaskRunDroppedNotification { run_ids },
+        ),
     }
 }
 

@@ -57,13 +57,13 @@ pub fn serial_params() -> Vec<ParamDef> {
             SERIAL_PARAM_READ_TIMEOUT,
             ParamType::Duration,
             json!("0 s"),
-            "Read timeout; zero disables blocking reads",
+            "Maximum wait for a serial reply; zero uses the protocol default",
         ),
         ParamDef::with_default(
             SERIAL_PARAM_WRITE_TIMEOUT,
             ParamType::Duration,
             json!("0 s"),
-            "Write timeout; zero disables blocking writes",
+            "Maximum serial write duration; zero disables the write timeout",
         ),
     ]
 }

@@ -1,6 +1,6 @@
 use crate::domain::command::CommandDefinition;
 use crate::domain::schedule::{Location, ScheduleDefinition};
-use crate::domain::task::{TaskDefinition, TaskHistoryConfig};
+use crate::domain::task::TaskDefinition;
 use crate::utils::{FileMode, HumanDuration, Size};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -33,8 +33,6 @@ pub struct FileSetConfig {
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct TaskLogConfig {
     pub dir: PathBuf,
-    pub max_size: Size,
-    pub max_rows: u32,
     pub file_mode: FileMode,
     pub compaction_factor: f64,
     pub compact_interval: HumanDuration,
@@ -48,6 +46,15 @@ pub struct TaskEngineConfig {
     pub max_concurrent_runs: u32,
     pub max_chain_depth: u32,
     pub max_fan_out: u32,
+    pub run_feed: RunFeedConfig,
+}
+
+/// Bounded in-memory feed used by the Runs view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct RunFeedConfig {
+    pub max_rows: u32,
+    pub max_size: Size,
 }
 
 /// Services file shape (`services.yaml`).
@@ -82,12 +89,6 @@ pub struct CommandsFile {
     pub commands: Vec<CommandDefinition>,
 }
 
-/// Per-task history defaults used by the configuration UI.
-pub const DEFAULT_TASK_HISTORY: TaskHistoryConfig = TaskHistoryConfig {
-    max_size: Size::from_bytes(100 * 1024),
-    max_rows: 1_000,
-};
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct LogConfig {
@@ -116,6 +117,7 @@ pub struct HttpServerConfig {
     pub bind: String,
     pub port: u16,
     pub max_connections: u32,
+    /// 0 removes the practical connection limit.
     pub read_timeout: HumanDuration,
     pub read_header_timeout: HumanDuration,
     pub write_timeout: HumanDuration,
@@ -141,7 +143,7 @@ pub struct MessageLogConfig {
     pub max_size: Size,
     pub file: PathBuf,
     pub file_mode: FileMode,
-    /// Flush interval for the append log. Defaults to 60 seconds.
+    /// Flush interval for message-history writes. Defaults to 60 seconds.
     pub auto_persist: HumanDuration,
     pub compaction_factor: f64,
     pub compact_interval: HumanDuration,

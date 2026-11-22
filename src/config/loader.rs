@@ -425,7 +425,7 @@ mod tests {
             HumanDuration::from_std(Duration::from_secs(60))
         );
         assert_eq!(config.files.services, PathBuf::from("services.yaml"));
-        assert_eq!(config.task_log.max_rows, 1_000);
+        assert_eq!(config.task_log.compaction_factor, 2.0);
         assert_eq!(config.task_engine.max_concurrent_runs, 32);
     }
 
@@ -489,7 +489,7 @@ messageLog:
         .unwrap();
         std::fs::write(
             dir.join("schedules.yaml"),
-            "timezone: UTC\nschedules:\n  - id: morning\n    name: Morning\n    on:\n      at: \"09:00\"\n",
+            "timezone: UTC\nschedules:\n  - id: morning\n    name: Morning\n    at: \"09:00\"\n",
         )
         .unwrap();
         std::fs::write(

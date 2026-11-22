@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 pub const MESSAGE_ENTRY_OVERHEAD: u64 = 29;
 pub const MINIMUM_STORE_SIZE: u64 = 8 * 1024;
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 pub fn message_entry_length(payload_length: usize) -> u64 {
     MESSAGE_ENTRY_OVERHEAD + payload_length as u64

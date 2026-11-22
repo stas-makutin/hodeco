@@ -8,7 +8,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use hodeco_codec::zwave::{request as frame_request, response as frame_response};
 use hodeco_contract::api::notifications::{
-    DiscoveryNotification, MessageNotification, Notification,
+    DiscoveryNotification, MessageNotification, Notification, TaskRunFinishedNotification,
 };
 use hodeco_contract::api::payloads::{
     CommandsAddParams, CommandsAddResult, CommandsGetParams, CommandsGetResult, CommandsListResult,
@@ -17,15 +17,18 @@ use hodeco_contract::api::payloads::{
     DiscoveryStartParams, DiscoveryStartResult, Empty, EventTopic, EventsSubscribeParams,
     EventsUnsubscribeParams, MessageTimeRange, MessagesGetParams, MessagesGetResult,
     MessagesListParams, MessagesListResult, ProtocolInfoParams, ProtocolInfoResult,
-    ProtocolParamsParams, ProtocolParamsResult, ProtocolsListResult, SchedulesAddParams,
-    SchedulesAddResult, SchedulesGetParams, SchedulesGetResult, SchedulesListResult,
-    SchedulesPreviewParams, SchedulesPreviewResult, SchedulesRemoveParams, SchedulesUpdateParams,
-    SchedulesUpdateResult, ServerInfoResult, ServicesAddParams, ServicesAddResult,
-    ServicesAliasParams, ServicesAliasResult, ServicesListResult, ServicesParamsParams,
-    ServicesParamsResult, ServicesRemoveParams, ServicesSendParams, ServicesSendResult,
-    ServicesStatusParams, ServicesStatusResult, TaskStoreTotal, TasksAddParams, TasksAddResult,
-    TasksFireParams, TasksFireResult, TasksGetParams, TasksGetResult, TasksHistoryParams,
-    TasksHistoryResult, TasksListResult, TasksPurgeHistoryParams, TasksRemoveParams,
+    ProtocolParamsParams, ProtocolParamsResult, ProtocolsListResult, RunFeedTotals,
+    SchedulesAddParams, SchedulesAddResult, SchedulesGetParams, SchedulesGetResult,
+    SchedulesListResult, SchedulesPreviewParams, SchedulesPreviewResult, SchedulesRemoveParams,
+    SchedulesSetDefaultsParams, SchedulesSetDefaultsResult, SchedulesSolarPreviewParams,
+    SchedulesSolarPreviewResult, SchedulesUpdateParams, SchedulesUpdateResult, ServerInfoResult,
+    ServicesAddParams, ServicesAddResult, ServicesAliasParams, ServicesAliasResult,
+    ServicesListResult, ServicesParamsParams, ServicesParamsResult, ServicesRemoveParams,
+    ServicesSendParams, ServicesSendResult, ServicesStatusParams, ServicesStatusResult,
+    SolarPreviewEvent, TaskStoreTotal, TasksAddParams, TasksAddResult, TasksCancelRunParams,
+    TasksFireParams, TasksFireResult, TasksGetParams, TasksGetResult, TasksGetRunParams,
+    TasksGetRunResult, TasksHistoryParams, TasksHistoryResult, TasksListResult,
+    TasksPurgeHistoryParams, TasksRemoveParams, TasksRunFeedParams, TasksRunFeedResult,
     TasksUpdateParams, TasksUpdateResult, TransportsListResult,
 };
 use hodeco_contract::api::{ApiError, ErrorCode, Method, Request, Response};
@@ -34,19 +37,19 @@ use hodeco_contract::config::Config;
 use hodeco_contract::domain::{
     ActionKind, ActionOutcome, AtSpec, CommandAction, CommandDefinition, CommandInfo,
     DiscoveryEntry, DiscoveryInfo, DiscoveryState, Location, ManualRunTrigger, Message,
-    MessageAction, MessageActionPayload, MessageOrder, MessagePayload, MessageState, OneOrMany,
-    OutputMode, ParamDef, ParamType, ProtocolInfo, RunAction, RunChain, RunCommandAction,
-    RunOutcome, RunSummary, RunTrigger, ScheduleDefinition, ScheduleInfo, ScheduleOccurrence,
-    ScheduleRule, ScheduleTrigger, ServiceInfo, ServiceRef, ServiceState, ServiceStatus,
-    TaskAction, TaskDefinition, TaskInfo, TaskRun, TaskTrigger, TransportInfo, TriggerRef,
-    TriggerType,
+    MessageAction, MessageActionPayload, MessageOrder, MessageState, OneOrMany, OutputMode,
+    ParamDef, ParamType, ProtocolInfo, RunAction, RunChain, RunCommandAction, RunMessageAction,
+    RunOutcome, RunSummary, RunTrigger, ScheduleDefinition, ScheduleInfo, ScheduleTrigger,
+    ServiceInfo, ServiceRef, ServiceState, ServiceStatus, SolarEvent, TaskAction, TaskDefinition,
+    TaskInfo, TaskRun, TaskTrigger, TransportInfo, TriggerRef, TriggerType,
 };
 use hodeco_contract::utils::{Base64Bytes, HumanDuration, id_from_name};
+use hodeco_schedule::ScheduleContext;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
-const DEMO_PROTOCOL_VERSION: &str = "1.0";
+const DEMO_PROTOCOL_VERSION: &str = crate::model::EXPECTED_PROTOCOL_VERSION;
 const DEMO_GET_VERSION: [u8; 14] = [
     0x15, b'Z', b'-', b'W', b'a', b'v', b'e', b' ', b'4', b'.', b'0', b'5', 0x00, 0x01,
 ];
@@ -66,6 +69,8 @@ pub struct DemoServer {
     next_traffic: usize,
     tasks: Vec<TaskInfo>,
     schedules: Vec<ScheduleInfo>,
+    schedule_location: Option<Location>,
+    schedule_timezone: Option<String>,
     commands: Vec<CommandInfo>,
     runs: Vec<TaskRun>,
 }
@@ -283,60 +288,55 @@ impl DemoServer {
                 used_by: Vec::new(),
             },
         ];
-        let schedules = vec![
+        let schedule_timezone = Some("Europe/Berlin".to_string());
+        let schedule_location = Some(Location::new(52.52, 13.405, Some(34.0)));
+        let mut schedules = vec![
             ScheduleInfo {
                 schedule: ScheduleDefinition {
                     id: "before-sunset".to_string(),
                     name: "Before sunset".to_string(),
                     description: "Fifteen minutes before sunset on weekdays".to_string(),
-                    timezone: Some("Europe/Berlin".to_string()),
+                    timezone: schedule_timezone.clone(),
                     location: Some(Location::new(52.52, 13.405, Some(34.0))),
-                    on: Some(ScheduleRule {
-                        at: OneOrMany::One(AtSpec::Text("sunset - 15m".to_string())),
-                        ..ScheduleRule::default()
-                    }),
+                    at: OneOrMany::One(AtSpec::Text("sunset - 15m".to_string())),
+                    repeat_at: OneOrMany::Many(vec![
+                        HumanDuration::from_std(std::time::Duration::from_secs(30 * 60)),
+                        HumanDuration::from_std(std::time::Duration::from_secs(60 * 60)),
+                    ]),
                     ..ScheduleDefinition::default()
                 },
-                next: Some(ScheduleOccurrence {
-                    at: now + TimeDelta::hours(2),
-                    local: (now + TimeDelta::hours(2))
-                        .format("%Y-%m-%d %H:%M:%S UTC")
-                        .to_string(),
-                    kind: hodeco_contract::domain::OccurrenceKind::Scheduled,
-                    skipped: false,
-                    reason: None,
-                }),
+                next: None,
                 used_by: vec!["evening-lights".to_string()],
             },
             ScheduleInfo {
                 schedule: ScheduleDefinition {
                     id: "morning".to_string(),
                     name: "Morning".to_string(),
-                    on: Some(ScheduleRule {
-                        at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
-                        days: vec![
-                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Mon),
-                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Tue),
-                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Wed),
-                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Thu),
-                            hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Fri),
-                        ],
-                        ..ScheduleRule::default()
-                    }),
+                    at: OneOrMany::One(AtSpec::Text("09:00".to_string())),
+                    days: vec![
+                        hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Mon),
+                        hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Tue),
+                        hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Wed),
+                        hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Thu),
+                        hodeco_contract::domain::DaySpec::Weekday(chrono::Weekday::Fri),
+                    ],
                     ..ScheduleDefinition::default()
                 },
-                next: Some(ScheduleOccurrence {
-                    at: now + TimeDelta::hours(14),
-                    local: (now + TimeDelta::hours(14))
-                        .format("%Y-%m-%d %H:%M:%S UTC")
-                        .to_string(),
-                    kind: hodeco_contract::domain::OccurrenceKind::Scheduled,
-                    skipped: false,
-                    reason: None,
-                }),
+                next: None,
                 used_by: Vec::new(),
             },
         ];
+        let context = ScheduleContext {
+            default_location: schedule_location,
+            default_timezone: schedule_timezone
+                .as_deref()
+                .and_then(|timezone| timezone.parse().ok()),
+        };
+        for info in &mut schedules {
+            info.next = hodeco_schedule::next_occurrence(&info.schedule, context, now, true)
+                .ok()
+                .flatten();
+        }
         let evening = TaskDefinition {
             id: "evening-lights".to_string(),
             name: "Evening lights".to_string(),
@@ -375,9 +375,7 @@ impl DemoServer {
                         service: ServiceRef::Alias {
                             alias: "ZW".to_string(),
                         },
-                        payload: MessagePayload::Text {
-                            text: "Motion detected".to_string(),
-                        },
+                        payload: Base64Bytes::from(b"Motion detected".to_vec()),
                         ttl: None,
                     },
                 }),
@@ -401,6 +399,7 @@ impl DemoServer {
             task_id: evening.id.clone(),
             time: now - TimeDelta::minutes(30),
             started_at: now - TimeDelta::minutes(30),
+            delayed_until: None,
             finished_at: now - TimeDelta::minutes(30) + TimeDelta::milliseconds(420),
             trigger: TriggerRef {
                 id: "sunset".to_string(),
@@ -416,6 +415,7 @@ impl DemoServer {
             task_id: motion.id.clone(),
             time: now - TimeDelta::minutes(10),
             started_at: now - TimeDelta::minutes(10),
+            delayed_until: None,
             finished_at: now - TimeDelta::minutes(10) + TimeDelta::milliseconds(80),
             trigger: TriggerRef {
                 id: "motion".to_string(),
@@ -444,8 +444,7 @@ impl DemoServer {
                         executable: "meter-poll".to_string(),
                         args: vec!["--json".to_string(), "--once".to_string()],
                         exit_code: Some(0),
-                        stdout: Some("{\"power\": 412}".to_string()),
-                        stderr: None,
+                        stdout: Some(Base64Bytes::from(b"{\"power\": 412}".to_vec())),
                         output_truncated: false,
                     }),
                     message: None,
@@ -473,7 +472,6 @@ impl DemoServer {
                     transport: "serial".to_string(),
                     entry: "COM4".to_string(),
                     state: MessageState::Incoming,
-                    direction: hodeco_contract::domain::MessageDirection::Incoming,
                     payload: Some(Base64Bytes::from(vec![1, 2, 3])),
                 }),
                 actions: vec![RunAction {
@@ -482,7 +480,14 @@ impl DemoServer {
                     finished_at: now - TimeDelta::minutes(10),
                     status: ActionOutcome::Failed,
                     command: None,
-                    message: None,
+                    message: Some(RunMessageAction {
+                        service: ServiceRef::Alias {
+                            alias: "ZW".to_string(),
+                        },
+                        payload: Base64Bytes::from(vec![0x01, 0x03, 0x00]),
+                        message_id: None,
+                        ttl: None,
+                    }),
                     error: Some("service is not ready".to_string()),
                 }],
                 selector: None,
@@ -498,10 +503,12 @@ impl DemoServer {
                 }),
             },
         ];
+        let running_run_id = Uuid::new_v4();
         let tasks = vec![
             TaskInfo {
                 task: evening.clone(),
                 running: false,
+                running_run_id: None,
                 last_run: Some(now_summary),
                 next: Some(hodeco_contract::domain::NextFire {
                     at: now + TimeDelta::hours(2),
@@ -514,7 +521,8 @@ impl DemoServer {
             },
             TaskInfo {
                 task: motion,
-                running: false,
+                running: true,
+                running_run_id: Some(running_run_id),
                 last_run: None,
                 next: None,
                 suppressed_runs: 2,
@@ -523,6 +531,7 @@ impl DemoServer {
             TaskInfo {
                 task: winter,
                 running: false,
+                running_run_id: None,
                 last_run: None,
                 next: None,
                 suppressed_runs: 0,
@@ -545,6 +554,8 @@ impl DemoServer {
             next_traffic: 0,
             tasks,
             schedules,
+            schedule_location,
+            schedule_timezone,
             commands,
             runs,
         }
@@ -925,6 +936,18 @@ impl DemoServer {
             }),
             Method::TasksGet => {
                 let params: TasksGetParams = parse(&request.params)?;
+                let Some(task) = self
+                    .tasks
+                    .iter()
+                    .find(|info| info.task.id == params.task_id)
+                    .cloned()
+                else {
+                    return Err(ApiError::new(ErrorCode::TaskNotFound, "task not found"));
+                };
+                to_value(TasksGetResult { task })
+            }
+            Method::TasksGetRun => {
+                let params: TasksGetRunParams = parse(&request.params)?;
                 let Some(run) = self
                     .runs
                     .iter()
@@ -935,7 +958,7 @@ impl DemoServer {
                 else {
                     return Err(ApiError::new(ErrorCode::RunNotFound, "run not found"));
                 };
-                to_value(TasksGetResult { run })
+                to_value(TasksGetRunResult { run })
             }
             Method::TasksAdd => {
                 let params: TasksAddParams = parse(&request.params)?;
@@ -952,6 +975,7 @@ impl DemoServer {
                 let info = TaskInfo {
                     task,
                     running: false,
+                    running_run_id: None,
                     last_run: None,
                     next: None,
                     suppressed_runs: 0,
@@ -1001,6 +1025,7 @@ impl DemoServer {
                     task_id: task_id.clone(),
                     time: now,
                     started_at: now,
+                    delayed_until: None,
                     finished_at: now + TimeDelta::milliseconds(30),
                     trigger: TriggerRef {
                         id: "manual".to_string(),
@@ -1031,9 +1056,49 @@ impl DemoServer {
                 self.tasks[index].last_run = Some(summary);
                 to_value(TasksFireResult { run_id })
             }
+            Method::TasksCancelRun => {
+                let params: TasksCancelRunParams = parse(&request.params)?;
+                let Some(index) = self
+                    .tasks
+                    .iter()
+                    .position(|info| info.task.id == params.task_id)
+                else {
+                    return Err(ApiError::new(ErrorCode::TaskNotFound, "task not found"));
+                };
+                if !self.tasks[index].running
+                    || self.tasks[index].running_run_id != Some(params.run_id)
+                {
+                    return Err(ApiError::new(ErrorCode::RunNotFound, "run is not active"));
+                }
+                let now = self.next_time(Utc::now());
+                let summary = RunSummary {
+                    id: params.run_id,
+                    task_id: params.task_id.clone(),
+                    time: now,
+                    started_at: now - TimeDelta::seconds(1),
+                    delayed_until: None,
+                    finished_at: now,
+                    trigger: TriggerRef {
+                        id: "manual".to_string(),
+                        kind: TriggerType::Manual,
+                    },
+                    outcome: RunOutcome::Cancelled,
+                    action_count: 0,
+                    next_count: 0,
+                    error: Some("run cancelled by user".to_string()),
+                };
+                // The demo has no real execution to archive. Cancelling clears
+                // the active run instead of manufacturing a history row.
+                self.runs.retain(|run| run.summary.id != params.run_id);
+                self.tasks[index].running = false;
+                self.tasks[index].running_run_id = None;
+                notifications.push(notification(Notification::TaskRunFinished(
+                    TaskRunFinishedNotification { run: summary },
+                )));
+                Ok(json!({}))
+            }
             Method::TasksHistory => {
                 let params: TasksHistoryParams = parse(&request.params)?;
-                let limit = params.limit.unwrap_or(50).clamp(1, 500) as usize;
                 let mut runs: Vec<RunSummary> = self
                     .runs
                     .iter()
@@ -1045,15 +1110,15 @@ impl DemoServer {
                             && (params.types.is_empty() || params.types.contains(&run.trigger.kind))
                             && (params.outcomes.is_empty()
                                 || params.outcomes.contains(&run.outcome))
-                            && params.from.is_none_or(|from| run.time >= from)
-                            && params.until.is_none_or(|until| run.time < until)
                     })
                     .collect();
-                runs.sort_by_key(|run| run.time);
-                if params.order == MessageOrder::NewestFirst {
-                    runs.reverse();
-                }
-                runs.truncate(limit);
+                let (runs, next) = demo_run_page(
+                    &mut runs,
+                    params.from,
+                    params.until,
+                    params.order,
+                    params.limit,
+                );
                 let store_totals = self
                     .tasks
                     .iter()
@@ -1072,8 +1137,44 @@ impl DemoServer {
                     .collect();
                 to_value(TasksHistoryResult {
                     runs,
-                    next: None,
+                    next,
                     store_totals,
+                })
+            }
+            Method::TasksRunFeed => {
+                let params: TasksRunFeedParams = parse(&request.params)?;
+                let max_rows = self.config.task_engine.run_feed.max_rows.max(1) as usize;
+                let skip = self.runs.len().saturating_sub(max_rows);
+                let mut runs: Vec<RunSummary> = self
+                    .runs
+                    .iter()
+                    .skip(skip)
+                    .map(|run| run.summary.clone())
+                    .filter(|run| {
+                        (params.task_ids.is_empty() || params.task_ids.contains(&run.task_id))
+                            && (params.trigger_ids.is_empty()
+                                || params.trigger_ids.contains(&run.trigger.id))
+                            && (params.types.is_empty() || params.types.contains(&run.trigger.kind))
+                            && (params.outcomes.is_empty()
+                                || params.outcomes.contains(&run.outcome))
+                    })
+                    .collect();
+                let (runs, next) = demo_run_page(
+                    &mut runs,
+                    params.from,
+                    params.until,
+                    params.order,
+                    params.limit,
+                );
+                to_value(TasksRunFeedResult {
+                    runs,
+                    next,
+                    feed: RunFeedTotals {
+                        rows: self.runs.len().min(max_rows) as u64,
+                        bytes: 0,
+                        max_rows: max_rows as u32,
+                        max_size: self.config.task_engine.run_feed.max_size.as_bytes(),
+                    },
                 })
             }
             Method::TasksPurgeHistory => {
@@ -1091,8 +1192,9 @@ impl DemoServer {
             }
             Method::SchedulesList => to_value(SchedulesListResult {
                 schedules: self.schedules.clone(),
-                location: None,
-                timezone: Some("Europe/Berlin".to_string()),
+                location: self.schedule_location,
+                timezone: self.schedule_timezone.clone(),
+                system_timezone: Some("UTC".to_string()),
             }),
             Method::SchedulesGet => {
                 let params: SchedulesGetParams = parse(&request.params)?;
@@ -1162,20 +1264,56 @@ impl DemoServer {
                 let params: SchedulesPreviewParams = parse(&request.params)?;
                 let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
                 let now = self.next_time(Utc::now());
-                let occurrences = (0..limit)
-                    .map(|index| {
-                        let at = now + TimeDelta::hours(index as i64 + 1);
-                        ScheduleOccurrence {
-                            at,
-                            local: at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                            kind: hodeco_contract::domain::OccurrenceKind::Scheduled,
-                            skipped: false,
+                let context = ScheduleContext {
+                    default_location: self.schedule_location,
+                    default_timezone: self
+                        .schedule_timezone
+                        .as_deref()
+                        .and_then(|timezone| timezone.parse().ok()),
+                };
+                let occurrences =
+                    hodeco_schedule::preview(&params.schedule, context, now, limit, true)
+                        .map_err(|error| ApiError::new(ErrorCode::ConfigInvalid, error))?;
+                to_value(SchedulesPreviewResult { occurrences })
+            }
+            Method::SchedulesSetDefaults => {
+                let params: SchedulesSetDefaultsParams = parse(&request.params)?;
+                self.schedule_location = params.location;
+                self.schedule_timezone = params.timezone;
+                to_value(SchedulesSetDefaultsResult {
+                    location: self.schedule_location,
+                    timezone: self.schedule_timezone.clone(),
+                })
+            }
+            Method::SchedulesSolarPreview => {
+                let params: SchedulesSolarPreviewParams = parse(&request.params)?;
+                let events = SolarEvent::ALL
+                    .into_iter()
+                    .map(|event| {
+                        let local = match event {
+                            SolarEvent::Sunrise => "06:15:00",
+                            SolarEvent::Sunset => "18:45:00",
+                            SolarEvent::Dawn => "05:30:00",
+                            SolarEvent::Dusk => "19:30:00",
+                            SolarEvent::Noon => "12:30:00",
+                            SolarEvent::Nadir => "00:30:00",
+                        };
+                        SolarPreviewEvent {
+                            event,
+                            at: None,
+                            local: Some(local.to_string()),
                             reason: None,
                         }
                     })
                     .collect();
-                let _ = params.schedule;
-                to_value(SchedulesPreviewResult { occurrences })
+                to_value(SchedulesSolarPreviewResult {
+                    date: params.date,
+                    timezone: params
+                        .timezone
+                        .or_else(|| self.schedule_timezone.clone())
+                        .unwrap_or_else(|| "UTC".to_string()),
+                    events,
+                })
             }
             Method::CommandsList => to_value(CommandsListResult {
                 commands: self.commands.clone(),
@@ -1446,6 +1584,46 @@ fn parse<T: serde::de::DeserializeOwned>(params: &Value) -> Result<T, ApiError> 
 fn to_value<T: serde::Serialize>(value: T) -> Result<Value, ApiError> {
     serde_json::to_value(value)
         .map_err(|error| ApiError::new(ErrorCode::InternalError, error.to_string()))
+}
+
+fn demo_run_page(
+    runs: &mut Vec<RunSummary>,
+    from: Option<chrono::DateTime<Utc>>,
+    until: Option<chrono::DateTime<Utc>>,
+    order: MessageOrder,
+    limit: Option<u32>,
+) -> (Vec<RunSummary>, Option<MessageTimeRange>) {
+    if from.is_some_and(|from| until.is_some_and(|until| from >= until)) {
+        return (Vec::new(), None);
+    }
+    runs.retain(|run| {
+        from.is_none_or(|from| run.time >= from) && until.is_none_or(|until| run.time < until)
+    });
+    runs.sort_by_key(|run| run.time);
+    let limit = limit.unwrap_or(100).clamp(1, 10_000) as usize;
+    let has_more = runs.len() > limit;
+    let page: Vec<RunSummary> = match order {
+        MessageOrder::NewestFirst => runs.iter().rev().take(limit).cloned().collect(),
+        MessageOrder::OldestFirst => runs.iter().take(limit).cloned().collect(),
+    };
+    let next = if has_more {
+        page.last().map(|run| match order {
+            MessageOrder::NewestFirst => MessageTimeRange {
+                from,
+                until: Some(run.time),
+            },
+            MessageOrder::OldestFirst => MessageTimeRange {
+                from: run
+                    .time
+                    .checked_add_signed(chrono::TimeDelta::nanoseconds(1))
+                    .or(from),
+                until,
+            },
+        })
+    } else {
+        None
+    };
+    (page, next)
 }
 
 fn notification(notification: Notification) -> String {
@@ -1754,6 +1932,100 @@ mod tests {
         let responses = server.handle(&request("2", "messages.list", json!({"limit": 5})));
         let response = parse_response(&responses[0]);
         assert_eq!(response["result"]["messages"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn cancelling_a_demo_run_removes_it_without_history() {
+        let mut server = DemoServer::new();
+        let run_id = server
+            .tasks
+            .iter()
+            .find(|info| info.task.id == "porch-motion")
+            .and_then(|info| info.running_run_id)
+            .expect("fixture running run");
+        let history_before = server.runs.len();
+
+        let responses = server.handle(&request(
+            "1",
+            "tasks.cancelRun",
+            json!({"taskId": "porch-motion", "runId": run_id}),
+        ));
+        let response = parse_response(&responses[0]);
+        assert!(response["error"].is_null(), "{response}");
+        let task = server
+            .tasks
+            .iter()
+            .find(|info| info.task.id == "porch-motion")
+            .expect("motion task");
+        assert!(!task.running);
+        assert_eq!(task.running_run_id, None);
+        assert_eq!(server.runs.len(), history_before);
+
+        let response = parse_response(
+            &server.handle(&request(
+                "2",
+                "tasks.history",
+                json!({"taskIds": ["porch-motion"]}),
+            ))[0],
+        );
+        let runs = response["result"]["runs"].as_array().unwrap();
+        assert!(runs.iter().all(|run| {
+            run["id"] != serde_json::json!(run_id) && run["outcome"] != "cancelled"
+        }));
+    }
+
+    #[test]
+    fn run_feed_pages_like_messages_list() {
+        let mut server = DemoServer::new();
+        let response =
+            parse_response(&server.handle(&request("1", "tasks.runFeed", json!({"limit": 1})))[0]);
+        let runs = response["result"]["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        let next = response["result"]["next"].clone();
+        assert!(next.is_object(), "{response}");
+        let response = parse_response(
+            &server.handle(&request(
+                "2",
+                "tasks.runFeed",
+                json!({
+                    "from": next["from"],
+                    "until": next["until"],
+                    "limit": 1
+                }),
+            ))[0],
+        );
+        assert!(
+            response["result"]["runs"]
+                .as_array()
+                .is_some_and(|runs| !runs.is_empty()),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn schedule_preview_uses_the_draft_schedule() {
+        let mut server = DemoServer::new();
+        let responses = server.handle(&request(
+            "1",
+            "schedules.preview",
+            json!({
+                "schedule": {
+                    "id": "third-saturday",
+                    "name": "Third Saturday",
+                    "timezone": "UTC",
+                    "at": "12:00",
+                    "days": ["3sat"]
+                },
+                "limit": 3
+            }),
+        ));
+        let response = parse_response(&responses[0]);
+        let occurrences = response["result"]["occurrences"].as_array().unwrap();
+        assert_eq!(occurrences.len(), 3);
+        for occurrence in occurrences {
+            let local = occurrence["local"].as_str().unwrap();
+            assert!(local.ends_with("12:00:00 UTC"), "{local}");
+        }
     }
 
     #[test]

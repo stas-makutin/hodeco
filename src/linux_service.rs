@@ -8,7 +8,6 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -23,8 +22,6 @@ const SYSTEMD_RUNNING_STATE: &str = "active";
 const SYSTEMD_STOPPED_STATE: &str = "inactive";
 const SERVICE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
-static STOP_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 enum InitSystem {
@@ -48,46 +45,8 @@ pub fn run_as_service() -> bool {
         return false;
     }
 
-    let cancel_token = STOP_TOKEN.get_or_init(CancellationToken::new).clone();
-    install_signal_handlers(cancel_token.clone());
-    service_main::service_main(service_log, cancel_token);
+    service_main::service_main(service_log, CancellationToken::new());
     true
-}
-
-fn install_signal_handlers(cancel_token: CancellationToken) {
-    let _ = std::thread::Builder::new()
-        .name("hodeco-signal-handler".to_string())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(e) => {
-                    eprintln!("Failed to start signal handler: {}", e);
-                    return;
-                }
-            };
-
-            runtime.block_on(async move {
-                let mut terminate =
-                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    {
-                        Ok(signal) => signal,
-                        Err(e) => {
-                            eprintln!("Failed to install SIGTERM handler: {}", e);
-                            return;
-                        }
-                    };
-
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
-                }
-
-                cancel_token.cancel();
-            });
-        });
 }
 
 /// Writes initialization and fatal errors to stdout/stderr, which systemd

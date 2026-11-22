@@ -531,10 +531,23 @@ pub fn message_protocol<'a>(services: &'a [ServiceInfo], message: &'a Message) -
     service_protocol(services, &message.service)
 }
 
-/// The browser-side Parsed view is only available for protocols with a
-/// protocol-specific decoder.
+pub type MessageParser = fn(&[u8]) -> hodeco_codec::parsed::DecodeResult;
+
+/// Finds the protocol-specific decoder for a protocol name.
+pub fn parser_for_protocol(protocol: &str) -> Option<MessageParser> {
+    match protocol {
+        "zwave" => Some(zwave::decode),
+        _ => None,
+    }
+}
+
+pub fn message_parser(services: &[ServiceInfo], message: &Message) -> Option<MessageParser> {
+    message_protocol(services, message).and_then(parser_for_protocol)
+}
+
+/// The browser-side Parsed view is available for protocols with a decoder.
 pub fn message_has_parser(services: &[ServiceInfo], message: &Message) -> bool {
-    message_protocol(services, message) == Some("zwave")
+    message_parser(services, message).is_some()
 }
 
 /// Ordered catalog keys for a service: composite first, alias second. The
@@ -577,12 +590,12 @@ pub fn message_summary(services: &[ServiceInfo], message: &Message) -> String {
 
     // Protocol-specific summaries are opt-in. Any other protocol (including
     // one the UI has never seen before) is displayed as raw bytes only.
-    if message_protocol(services, message) != Some("zwave") {
+    let Some(parser) = message_parser(services, message) else {
         return format!("Raw payload · {} bytes", payload.len());
-    }
+    };
 
     let sample_len = payload.len().min(SUMMARY_DECODE_LIMIT);
-    let decoded = zwave::decode(&payload[..sample_len]);
+    let decoded = parser(&payload[..sample_len]);
     let mut summary = if decoded.frames.is_empty() {
         "Raw payload".to_string()
     } else {
@@ -600,12 +613,21 @@ pub fn message_summary(services: &[ServiceInfo], message: &Message) -> String {
 }
 
 pub fn message_preview(message: &Message, limit: usize) -> String {
-    let payload = message.payload.as_slice();
-    if payload.len() <= limit {
-        spaced_hex(payload)
+    hex_preview(message.payload.as_slice(), limit)
+}
+
+/// Formats raw bytes as lowercase-space hex, truncating beyond `limit` bytes.
+pub fn hex_preview(bytes: &[u8], limit: usize) -> String {
+    if bytes.len() <= limit {
+        spaced_hex(bytes)
     } else {
-        format!("{} …", spaced_hex(&payload[..limit]))
+        format!("{} …", spaced_hex(&bytes[..limit]))
     }
+}
+
+/// Pretty-prints a value as JSON with a safe fallback when serialization fails.
+pub fn pretty_json<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|error| format!("{{unprintable: {error}}}"))
 }
 
 /// Converts the UI-side Z-Wave filter spec into protocol-neutral payload
@@ -694,6 +716,20 @@ pub fn format_uptime(started_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
         format!("{hours}h {minutes}m")
     } else {
         format!("{minutes}m {seconds}s")
+    }
+}
+
+/// Formats a duration as milliseconds, seconds, `1m 20s`, or `2h 5m`.
+pub fn format_duration(duration: chrono::TimeDelta) -> String {
+    let seconds = duration.num_seconds().max(0);
+    if seconds < 1 {
+        format!("{} ms", duration.num_milliseconds().max(0))
+    } else if seconds < 60 {
+        format!("{seconds} s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
     }
 }
 

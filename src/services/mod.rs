@@ -32,8 +32,6 @@ pub enum ServiceError {
     UnknownTransport(String),
     #[error("transport '{transport}' is not supported for protocol '{protocol}'")]
     UnsupportedTransport { protocol: String, transport: String },
-    #[error("protocol error: {0}")]
-    Protocol(String),
     #[error("transport error: {0}")]
     Transport(String),
     #[error(transparent)]
@@ -42,6 +40,4 @@ pub enum ServiceError {
     DiscoveryNotFound,
     #[error("discovery service is busy")]
     DiscoveryBusy,
-    #[error("discovery is not supported for protocol '{protocol}' over transport '{transport}'")]
-    NoDiscovery { protocol: String, transport: String },
 }

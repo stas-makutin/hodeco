@@ -48,7 +48,7 @@ pub fn spaced_hex(bytes: &[u8]) -> String {
         if index > 0 {
             output.push(' ');
         }
-        output.push_str(&format!("{byte:02x}"));
+        push_hex_byte(&mut output, *byte);
     }
     output
 }
@@ -57,9 +57,16 @@ pub fn spaced_hex(bytes: &[u8]) -> String {
 pub fn compact_hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
-        output.push_str(&format!("{byte:02x}"));
+        push_hex_byte(&mut output, *byte);
     }
     output
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+fn push_hex_byte(output: &mut String, byte: u8) {
+    output.push(HEX[(byte >> 4) as usize] as char);
+    output.push(HEX[(byte & 0x0f) as usize] as char);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

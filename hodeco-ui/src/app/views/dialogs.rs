@@ -77,7 +77,7 @@ fn show_connect(app: &mut App, ctx: &Context, dialog: &mut ConnectDialog, keep_o
             ui.label(RichText::new("Gateway endpoint").strong());
             ui.add(
                 TextEdit::singleline(&mut dialog.endpoint)
-                    .hint_text("ws://127.0.0.1:8180/api/ws")
+                    .hint_text(crate::client::endpoint::DEFAULT_NATIVE_ENDPOINT)
                     .desired_width(f32::INFINITY)
                     .font(egui::TextStyle::Monospace),
             );
@@ -767,9 +767,8 @@ fn show_service_params(
             if dialog.pending {
                 ui.add(egui::Spinner::new().size(14.0));
             }
-            if let Ok(json) = serde_json::to_string_pretty(&dialog.service) {
-                widgets::copy_with_feedback(ui, &json, "Copy JSON");
-            }
+            let json = model::pretty_json(&dialog.service);
+            widgets::copy_with_feedback(ui, &json, "Copy JSON");
         });
         false
     });
@@ -944,9 +943,8 @@ fn show_message(app: &mut App, ctx: &Context, dialog: &mut MessageDialog, keep_o
                         &hodeco_codec::hex::spaced_hex(message.payload.as_slice()),
                         "Copy payload",
                     );
-                    if let Ok(json) = serde_json::to_string_pretty(message) {
-                        widgets::copy_with_feedback(ui, &json, "Copy JSON");
-                    }
+                    let json = model::pretty_json(message);
+                    widgets::copy_with_feedback(ui, &json, "Copy JSON");
                 });
             }
             None => {

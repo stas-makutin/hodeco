@@ -525,6 +525,7 @@ dependencies = [
  "chrono-tz",
  "futures-util",
  "hodeco-contract",
+ "hodeco-schedule",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -571,6 +572,16 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "hodeco-schedule"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hodeco-contract",
+ "iana-time-zone",
 ]
 
 [[package]]
@@ -1378,7 +1389,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

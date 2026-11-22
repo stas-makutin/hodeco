@@ -14,7 +14,12 @@ use web_time::Instant;
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const BOOTSTRAP_REQUESTS: usize = 8;
-const SUBSCRIBED_TOPICS: [&str; 4] = ["messages", "discovery", "services", "tasks"];
+const SUBSCRIBED_TOPICS: [hodeco_contract::api::payloads::EventTopic; 4] = [
+    hodeco_contract::api::payloads::EventTopic::Messages,
+    hodeco_contract::api::payloads::EventTopic::Discovery,
+    hodeco_contract::api::payloads::EventTopic::Services,
+    hodeco_contract::api::payloads::EventTopic::Tasks,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -106,14 +111,26 @@ pub enum RequestTag {
         task_id: String,
     },
     TaskFire,
+    TaskCancel {
+        task_id: String,
+        run_id: uuid::Uuid,
+    },
     TaskPurgeHistory {
         task_id: String,
     },
-    TaskHistory {
+    TaskRunFeed {
         generation: u64,
-        append: bool,
+        kind: RunPageKind,
+    },
+    TaskHistoryPage {
+        generation: u64,
+        kind: RunPageKind,
     },
     TaskRunGet {
+        task_id: String,
+        run_id: uuid::Uuid,
+    },
+    TaskHistoryRunGet {
         task_id: String,
         run_id: uuid::Uuid,
     },
@@ -124,6 +141,10 @@ pub enum RequestTag {
         schedule_id: String,
     },
     SchedulePreview {
+        generation: u64,
+    },
+    ScheduleSetDefaults,
+    SolarPreview {
         generation: u64,
     },
     CommandsList,
@@ -143,7 +164,67 @@ pub enum MessagePageKind {
     Newer,
 }
 
+/// The reason a `tasks.runFeed` page is being requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPageKind {
+    Refresh,
+    Older,
+    Newer,
+}
+
 impl RequestTag {
+    /// The RPC method this tag is associated with, used for diagnostics labels.
+    /// Like `RawConsole` (send path) and `Subscribe` (setup path), tags that do
+    /// not map to a single method are reported with a bespoke label instead.
+    pub fn method(&self) -> Method {
+        match self {
+            Self::Subscribe => Method::EventsSubscribe,
+            Self::ServerInfo => Method::ServerInfo,
+            Self::ProtocolList => Method::ProtocolsList,
+            Self::TransportList => Method::TransportsList,
+            Self::Config => Method::ConfigGet,
+            Self::ConfigUpdate => Method::ConfigUpdate,
+            Self::ServiceList => Method::ServicesList,
+            Self::MessagesPage { .. }
+            | Self::MessageSearch { .. }
+            | Self::MessageBatch { .. }
+            | Self::MessageAnchor { .. } => Method::MessagesList,
+            Self::MessageGet { .. } => Method::MessagesGet,
+            Self::ServiceAdd => Method::ServicesAdd,
+            Self::ServiceRemove => Method::ServicesRemove,
+            Self::ServiceAlias => Method::ServicesAlias,
+            Self::ServiceStatus { .. } => Method::ServicesStatus,
+            Self::ServiceParams { .. } => Method::ServicesParams,
+            Self::ServiceSend => Method::ServicesSend,
+            Self::DiscoveryStart => Method::DiscoveryStart,
+            Self::DiscoveryGet => Method::DiscoveryGet,
+            Self::DiscoveryCancel => Method::DiscoveryCancel,
+            Self::ProtocolParams { .. } => Method::ProtocolsParams,
+            Self::TasksList => Method::TasksList,
+            Self::TaskAdd => Method::TasksAdd,
+            Self::TaskUpdate => Method::TasksUpdate,
+            Self::TaskRemove { .. } => Method::TasksRemove,
+            Self::TaskFire => Method::TasksFire,
+            Self::TaskCancel { .. } => Method::TasksCancelRun,
+            Self::TaskPurgeHistory { .. } => Method::TasksPurgeHistory,
+            Self::TaskRunFeed { .. } => Method::TasksRunFeed,
+            Self::TaskHistoryPage { .. } => Method::TasksHistory,
+            Self::TaskRunGet { .. } | Self::TaskHistoryRunGet { .. } => Method::TasksGetRun,
+            Self::SchedulesList => Method::SchedulesList,
+            Self::ScheduleAdd => Method::SchedulesAdd,
+            Self::ScheduleUpdate => Method::SchedulesUpdate,
+            Self::ScheduleRemove { .. } => Method::SchedulesRemove,
+            Self::SchedulePreview { .. } => Method::SchedulesPreview,
+            Self::ScheduleSetDefaults => Method::SchedulesSetDefaults,
+            Self::SolarPreview { .. } => Method::SchedulesSolarPreview,
+            Self::CommandsList => Method::CommandsList,
+            Self::CommandAdd => Method::CommandsAdd,
+            Self::CommandUpdate => Method::CommandsUpdate,
+            Self::CommandRemove { .. } => Method::CommandsRemove,
+            Self::RawConsole => Method::ServerInfo,
+        }
+    }
+
     fn is_bootstrap(&self) -> bool {
         matches!(
             self,
@@ -174,10 +255,12 @@ impl RequestTag {
                 | Self::TaskUpdate
                 | Self::TaskRemove { .. }
                 | Self::TaskFire
+                | Self::TaskCancel { .. }
                 | Self::TaskPurgeHistory { .. }
                 | Self::ScheduleAdd
                 | Self::ScheduleUpdate
                 | Self::ScheduleRemove { .. }
+                | Self::ScheduleSetDefaults
                 | Self::CommandAdd
                 | Self::CommandUpdate
                 | Self::CommandRemove { .. }

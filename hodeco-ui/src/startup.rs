@@ -23,8 +23,9 @@ pub enum StartupAction {
     Help,
 }
 
-pub fn help_text() -> &'static str {
-    "\
+pub fn help_text() -> String {
+    format!(
+        "\
 hodeco-ui - admin and diagnostics frontend for the hodeco gateway
 
 USAGE:
@@ -32,7 +33,7 @@ USAGE:
 
 OPTIONS:
     --server <URL>    Gateway base URL or WebSocket URL
-                      (default: ws://127.0.0.1:8180/api/ws)
+                      (default: {DEFAULT_NATIVE_ENDPOINT})
     --demo            Run with bundled fixture data; no network connection
     -h, --help        Print this help
 
@@ -40,6 +41,7 @@ Web:
     ?server=<URL>     Override the gateway endpoint
     ?demo=1           Run with bundled fixture data
 "
+    )
 }
 
 pub fn from_native_args<I, S>(args: I) -> Result<StartupAction, String>

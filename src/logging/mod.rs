@@ -103,6 +103,9 @@ pub fn flush() {
 
     let (reply, wait) = sync_channel(1);
     if handle.sender.send(LogCommand::Flush(reply)).is_ok() {
+        // Do not hold the global lock while the writer thread flushes to disk;
+        // a slow disk would otherwise block every other logging caller.
+        drop(guard);
         let _ = wait.recv();
     }
 }
@@ -138,10 +141,9 @@ impl std::io::Write for ChannelWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let (reply, wait) = sync_channel(1);
-        if self.sender.send(LogCommand::Flush(reply)).is_ok() {
-            let _ = wait.recv();
-        }
+        // Records are handed to the writer immediately, so there is nothing
+        // buffered here to flush. Use `logging::flush` when a caller needs to
+        // wait for the writer thread.
         Ok(())
     }
 }

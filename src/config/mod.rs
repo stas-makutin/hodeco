@@ -22,5 +22,5 @@ pub use loader::{
 pub use store::{ConfigStore, ServicesStore};
 pub use validate::{
     restart_required, validate, validate_bundle, validate_command, validate_schedule,
-    validate_task, validate_task_id, validate_tasks,
+    validate_task, validate_task_id,
 };

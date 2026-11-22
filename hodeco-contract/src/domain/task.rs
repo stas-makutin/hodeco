@@ -16,7 +16,12 @@ use uuid::Uuid;
 pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_MAX_RUNS_PER_MINUTE: u32 = 60;
 pub const DEFAULT_HISTORY_SIZE: u64 = 100 * 1024;
-pub const DEFAULT_HISTORY_ROWS: u32 = 1_000;
+/// History is opt-in. Zero rows keeps completed runs out of the history file
+/// until a task explicitly enables history.
+pub const DEFAULT_HISTORY_ROWS: u32 = 0;
+
+/// Upper bound for a task's optional start delay and its jitter.
+pub const MAX_TASK_START_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn default_run_timeout() -> HumanDuration {
     HumanDuration::from_std(DEFAULT_RUN_TIMEOUT)
@@ -51,6 +56,10 @@ pub struct TaskDefinition {
     pub enabled: bool,
     pub fail_fast: bool,
     pub run_timeout: HumanDuration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<HumanDuration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<HumanDuration>,
     pub max_runs_per_minute: u32,
     pub history: TaskHistoryConfig,
     pub triggers: Vec<TaskTrigger>,
@@ -67,6 +76,8 @@ impl Default for TaskDefinition {
             enabled: true,
             fail_fast: true,
             run_timeout: default_run_timeout(),
+            delay: None,
+            jitter: None,
             max_runs_per_minute: default_max_runs_per_minute(),
             history: TaskHistoryConfig::default(),
             triggers: Vec::new(),
@@ -100,12 +111,6 @@ impl TaskDefinition {
             TaskTrigger::Message(trigger) => Some(trigger),
             _ => None,
         })
-    }
-
-    pub fn has_command_result(&self) -> bool {
-        self.next
-            .iter()
-            .any(|rule| rule.when == NextCondition::CommandResult)
     }
 }
 
@@ -141,8 +146,6 @@ pub enum TaskTrigger {
     Message(MessageTrigger),
     Schedule(ScheduleTrigger),
     Http(HttpTrigger),
-    Manual(ManualTrigger),
-    Task(TaskSourceTrigger),
 }
 
 impl TaskTrigger {
@@ -151,18 +154,6 @@ impl TaskTrigger {
             Self::Message(trigger) => &trigger.id,
             Self::Schedule(trigger) => &trigger.id,
             Self::Http(trigger) => &trigger.id,
-            Self::Manual(trigger) => &trigger.id,
-            Self::Task(trigger) => &trigger.id,
-        }
-    }
-
-    pub fn set_id(&mut self, value: String) {
-        match self {
-            Self::Message(trigger) => trigger.id = value,
-            Self::Schedule(trigger) => trigger.id = value,
-            Self::Http(trigger) => trigger.id = value,
-            Self::Manual(trigger) => trigger.id = value,
-            Self::Task(trigger) => trigger.id = value,
         }
     }
 
@@ -171,8 +162,6 @@ impl TaskTrigger {
             Self::Message(_) => TriggerType::Message,
             Self::Schedule(_) => TriggerType::Schedule,
             Self::Http(_) => TriggerType::Http,
-            Self::Manual(_) => TriggerType::Manual,
-            Self::Task(_) => TriggerType::Task,
         }
     }
 }
@@ -239,7 +228,7 @@ pub struct ScheduleTrigger {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpTrigger {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<HttpMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
@@ -269,18 +258,6 @@ impl HttpMethod {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ManualTrigger {
-    pub id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct TaskSourceTrigger {
-    pub id: String,
-}
-
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
@@ -308,7 +285,7 @@ impl OutputMode {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommandAction {
     pub command: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     #[serde(default)]
     pub output: OutputMode,
@@ -324,29 +301,9 @@ pub struct MessageAction {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MessageActionPayload {
     pub service: ServiceRef,
-    pub payload: MessagePayload,
+    pub payload: Base64Bytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<HumanDuration>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "source", rename_all = "camelCase")]
-pub enum MessagePayload {
-    Trigger,
-    Text { text: String },
-    Hex { hex: String },
-    Base64 { base64: String },
-}
-
-impl MessagePayload {
-    pub const fn source_label(&self) -> &'static str {
-        match self {
-            Self::Trigger => "Trigger payload",
-            Self::Text { .. } => "Text",
-            Self::Hex { .. } => "Hex",
-            Self::Base64 { .. } => "Base64",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -366,20 +323,6 @@ impl TaskAction {
         match &self.kind {
             ActionKind::Command(action) => Some(action),
             ActionKind::Message(_) => None,
-        }
-    }
-
-    pub fn message(&self) -> Option<&MessageAction> {
-        match &self.kind {
-            ActionKind::Message(action) => Some(action),
-            ActionKind::Command(_) => None,
-        }
-    }
-
-    pub const fn kind_label(&self) -> &'static str {
-        match &self.kind {
-            ActionKind::Command(_) => "Command",
-            ActionKind::Message(_) => "Message",
         }
     }
 }
@@ -538,11 +481,11 @@ pub struct NextRule {
     pub when: NextCondition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "OneOrMany::is_empty")]
     pub tasks: OneOrMany<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cases: BTreeMap<u8, OneOrMany<String>>,
 }
 
@@ -589,14 +532,26 @@ pub struct NextFire {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TaskInfo {
     pub task: TaskDefinition,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_run_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<RunSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<NextFire>,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub suppressed_runs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_suppressed_reason: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,6 +590,8 @@ pub struct RunSummary {
     /// Monotonic history timestamp used for paging.
     pub time: DateTime<Utc>,
     pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delayed_until: Option<DateTime<Utc>>,
     pub finished_at: DateTime<Utc>,
     pub trigger: TriggerRef,
     pub outcome: RunOutcome,
@@ -706,7 +663,6 @@ pub struct MessageRunTrigger {
     pub transport: String,
     pub entry: String,
     pub state: MessageState,
-    pub direction: MessageDirection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<Base64Bytes>,
 }
@@ -794,10 +750,9 @@ pub struct RunCommandAction {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// Captured stdout bytes; may contain arbitrary non-UTF-8 data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdout: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
+    pub stdout: Option<Base64Bytes>,
     #[serde(default)]
     pub output_truncated: bool,
 }
@@ -877,23 +832,20 @@ pub struct TaskRun {
     pub error: Option<RunError>,
 }
 
-impl TaskRun {
-    pub fn from_summary(summary: RunSummary, trigger: RunTrigger, chain: RunChain) -> Self {
-        Self {
-            summary,
-            trigger,
-            actions: Vec::new(),
-            selector: None,
-            next_tasks: Vec::new(),
-            chain,
-            error: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_runtime_only_triggers_in_task_definitions() {
+        for value in [
+            r#"{"type":"task","id":"from-parent"}"#,
+            r#"{"type":"manual","id":"manual"}"#,
+        ] {
+            let error = serde_json::from_str::<TaskTrigger>(value).unwrap_err();
+            assert!(error.to_string().contains("unknown variant"), "{error}");
+        }
+    }
 
     #[test]
     fn parses_task_yaml() {
@@ -903,7 +855,9 @@ name: Evening lights
 description: Turn on the porch lights
 enabled: true
 failFast: true
-runTimeout: 5m
+runTimeout: 10m
+delay: 5m
+jitter: 30s
 maxRunsPerMinute: 60
 history:
   maxSize: 100 KiB
@@ -929,7 +883,7 @@ actions:
   - id: notify
     message:
       service: { alias: ZW }
-      payload: { source: trigger }
+      payload: "AQID"
       ttl: 30s
 next:
   - when: allSucceeded
@@ -943,19 +897,33 @@ next:
 "#;
         let task: TaskDefinition = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(task.id, "evening-lights");
+        assert_eq!(
+            task.delay,
+            Some(HumanDuration::from_std(Duration::from_secs(5 * 60)))
+        );
+        assert_eq!(
+            task.jitter,
+            Some(HumanDuration::from_std(Duration::from_secs(30)))
+        );
         assert_eq!(task.triggers.len(), 3);
         assert_eq!(task.triggers[0].kind(), TriggerType::Message);
         assert_eq!(task.triggers[1].kind(), TriggerType::Schedule);
         assert_eq!(task.triggers[2].kind(), TriggerType::Http);
         assert_eq!(task.actions.len(), 2);
         assert_eq!(task.actions[0].command().unwrap().command, "lights-on");
-        assert_eq!(
-            task.actions[1].message().unwrap().message.payload,
-            MessagePayload::Trigger
-        );
+        let ActionKind::Message(action) = &task.actions[1].kind else {
+            panic!("second action must be a message action");
+        };
+        assert_eq!(action.message.payload, Base64Bytes::from(vec![1, 2, 3]));
         assert_eq!(task.next[0].when, NextCondition::AllSucceeded);
         assert_eq!(task.next[0].targets(), vec!["log-success"]);
         assert_eq!(task.next[1].case_targets(1), vec!["notify", "retry"]);
+    }
+
+    #[test]
+    fn task_history_is_disabled_by_default() {
+        let task: TaskDefinition = serde_yaml_ng::from_str("id: quiet\nname: Quiet\n").unwrap();
+        assert_eq!(task.history.max_rows, 0);
     }
 
     #[test]
@@ -976,9 +944,7 @@ next:
                         service: ServiceRef::Alias {
                             alias: "ZW".to_string(),
                         },
-                        payload: MessagePayload::Text {
-                            text: "hello".to_string(),
-                        },
+                        payload: Base64Bytes::from(b"hello".to_vec()),
                         ttl: Some(HumanDuration::from_std(Duration::from_secs(30))),
                     },
                 }),
@@ -995,7 +961,7 @@ next:
         assert!(none.is_err());
 
         let both: Result<TaskAction, _> = serde_yaml_ng::from_str(
-            "id: x\ncommand: meter\nmessage:\n  service: {alias: ZW}\n  payload: {source: trigger}\n",
+            "id: x\ncommand: meter\nmessage:\n  service: {alias: ZW}\n  payload: AQID\n",
         );
         assert!(both.is_err());
     }
@@ -1010,6 +976,7 @@ next:
             task_id: "task".to_string(),
             time: now,
             started_at: now,
+            delayed_until: Some(now + chrono::TimeDelta::seconds(30)),
             finished_at: now,
             trigger: TriggerRef {
                 id: "sunset".to_string(),
@@ -1023,6 +990,7 @@ next:
         let value = serde_json::to_value(&summary).unwrap();
         assert_eq!(value["trigger"]["type"], "schedule");
         assert_eq!(value["outcome"], "succeeded");
+        assert!(value.get("delayedUntil").is_some());
         assert!(value.get("error").is_none());
     }
 }

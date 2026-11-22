@@ -252,20 +252,22 @@ impl DiscoveryRegistry {
         let task_cancel = cancel.clone();
 
         let join = tokio::spawn(async move {
-            let result = backend
-                .discover(protocol, transport, parsed, task_cancel.clone())
-                .await;
-            let cancelled = task_cancel.is_cancelled();
-            let (state, entries) = if cancelled {
-                (DiscoveryState::Cancelled, Vec::new())
-            } else {
-                match result {
-                    Ok(entries) => (DiscoveryState::Finished, entries),
-                    Err(error) => {
-                        tracing::warn!(error = %error, "service discovery failed");
-                        (DiscoveryState::Failed, Vec::new())
-                    }
+            let result = tokio::select! {
+                _ = task_cancel.cancelled() => None,
+                result = backend.discover(protocol, transport, parsed, task_cancel.clone()) => {
+                    Some(result)
                 }
+            };
+            let (state, entries) = match result {
+                None => (DiscoveryState::Cancelled, Vec::new()),
+                Some(Ok(entries)) if !task_cancel.is_cancelled() => {
+                    (DiscoveryState::Finished, entries)
+                }
+                Some(Err(error)) if !task_cancel.is_cancelled() => {
+                    tracing::warn!(error = %error, "service discovery failed");
+                    (DiscoveryState::Failed, Vec::new())
+                }
+                Some(_) => (DiscoveryState::Cancelled, Vec::new()),
             };
 
             let mut inner = inner.lock();

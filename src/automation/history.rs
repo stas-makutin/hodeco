@@ -1,41 +1,38 @@
-//! Per-task append-only run history (TLOG).
+//! Per-task run history stored in per-task files.
 //!
-//! Each task owns `tasks/<id>.tlog`. The container is shared with the message
-//! log: magic, version, reserved bytes, compacted-at timestamp, then framed
-//! records. TLOG records contain a typed block list instead of JSON so run
-//! details stay compact.
+//! Run details are encoded compactly rather than as JSON. The storage format
+//! is private to this module.
 
 use chrono::{DateTime, TimeZone, Utc};
-use hodeco_contract::api::payloads::{
-    MessageTimeRange, TaskStoreTotal, TasksHistoryParams, TasksHistoryResult,
-};
+use hodeco_contract::api::payloads::{TaskStoreTotal, TasksHistoryParams, TasksHistoryResult};
 use hodeco_contract::config::TaskLogConfig;
 use hodeco_contract::domain::{
-    ActionOutcome, HttpMethod, MessageDirection, MessageState, NextCondition, NextTaskRecord,
-    RunAction, RunChain, RunCommandAction, RunError, RunMessageAction, RunOutcome, RunStage,
-    RunSummary, RunTrigger, SelectorOutcome, SelectorResult, ServiceRef, TaskRun, TriggerRef,
+    ActionOutcome, HttpMethod, MessageState, NextCondition, NextTaskRecord, RunAction, RunChain,
+    RunCommandAction, RunError, RunMessageAction, RunOutcome, RunStage, RunSummary, RunTrigger,
+    SelectorOutcome, SelectorResult, ServiceRef, TaskHistoryConfig, TaskRun, TriggerRef,
     TriggerType,
 };
 use hodeco_contract::utils::{Base64Bytes, FileMode};
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
-pub const MAGIC: [u8; 4] = *b"TLOG";
-pub const VERSION: u8 = 1;
+const MAGIC: [u8; 4] = *b"TLOG";
+const VERSION: u8 = 1;
 const RESERVED: [u8; 3] = [0; 3];
 const HEADER_LEN: usize = 4 + 1 + 3 + 8;
 const RECORD_OVERHEAD: usize = 1 + 4;
+const MAX_RECORD_LEN: usize = 64 * 1024 * 1024;
 
 const RUN_CORE: u16 = 0x0001;
 const CHAIN: u16 = 0x0002;
 const TRIGGER_MESSAGE: u16 = 0x0010;
 const TRIGGER_SCHEDULE: u16 = 0x0011;
 const TRIGGER_HTTP: u16 = 0x0012;
-const TRIGGER_WEBSOCKET: u16 = 0x0013;
 const TRIGGER_TASK: u16 = 0x0014;
 const TRIGGER_MANUAL: u16 = 0x0015;
 const ACTION_COMMAND: u16 = 0x0030;
@@ -62,31 +59,31 @@ pub struct HistoryLoadReport {
     pub corrupt: Vec<(PathBuf, String)>,
 }
 
+fn blocking_error(error: tokio::task::JoinError) -> HistoryError {
+    HistoryError::Io(io::Error::other(format!(
+        "task history worker failed: {error}"
+    )))
+}
+
 pub struct HistoryStore {
     config: TaskLogConfig,
     root: PathBuf,
-    tasks: RwLock<BTreeMap<String, TaskHistory>>,
-    mutation: tokio::sync::Mutex<()>,
+    tasks: RwLock<BTreeMap<String, TaskHistoryMeta>>,
+    limits: RwLock<BTreeMap<String, HistoryLimits>>,
+    mutation: tokio::sync::RwLock<()>,
 }
 
-#[derive(Debug, Default)]
-struct TaskHistory {
-    runs: Vec<TaskRun>,
+#[derive(Debug, Default, Clone)]
+struct TaskHistoryMeta {
+    rows: u64,
     bytes: u64,
+    last: Option<RunSummary>,
 }
 
-impl TaskHistory {
-    fn encoded_size(run: &TaskRun) -> Result<u64, HistoryError> {
-        Ok(encode_run(run)?.len() as u64)
-    }
-
-    fn trim(&mut self, max_rows: u32) {
-        let max_rows = max_rows as usize;
-        if self.runs.len() > max_rows {
-            let excess = self.runs.len() - max_rows;
-            self.runs.drain(0..excess);
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HistoryLimits {
+    max_rows: u32,
+    max_size: u64,
 }
 
 impl HistoryStore {
@@ -95,19 +92,66 @@ impl HistoryStore {
             config,
             root,
             tasks: RwLock::new(BTreeMap::new()),
-            mutation: tokio::sync::Mutex::new(()),
+            limits: RwLock::new(BTreeMap::new()),
+            mutation: tokio::sync::RwLock::new(()),
         }
     }
 
-    pub fn config(&self) -> &TaskLogConfig {
-        &self.config
+    fn effective_limits(&self, config: &TaskHistoryConfig) -> HistoryLimits {
+        HistoryLimits {
+            max_rows: if config.max_rows == 0 {
+                u32::MAX
+            } else {
+                config.max_rows
+            },
+            max_size: if config.max_size.as_bytes() == 0 {
+                100 * 1024
+            } else {
+                config.max_size.as_bytes()
+            },
+        }
     }
 
-    /// Loads configured task files and removes orphan `.tlog` files.
+    fn limits_for(&self, task_id: &str) -> HistoryLimits {
+        self.limits
+            .read()
+            .get(task_id)
+            .copied()
+            .unwrap_or(HistoryLimits {
+                max_rows: u32::MAX,
+                max_size: 100 * 1024,
+            })
+    }
+
+    fn set_task_history(&self, task_id: &str, config: &TaskHistoryConfig) {
+        let limits = self.effective_limits(config);
+        let mut current = self.limits.write();
+        if current.get(task_id) != Some(&limits) {
+            current.insert(task_id.to_string(), limits);
+        }
+    }
+
+    /// Loads task file metadata with the default per-task history config.
+    #[cfg(test)]
     pub fn load(&self, task_ids: &BTreeSet<String>) -> Result<HistoryLoadReport, HistoryError> {
+        let history = task_ids
+            .iter()
+            .map(|task_id| (task_id.clone(), TaskHistoryConfig::default()))
+            .collect();
+        self.load_with_history(&history)
+    }
+
+    /// Loads task file metadata and removes orphan files. Run rows are decoded
+    /// only long enough to trim a file that exceeds its row limit. This performs
+    /// blocking file I/O; call it from a blocking worker at runtime.
+    pub fn load_with_history(
+        &self,
+        history: &BTreeMap<String, TaskHistoryConfig>,
+    ) -> Result<HistoryLoadReport, HistoryError> {
         fs::create_dir_all(&self.root)?;
         let mut report = HistoryLoadReport::default();
         let mut tasks = BTreeMap::new();
+        let mut limits = BTreeMap::new();
 
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -118,28 +162,36 @@ impl HistoryStore {
             let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if !task_ids.contains(stem) {
+            let Some(config) = history.get(stem) else {
                 fs::remove_file(&path)?;
                 report.orphans_removed.push(path);
                 continue;
-            }
+            };
+            let effective = self.effective_limits(config);
+            limits.insert(stem.to_string(), effective);
             match load_file(&path) {
-                Ok(runs) => {
-                    let mut history = TaskHistory::default();
-                    for run in runs {
-                        history.bytes += TaskHistory::encoded_size(&run)?;
-                        history.runs.push(run);
+                Ok(mut runs) => {
+                    let max_rows = effective.max_rows as usize;
+                    if runs.len() > max_rows {
+                        let excess = runs.len() - max_rows;
+                        runs.drain(0..excess);
+                        let encoded = encode_file(&runs)?;
+                        write_atomic(&path, &encoded, Some(self.config.file_mode))?;
                     }
-                    history.trim(self.config.max_rows);
-                    report.loaded += history.runs.len();
-                    tasks.insert(stem.to_string(), history);
+                    let meta = TaskHistoryMeta {
+                        rows: runs.len() as u64,
+                        bytes: fs::metadata(&path)?.len(),
+                        last: runs.last().map(|run| run.summary.clone()),
+                    };
+                    report.loaded += meta.rows as usize;
+                    tasks.insert(stem.to_string(), meta);
                 }
                 Err(error) => {
                     report.corrupt.push((path.clone(), error.to_string()));
                     match self.config.on_corrupt {
                         hodeco_contract::config::CorruptPolicy::Ignore => {
                             let _ = fs::remove_file(&path);
-                            tasks.insert(stem.to_string(), TaskHistory::default());
+                            tasks.insert(stem.to_string(), TaskHistoryMeta::default());
                         }
                         hodeco_contract::config::CorruptPolicy::Fail => return Err(error),
                     }
@@ -147,31 +199,41 @@ impl HistoryStore {
             }
         }
 
-        for task_id in task_ids {
+        for (task_id, config) in history {
             tasks.entry(task_id.clone()).or_default();
+            limits.insert(task_id.clone(), self.effective_limits(config));
         }
         *self.tasks.write() = tasks;
+        *self.limits.write() = limits;
         Ok(report)
     }
 
-    /// Appends a completed run, updates in-memory history, and compacts when a
-    /// size, row, or age threshold is crossed. Called from a blocking task by
-    /// the engine.
-    pub fn append(&self, run: TaskRun) -> Result<(), HistoryError> {
-        let record = encode_run(&run)?;
+    /// Appends an already encoded completed run and updates metadata. The run
+    /// itself is not retained in memory.
+    fn append(
+        &self,
+        run: Arc<TaskRun>,
+        record: Vec<u8>,
+        history: &TaskHistoryConfig,
+    ) -> Result<(), HistoryError> {
         let task_id = run.summary.task_id.clone();
+        self.set_task_history(&task_id, history);
         let path = self.root.join(format!("{task_id}.tlog"));
-        let overflow = {
-            let mut tasks = self.tasks.write();
-            let history = tasks.entry(task_id.clone()).or_default();
-            let overflow = history.runs.len() + 1 > self.config.max_rows as usize;
-            history.bytes += (record.len() + RECORD_OVERHEAD) as u64;
-            history.runs.push(run);
-            history.trim(self.config.max_rows);
-            overflow
-        };
         append_record(&path, TASK_RUN, &record)?;
-        if overflow {
+        // Query file metadata before taking the write lock so async readers are
+        // never blocked on a filesystem call.
+        let bytes = fs::metadata(&path).map(|value| value.len()).ok();
+        let rows = {
+            let mut tasks = self.tasks.write();
+            let meta = tasks.entry(task_id.clone()).or_default();
+            meta.rows = meta.rows.saturating_add(1);
+            if let Some(bytes) = bytes {
+                meta.bytes = bytes;
+            }
+            meta.last = Some(run.summary.clone());
+            meta.rows
+        };
+        if rows > self.limits_for(&task_id).max_rows as u64 {
             self.compact(&task_id)?;
         } else {
             self.maybe_compact(&task_id)?;
@@ -186,14 +248,14 @@ impl HistoryStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
             Err(error) => return Err(HistoryError::Io(error)),
         };
-        let threshold = (self.config.max_size.as_bytes() as f64
-            * self.config.compaction_factor.max(1.0)) as u64;
+        let limits = self.limits_for(task_id);
+        let threshold = (limits.max_size as f64 * self.config.compaction_factor.max(1.0)) as u64;
         let too_large = size > threshold;
         let too_many = self
             .tasks
             .read()
             .get(task_id)
-            .is_some_and(|history| history.runs.len() > self.config.max_rows as usize);
+            .is_some_and(|meta| meta.rows > limits.max_rows as u64);
         let stale = file_age_exceeds(&path, self.config.compact_interval.as_std());
         if too_large || too_many || stale {
             self.compact(task_id)?;
@@ -203,20 +265,18 @@ impl HistoryStore {
 
     fn compact(&self, task_id: &str) -> Result<(), HistoryError> {
         let path = self.root.join(format!("{task_id}.tlog"));
-        let runs = self
-            .tasks
-            .read()
-            .get(task_id)
-            .map(|history| history.runs.clone())
-            .unwrap_or_default();
+        let mut runs = load_file(&path)?;
+        let max_rows = self.limits_for(task_id).max_rows as usize;
+        if runs.len() > max_rows {
+            let excess = runs.len() - max_rows;
+            runs.drain(0..excess);
+        }
         let encoded = encode_file(&runs)?;
         write_atomic(&path, &encoded, Some(self.config.file_mode))?;
-        if let Some(history) = self.tasks.write().get_mut(task_id) {
-            history.bytes = runs
-                .iter()
-                .map(TaskHistory::encoded_size)
-                .sum::<Result<u64, _>>()
-                .unwrap_or(0);
+        if let Some(meta) = self.tasks.write().get_mut(task_id) {
+            meta.rows = runs.len() as u64;
+            meta.bytes = encoded.len() as u64;
+            meta.last = runs.last().map(|run| run.summary.clone());
         }
         Ok(())
     }
@@ -225,147 +285,145 @@ impl HistoryStore {
     /// blocking worker.
     pub async fn append_async(
         self: std::sync::Arc<Self>,
-        run: TaskRun,
+        run: Arc<TaskRun>,
+        record: Vec<u8>,
+        history: TaskHistoryConfig,
     ) -> Result<(), HistoryError> {
         let this = self.clone();
-        let _guard = self.mutation.lock().await;
-        tokio::task::spawn_blocking(move || this.append(run))
+        let _guard = self.mutation.write().await;
+        tokio::task::spawn_blocking(move || this.append(run, record, &history))
             .await
-            .map_err(|error| HistoryError::Io(io::Error::other(error.to_string())))?
+            .map_err(blocking_error)?
     }
 
-    pub fn get(&self, task_id: &str, run_id: Uuid) -> Option<TaskRun> {
-        self.tasks.read().get(task_id).and_then(|history| {
-            history
-                .runs
-                .iter()
-                .find(|run| run.summary.id == run_id)
-                .cloned()
-        })
+    pub async fn get(
+        self: &Arc<Self>,
+        task_id: &str,
+        run_id: Uuid,
+    ) -> Result<Option<TaskRun>, HistoryError> {
+        let _guard = self.mutation.read().await;
+        let this = self.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || this.get_blocking(&task_id, run_id))
+            .await
+            .map_err(blocking_error)?
+    }
+
+    fn get_blocking(&self, task_id: &str, run_id: Uuid) -> Result<Option<TaskRun>, HistoryError> {
+        if !self.tasks.read().contains_key(task_id) {
+            return Ok(None);
+        }
+        Ok(load_file(&self.root.join(format!("{task_id}.tlog")))?
+            .into_iter()
+            .find(|run| run.summary.id == run_id))
     }
 
     pub fn last_run(&self, task_id: &str) -> Option<RunSummary> {
         self.tasks
             .read()
             .get(task_id)
-            .and_then(|history| history.runs.last())
-            .map(|run| run.summary.clone())
+            .and_then(|meta| meta.last.clone())
     }
 
-    pub fn count_trigger_runs(&self, task_id: &str, trigger_id: &str) -> u64 {
-        self.tasks
-            .read()
-            .get(task_id)
-            .map(|history| {
-                history
-                    .runs
-                    .iter()
-                    .filter(|run| run.summary.trigger.id == trigger_id)
-                    .count() as u64
-            })
-            .unwrap_or(0)
+    pub async fn list(
+        self: &Arc<Self>,
+        params: &TasksHistoryParams,
+    ) -> Result<TasksHistoryResult, HistoryError> {
+        let _guard = self.mutation.read().await;
+        let this = self.clone();
+        let params = params.clone();
+        tokio::task::spawn_blocking(move || this.list_blocking(&params))
+            .await
+            .map_err(blocking_error)?
     }
 
-    pub fn list(&self, params: &TasksHistoryParams) -> TasksHistoryResult {
+    fn list_blocking(
+        &self,
+        params: &TasksHistoryParams,
+    ) -> Result<TasksHistoryResult, HistoryError> {
         let task_filter: BTreeSet<&str> = params.task_ids.iter().map(String::as_str).collect();
         let trigger_filter: BTreeSet<&str> =
             params.trigger_ids.iter().map(String::as_str).collect();
         let outcomes: BTreeSet<RunOutcome> = params.outcomes.iter().copied().collect();
         let types: BTreeSet<TriggerType> = params.types.iter().copied().collect();
 
+        let metadata: Vec<(String, TaskHistoryMeta)> = self
+            .tasks
+            .read()
+            .iter()
+            .map(|(task_id, meta)| (task_id.clone(), meta.clone()))
+            .collect();
+
         let mut selected: Vec<RunSummary> = Vec::new();
         let mut store_totals = Vec::new();
-        let tasks = self.tasks.read();
-        for (task_id, history) in tasks.iter() {
+        for (task_id, meta) in metadata {
             if !task_filter.is_empty() && !task_filter.contains(task_id.as_str()) {
                 continue;
             }
             store_totals.push(TaskStoreTotal {
                 task_id: task_id.clone(),
-                rows: history.runs.len() as u64,
-                bytes: history.bytes,
+                rows: meta.rows,
+                bytes: meta.bytes,
             });
-            for run in &history.runs {
-                let summary = &run.summary;
+            scan_summaries(&self.root.join(format!("{task_id}.tlog")), |summary| {
                 if !trigger_filter.is_empty()
                     && !trigger_filter.contains(summary.trigger.id.as_str())
                 {
-                    continue;
+                    return;
                 }
                 if !types.is_empty() && !types.contains(&summary.trigger.kind) {
-                    continue;
+                    return;
                 }
                 if !outcomes.is_empty() && !outcomes.contains(&summary.outcome) {
-                    continue;
+                    return;
                 }
-                if params.from.is_some_and(|from| summary.time < from) {
-                    continue;
-                }
-                if params.until.is_some_and(|until| summary.time >= until) {
-                    continue;
-                }
-                if let Some(next) = &params.next {
-                    if next.from.is_some_and(|from| summary.time < from) {
-                        continue;
-                    }
-                    if next.until.is_some_and(|until| summary.time >= until) {
-                        continue;
-                    }
-                }
-                selected.push(summary.clone());
-            }
+                selected.push(summary);
+            })?;
         }
-        drop(tasks);
 
-        selected.sort_by_key(|summary| summary.time);
-        let newest_first = params.order == hodeco_contract::domain::MessageOrder::NewestFirst;
-        if newest_first {
-            selected.reverse();
-        }
-        let limit = params.limit.unwrap_or(50).clamp(1, 500) as usize;
-        let page: Vec<_> = selected.iter().take(limit).cloned().collect();
-        let next = if selected.len() > limit {
-            let last = page.last().map(|summary| summary.time);
-            if let Some(last) = last {
-                if newest_first {
-                    Some(MessageTimeRange {
-                        from: None,
-                        until: Some(last),
-                    })
-                } else {
-                    Some(MessageTimeRange {
-                        from: Some(
-                            last.checked_add_signed(chrono::TimeDelta::nanoseconds(1))
-                                .unwrap_or(last),
-                        ),
-                        until: None,
-                    })
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        TasksHistoryResult {
-            runs: page,
+        let (runs, next) = super::run_list::page_runs(
+            selected,
+            params.from,
+            params.until,
+            params.order,
+            super::run_list::page_limit(params.limit),
+        );
+        Ok(TasksHistoryResult {
+            runs,
             next,
             store_totals,
-        }
+        })
     }
 
-    pub fn purge(&self, task_id: &str) -> Result<(), HistoryError> {
+    pub async fn purge(self: &Arc<Self>, task_id: &str) -> Result<(), HistoryError> {
+        let _guard = self.mutation.write().await;
+        let this = self.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || this.purge_blocking(&task_id))
+            .await
+            .map_err(blocking_error)?
+    }
+
+    fn purge_blocking(&self, task_id: &str) -> Result<(), HistoryError> {
         let path = self.root.join(format!("{task_id}.tlog"));
-        if let Some(history) = self.tasks.write().get_mut(task_id) {
-            history.runs.clear();
-            history.bytes = 0;
-        }
         let encoded = encode_file(&[])?;
-        write_atomic(&path, &encoded, Some(self.config.file_mode))
+        write_atomic(&path, &encoded, Some(self.config.file_mode))?;
+        self.tasks
+            .write()
+            .insert(task_id.to_string(), TaskHistoryMeta::default());
+        Ok(())
     }
 
-    pub fn remove_task(&self, task_id: &str) -> Result<(), HistoryError> {
+    pub async fn remove_task(self: &Arc<Self>, task_id: &str) -> Result<(), HistoryError> {
+        let _guard = self.mutation.write().await;
+        let this = self.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || this.remove_task_blocking(&task_id))
+            .await
+            .map_err(blocking_error)?
+    }
+
+    fn remove_task_blocking(&self, task_id: &str) -> Result<(), HistoryError> {
         let path = self.root.join(format!("{task_id}.tlog"));
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -373,19 +431,15 @@ impl HistoryStore {
             Err(error) => return Err(HistoryError::Io(error)),
         }
         self.tasks.write().remove(task_id);
+        self.limits.write().remove(task_id);
         Ok(())
-    }
-
-    pub fn task_ids(&self) -> BTreeSet<String> {
-        self.tasks.read().keys().cloned().collect()
     }
 
     pub fn latest_time(&self) -> Option<DateTime<Utc>> {
         self.tasks
             .read()
             .values()
-            .filter_map(|history| history.runs.last())
-            .map(|run| run.summary.time)
+            .filter_map(|meta| meta.last.as_ref().map(|run| run.time))
             .max()
     }
 }
@@ -402,16 +456,19 @@ fn file_age_exceeds(path: &Path, interval: std::time::Duration) -> bool {
 
 fn read_header(data: &[u8]) -> Result<(i64, usize), HistoryError> {
     if data.len() < HEADER_LEN {
-        return Err(HistoryError::Corrupt("header is truncated".to_string()));
+        return Err(HistoryError::Corrupt(
+            "the task history file is incomplete".to_string(),
+        ));
     }
     if data[..4] != MAGIC {
-        return Err(HistoryError::Corrupt("invalid magic".to_string()));
+        return Err(HistoryError::Corrupt(
+            "the task history file is not recognized".to_string(),
+        ));
     }
     if data[4] != VERSION {
-        return Err(HistoryError::Corrupt(format!(
-            "unsupported version {}",
-            data[4]
-        )));
+        return Err(HistoryError::Corrupt(
+            "the task history file uses an unsupported format".to_string(),
+        ));
     }
     let compacted_at = i64::from_le_bytes(data[8..16].try_into().unwrap());
     Ok((compacted_at, HEADER_LEN))
@@ -438,7 +495,11 @@ fn encode_file(runs: &[TaskRun]) -> Result<Vec<u8>, HistoryError> {
 }
 
 fn load_file(path: &Path) -> Result<Vec<TaskRun>, HistoryError> {
-    let data = fs::read(path)?;
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(HistoryError::Io(error)),
+    };
     let (_, mut offset) = read_header(&data)?;
     let mut runs = Vec::new();
     while offset < data.len() {
@@ -458,6 +519,74 @@ fn load_file(path: &Path) -> Result<Vec<TaskRun>, HistoryError> {
         }
     }
     Ok(runs)
+}
+
+fn scan_summaries(path: &Path, mut visit: impl FnMut(RunSummary)) -> Result<(), HistoryError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(HistoryError::Io(error)),
+    };
+    let mut reader = io::BufReader::new(file);
+    let mut header = [0u8; HEADER_LEN];
+    if let Err(error) = reader.read_exact(&mut header) {
+        return match error.kind() {
+            io::ErrorKind::UnexpectedEof => Err(HistoryError::Corrupt(
+                "the task history file is incomplete".to_string(),
+            )),
+            _ => Err(HistoryError::Io(error)),
+        };
+    }
+    read_header(&header)?;
+
+    let mut overhead = [0u8; RECORD_OVERHEAD];
+    loop {
+        match reader.read_exact(&mut overhead) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(HistoryError::Io(error)),
+        }
+        let record_type = overhead[0];
+        let length = u32::from_le_bytes(overhead[1..5].try_into().unwrap()) as usize;
+        if length > MAX_RECORD_LEN {
+            return Err(HistoryError::Corrupt(
+                "a task history record is too large".to_string(),
+            ));
+        }
+        let mut body = vec![0u8; length];
+        match reader.read_exact(&mut body) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(HistoryError::Io(error)),
+        }
+        if record_type == TASK_RUN {
+            visit(decode_summary(&body)?);
+        }
+    }
+    Ok(())
+}
+
+fn decode_summary(body: &[u8]) -> Result<RunSummary, HistoryError> {
+    let mut reader = Reader::new(body);
+    let block_count = reader.u16()? as usize;
+    let mut summary = None;
+    for _ in 0..block_count {
+        let kind = reader.u16()?;
+        let length = reader.u32()? as usize;
+        let block = reader.bytes(length)?;
+        if kind == RUN_CORE {
+            if summary.is_some() {
+                return Err(HistoryError::Corrupt("duplicate RUN_CORE".to_string()));
+            }
+            summary = Some(decode_core(block)?);
+        }
+    }
+    if !reader.finished() {
+        return Err(HistoryError::Corrupt(
+            "unexpected data after the block list".to_string(),
+        ));
+    }
+    summary.ok_or_else(|| HistoryError::Corrupt("missing RUN_CORE".to_string()))
 }
 
 fn append_record(path: &Path, record_type: u8, body: &[u8]) -> Result<(), HistoryError> {
@@ -502,54 +631,18 @@ fn append_record(path: &Path, record_type: u8, body: &[u8]) -> Result<(), Histor
     Ok(())
 }
 
-#[cfg(unix)]
-fn apply_mode(file: &fs::File, mode: FileMode) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(mode.as_u32()))
-}
-
-#[cfg(not(unix))]
-fn apply_mode(_file: &fs::File, _mode: FileMode) -> io::Result<()> {
-    Ok(())
-}
-
 fn write_atomic(path: &Path, data: &[u8], mode: Option<FileMode>) -> Result<(), HistoryError> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| HistoryError::InvalidPath(path.to_path_buf()))?;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        file_name.to_string_lossy(),
-        Uuid::new_v4()
-    ));
-    let result = (|| -> Result<(), io::Error> {
-        let file = fs::File::create(&temporary)?;
-        if let Some(mode) = mode {
-            apply_mode(&file, mode)?;
-        }
-        let mut writer = io::BufWriter::new(file);
-        writer.write_all(data)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-        drop(writer);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    if path.file_name().is_none() {
+        return Err(HistoryError::InvalidPath(path.to_path_buf()));
     }
-    result.map_err(HistoryError::Io)
+    crate::utils::write_atomic(path, data, mode).map_err(HistoryError::Io)
 }
 
 // ---------------------------------------------------------------------------
 // Typed blocks
 // ---------------------------------------------------------------------------
 
-fn encode_run(run: &TaskRun) -> Result<Vec<u8>, HistoryError> {
+pub(crate) fn encode_run(run: &TaskRun) -> Result<Vec<u8>, HistoryError> {
     let mut blocks: Vec<(u16, Vec<u8>)> = Vec::new();
 
     let mut core = Writer::default();
@@ -570,6 +663,7 @@ fn encode_run(run: &TaskRun) -> Result<Vec<u8>, HistoryError> {
             .map_err(|_| HistoryError::Corrupt("too many next tasks".to_string()))?,
     );
     core.opt_string(run.summary.error.as_deref());
+    core.opt_time(run.summary.delayed_until);
     blocks.push((RUN_CORE, core.finish()));
 
     let mut chain = Writer::default();
@@ -589,7 +683,6 @@ fn encode_run(run: &TaskRun) -> Result<Vec<u8>, HistoryError> {
             block.string(&trigger.transport);
             block.string(&trigger.entry);
             block.u8(message_state_code(trigger.state));
-            block.u8(direction_code(trigger.direction));
             block.opt_bytes(trigger.payload.as_ref().map(Base64Bytes::as_slice));
             blocks.push((TRIGGER_MESSAGE, block.finish()));
         }
@@ -643,8 +736,10 @@ fn encode_run(run: &TaskRun) -> Result<Vec<u8>, HistoryError> {
                 block.string(&command.executable);
                 block.strings(&command.args);
                 block.opt_i32(command.exit_code);
-                block.opt_string(command.stdout.as_deref());
-                block.opt_string(command.stderr.as_deref());
+                block.opt_bytes(command.stdout.as_ref().map(Base64Bytes::as_slice));
+                // Retained as an empty legacy field so existing records
+                // keep the same block layout. New runs never capture stderr.
+                block.opt_bytes(None);
                 block.u8(u8::from(command.output_truncated));
                 block.opt_string(action.error.as_deref());
                 blocks.push((ACTION_COMMAND, block.finish()));
@@ -755,8 +850,7 @@ fn decode_run(body: &[u8]) -> Result<TaskRun, HistoryError> {
                 }
                 chain = Some(decode_chain(&block)?);
             }
-            TRIGGER_MESSAGE | TRIGGER_SCHEDULE | TRIGGER_HTTP | TRIGGER_WEBSOCKET
-            | TRIGGER_TASK | TRIGGER_MANUAL => {
+            TRIGGER_MESSAGE | TRIGGER_SCHEDULE | TRIGGER_HTTP | TRIGGER_TASK | TRIGGER_MANUAL => {
                 if trigger.is_some() {
                     return Err(HistoryError::Corrupt("duplicate trigger block".to_string()));
                 }
@@ -820,6 +914,7 @@ fn decode_core(body: &[u8]) -> Result<RunSummary, HistoryError> {
         action_count: reader.u16()? as u32,
         next_count: reader.u16()? as u32,
         error: reader.opt_string()?,
+        delayed_until: reader.opt_time_tail()?,
     })
 }
 
@@ -835,20 +930,30 @@ fn decode_chain(body: &[u8]) -> Result<RunChain, HistoryError> {
 fn decode_trigger(kind: u16, body: &[u8]) -> Result<RunTrigger, HistoryError> {
     let mut reader = Reader::new(body);
     match kind {
-        TRIGGER_MESSAGE => Ok(RunTrigger::Message(
-            hodeco_contract::domain::MessageRunTrigger {
-                id: reader.string()?,
-                message_id: reader.uuid()?,
-                time: reader.time()?,
-                service: reader.service_ref()?,
-                protocol: reader.string()?,
-                transport: reader.string()?,
-                entry: reader.string()?,
-                state: message_state_from_code(reader.u8()?)?,
-                direction: direction_from_code(reader.u8()?)?,
-                payload: reader.opt_bytes()?.map(Base64Bytes::from),
-            },
-        )),
+        TRIGGER_MESSAGE => {
+            let id = reader.string()?;
+            let message_id = reader.uuid()?;
+            let time = reader.time()?;
+            let service = reader.service_ref()?;
+            let protocol = reader.string()?;
+            let transport = reader.string()?;
+            let entry = reader.string()?;
+            let state = message_state_from_code(reader.u8()?)?;
+            let payload = reader.opt_bytes()?.map(Base64Bytes::from);
+            Ok(RunTrigger::Message(
+                hodeco_contract::domain::MessageRunTrigger {
+                    id,
+                    message_id,
+                    time,
+                    service,
+                    protocol,
+                    transport,
+                    entry,
+                    state,
+                    payload,
+                },
+            ))
+        }
         TRIGGER_SCHEDULE => Ok(RunTrigger::Schedule(
             hodeco_contract::domain::ScheduleRunTrigger {
                 id: reader.string()?,
@@ -894,23 +999,31 @@ fn decode_action(kind: u16, body: &[u8]) -> Result<RunAction, HistoryError> {
     let status = action_status_from_code(reader.u8()?)?;
     let action_kind = reader.u8()?;
     match (kind, action_kind) {
-        (ACTION_COMMAND, 0) => Ok(RunAction {
-            id,
-            started_at,
-            finished_at,
-            status,
-            command: Some(RunCommandAction {
-                command_id: reader.string()?,
-                executable: reader.string()?,
-                args: reader.strings()?,
-                exit_code: reader.opt_i32()?,
-                stdout: reader.opt_string()?,
-                stderr: reader.opt_string()?,
-                output_truncated: reader.u8()? != 0,
-            }),
-            message: None,
-            error: reader.opt_string()?,
-        }),
+        (ACTION_COMMAND, 0) => {
+            let command_id = reader.string()?;
+            let executable = reader.string()?;
+            let args = reader.strings()?;
+            let exit_code = reader.opt_i32()?;
+            let stdout = reader.opt_bytes()?.map(Base64Bytes::from);
+            let _legacy_stderr = reader.opt_bytes()?;
+            let output_truncated = reader.u8()? != 0;
+            Ok(RunAction {
+                id,
+                started_at,
+                finished_at,
+                status,
+                command: Some(RunCommandAction {
+                    command_id,
+                    executable,
+                    args,
+                    exit_code,
+                    stdout,
+                    output_truncated,
+                }),
+                message: None,
+                error: reader.opt_string()?,
+            })
+        }
         (ACTION_MESSAGE, 1) => Ok(RunAction {
             id,
             started_at,
@@ -1095,6 +1208,16 @@ impl Writer {
         self.data.extend_from_slice(&nanos.to_le_bytes());
     }
 
+    fn opt_time(&mut self, value: Option<DateTime<Utc>>) {
+        match value {
+            Some(value) => {
+                self.u8(1);
+                self.time(value);
+            }
+            None => self.u8(0),
+        }
+    }
+
     fn service_ref(&mut self, value: &ServiceRef) {
         match value {
             ServiceRef::Alias { alias } => {
@@ -1231,6 +1354,15 @@ impl<'a> Reader<'a> {
         Utc.timestamp_opt(seconds, sub)
             .single()
             .ok_or_else(|| HistoryError::Corrupt("timestamp is out of range".to_string()))
+    }
+
+    /// Reads the optional delay timestamp appended to new RUN_CORE blocks.
+    /// Earlier records end before it.
+    fn opt_time_tail(&mut self) -> Result<Option<DateTime<Utc>>, HistoryError> {
+        if self.finished() || self.u8()? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.time()?))
     }
 
     fn service_ref(&mut self) -> Result<ServiceRef, HistoryError> {
@@ -1393,14 +1525,6 @@ fn message_state_from_code(value: u8) -> Result<MessageState, HistoryError> {
     MessageState::try_from(value).map_err(HistoryError::Corrupt)
 }
 
-fn direction_code(value: MessageDirection) -> u8 {
-    value as u8
-}
-
-fn direction_from_code(value: u8) -> Result<MessageDirection, HistoryError> {
-    MessageDirection::try_from(value).map_err(HistoryError::Corrupt)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1412,6 +1536,7 @@ mod tests {
             task_id: task_id.to_string(),
             time: Utc.timestamp_opt(time, 0).unwrap(),
             started_at: Utc.timestamp_opt(time, 0).unwrap(),
+            delayed_until: None,
             finished_at: Utc.timestamp_opt(time + 1, 0).unwrap(),
             trigger: TriggerRef {
                 id: "manual".to_string(),
@@ -1443,8 +1568,7 @@ mod tests {
                     executable: "meter".to_string(),
                     args: vec!["--json".to_string()],
                     exit_code: Some(0),
-                    stdout: Some("{}".to_string()),
-                    stderr: None,
+                    stdout: Some(Base64Bytes::from(b"{}".to_vec())),
                     output_truncated: false,
                 }),
                 message: None,
@@ -1470,33 +1594,127 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_files_and_pages() {
+    fn round_trips_delayed_runs() {
+        let mut run = run("task", Uuid::new_v4(), 1_000);
+        run.summary.delayed_until = Some(Utc.timestamp_opt(1_000, 500_000_000).unwrap());
+        let encoded = encode_run(&run).unwrap();
+        let decoded = decode_run(&encoded).unwrap();
+        assert_eq!(decoded.summary.delayed_until, run.summary.delayed_until);
+    }
+
+    #[test]
+    fn decodes_legacy_run_core_without_delay() {
+        let mut core = Writer::default();
+        core.uuid(Uuid::nil());
+        core.string("task");
+        core.time(Utc.timestamp_opt(1_000, 0).unwrap());
+        core.time(Utc.timestamp_opt(1_000, 0).unwrap());
+        core.time(Utc.timestamp_opt(1_001, 0).unwrap());
+        core.string("manual");
+        core.u8(trigger_type_code(TriggerType::Manual));
+        core.u8(outcome_code(RunOutcome::Succeeded));
+        core.u16(0);
+        core.u16(0);
+        core.opt_string(None);
+        let summary = decode_core(&core.finish()).unwrap();
+        assert_eq!(summary.delayed_until, None);
+    }
+
+    #[test]
+    fn round_trips_message_trigger_without_direction() {
+        let mut run = run("task", Uuid::new_v4(), 1_000);
+        run.summary.trigger = TriggerRef {
+            id: "message".to_string(),
+            kind: TriggerType::Message,
+        };
+        run.trigger = RunTrigger::Message(hodeco_contract::domain::MessageRunTrigger {
+            id: "message".to_string(),
+            message_id: Uuid::new_v4(),
+            time: Utc.timestamp_opt(1_000, 0).unwrap(),
+            service: ServiceRef::Alias {
+                alias: "ZW".to_string(),
+            },
+            protocol: "zwave".to_string(),
+            transport: "serial".to_string(),
+            entry: "COM4".to_string(),
+            state: MessageState::Incoming,
+            payload: Some(Base64Bytes::from(vec![1, 2, 3])),
+        });
+        let encoded = encode_run(&run).unwrap();
+        let decoded = decode_run(&encoded).unwrap();
+        assert_eq!(decoded, run);
+    }
+
+    #[tokio::test]
+    async fn round_trips_files_and_pages() {
         let dir = std::env::temp_dir().join(format!("hodeco-tlog-test-{}", Uuid::new_v4()));
-        let store = HistoryStore::new(TaskLogConfig::default(), dir.clone());
+        let store = Arc::new(HistoryStore::new(TaskLogConfig::default(), dir.clone()));
         store.load(&BTreeSet::from(["task".to_string()])).unwrap();
+        let mut ids = Vec::new();
         for index in 0..3 {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            let run = run("task", id, 1_000 + index);
+            let record = encode_run(&run).unwrap();
             store
-                .append(run("task", Uuid::new_v4(), 1_000 + index))
+                .append(Arc::new(run), record, &TaskHistoryConfig::default())
                 .unwrap();
         }
-        let page = store.list(&hodeco_contract::api::payloads::TasksHistoryParams {
-            task_ids: vec!["task".to_string()],
-            order: hodeco_contract::domain::MessageOrder::OldestFirst,
-            limit: Some(2),
-            ..Default::default()
-        });
+        let page = store
+            .list(&hodeco_contract::api::payloads::TasksHistoryParams {
+                task_ids: vec!["task".to_string()],
+                order: hodeco_contract::domain::MessageOrder::OldestFirst,
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(page.runs.len(), 2);
         assert!(page.next.is_some());
-        assert_eq!(store.count_trigger_runs("task", "manual"), 3);
 
-        let reloaded = HistoryStore::new(TaskLogConfig::default(), dir.clone());
+        let reloaded = Arc::new(HistoryStore::new(TaskLogConfig::default(), dir.clone()));
         reloaded
             .load(&BTreeSet::from(["task".to_string()]))
             .unwrap();
-        assert_eq!(reloaded.list(&Default::default()).runs.len(), 3);
+        assert_eq!(
+            reloaded.list(&Default::default()).await.unwrap().runs.len(),
+            3
+        );
+        assert_eq!(
+            reloaded
+                .get("task", ids[1])
+                .await
+                .unwrap()
+                .unwrap()
+                .summary
+                .id,
+            ids[1]
+        );
+        assert_eq!(reloaded.last_run("task").unwrap().id, ids[2]);
 
-        reloaded.purge("task").unwrap();
-        assert_eq!(reloaded.list(&Default::default()).runs.len(), 0);
+        reloaded.purge("task").await.unwrap();
+        assert_eq!(
+            reloaded.list(&Default::default()).await.unwrap().runs.len(),
+            0
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn applies_per_task_row_limits() {
+        let dir = std::env::temp_dir().join(format!("hodeco-tlog-limit-{}", Uuid::new_v4()));
+        let store = Arc::new(HistoryStore::new(TaskLogConfig::default(), dir.clone()));
+        store.load(&BTreeSet::from(["task".to_string()])).unwrap();
+        let history = TaskHistoryConfig {
+            max_rows: 2,
+            ..TaskHistoryConfig::default()
+        };
+        for index in 0..3 {
+            let run = run("task", Uuid::new_v4(), 1_000 + index);
+            let record = encode_run(&run).unwrap();
+            store.append(Arc::new(run), record, &history).unwrap();
+        }
+        assert_eq!(store.list(&Default::default()).await.unwrap().runs.len(), 2);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1513,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v1_and_corrupt_files() {
+    fn rejects_corrupt_files() {
         let dir = std::env::temp_dir().join(format!("hodeco-tlog-corrupt-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("task.tlog"), b"NOPE").unwrap();

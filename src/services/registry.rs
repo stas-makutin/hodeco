@@ -22,7 +22,7 @@ struct ServiceEntry {
     overrides: ParamValues,
     /// Effective values after applying protocol/transport defaults.
     params: ParamValues,
-    handle: ZWaveHandle,
+    handle: Arc<ZWaveHandle>,
 }
 
 #[derive(Default)]
@@ -125,7 +125,7 @@ impl ServiceRegistry {
             return Err(ServiceError::AliasConflict);
         }
 
-        let handle = self.start_handle(&key, &parsed)?;
+        let handle = Arc::new(self.start_handle(&key, &parsed)?);
         let info = ServiceInfo {
             alias: alias.clone(),
             protocol: key.protocol.clone(),
@@ -232,7 +232,7 @@ impl ServiceRegistry {
         old_handle.stop().await;
 
         let handle = match self.start_handle(&key, &effective) {
-            Ok(handle) => handle,
+            Ok(handle) => Arc::new(handle),
             Err(error) => {
                 match self.start_handle(&key, &old_effective) {
                     Ok(handle) => {
@@ -246,7 +246,7 @@ impl ServiceRegistry {
                                 alias,
                                 overrides: old_overrides,
                                 params: old_effective,
-                                handle,
+                                handle: Arc::new(handle),
                             },
                         );
                     }
@@ -300,14 +300,17 @@ impl ServiceRegistry {
         payload: Vec<u8>,
         ttl: Option<Duration>,
     ) -> Result<Message, ServiceError> {
-        let inner = self.inner.lock();
-        let key = inner.resolve(service)?;
-        inner
-            .services
-            .get(&key)
-            .ok_or(ServiceError::NotFound)?
-            .handle
-            .send(payload, ttl)
+        let handle = {
+            let inner = self.inner.lock();
+            let key = inner.resolve(service)?;
+            inner
+                .services
+                .get(&key)
+                .ok_or(ServiceError::NotFound)?
+                .handle
+                .clone()
+        };
+        handle.send(payload, ttl)
     }
 
     pub fn list(&self) -> Vec<ServiceInfo> {
@@ -340,7 +343,7 @@ impl ServiceRegistry {
 
     pub async fn shutdown(&self) {
         self.cancel.cancel();
-        let handles: Vec<ZWaveHandle> = {
+        let handles: Vec<Arc<ZWaveHandle>> = {
             let mut inner = self.inner.lock();
             inner.aliases.clear();
             inner.order.clear();

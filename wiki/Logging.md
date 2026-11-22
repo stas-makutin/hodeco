@@ -35,8 +35,8 @@ log:
 Log records are queued to a dedicated writer thread, so file I/O, rotation, and
 archiving never block Tokio request or serial tasks. The queue is bounded: if
 the writer cannot keep up, new records are dropped rather than stalling the
-gateway. Message persistence, initial message-log loading, and configuration
-write-back also run on the blocking pool.
+gateway. Message-log appends, flushes, compaction, initial loading, task-history
+reads/writes, and configuration write-back run on the blocking pool too.
 
 File log lines use a single-letter level and one space before the message:
 
@@ -60,7 +60,7 @@ messageLog:
   maxSize: 10 MiB
   file: /var/lib/hodeco/messages.log
   fileMode: "0644"
-  autoPersist: 6 h
+  autoPersist: 60 s
   onCorrupt: ignore  # ignore or fail
 ```
 
@@ -76,10 +76,10 @@ move. Deleting it starts the gateway with an empty history.
 ## Service logs
 
 When running as a Windows service, operational logs go to the configured log
-file and the Event Log is used only for initialization and fatal failures. When
-running under systemd, initialization and fatal messages go to stdout/stderr,
-which systemd forwards to the journal; operational events still go to the
-application log file.
+file and the Event Log is used for startup/configuration failures and log-writer
+errors. When running under systemd, initialization and fatal messages go to
+stdout/stderr, which systemd forwards to the journal; operational events still go
+to the application log file.
 
 The systemd unit uses `LogsDirectory=hodeco` and `StateDirectory=hodeco`, so
 `/var/log/hodeco` and `/var/lib/hodeco` are created with the service user's
