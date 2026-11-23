@@ -64,6 +64,14 @@ jobs:
               echo "::error::Tag ${GITHUB_REF_NAME} does not match version ${version}"
               exit 1
             fi
+
+            if ! awk -v heading="## ${tag_version}" '
+              $0 == heading || index($0, heading " ") == 1 { found = 1 }
+              END { exit !found }
+            ' CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no section for ${tag_version}"
+              exit 1
+            fi
           fi
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -441,6 +449,8 @@ jobs:
       contents: write
       actions: read
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: hodeco-*
@@ -455,6 +465,24 @@ jobs:
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Extract release notes
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          awk -v heading="## ${version}" '
+            $0 == heading || index($0, heading " ") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for ${version}"
+            exit 1
+          fi
+          cat release-notes.md
+
       - name: Create release
         shell: bash
         env:
@@ -466,11 +494,11 @@ jobs:
           if [[ "$TAG" == *-* ]]; then
             gh release create "$TAG" artifacts/* \
               --title "hodeco $TAG" \
-              --generate-notes \
+              --notes-file release-notes.md \
               --prerelease
           else
             gh release create "$TAG" artifacts/* \
               --title "hodeco $TAG" \
-              --generate-notes \
+              --notes-file release-notes.md \
               --latest
           fi

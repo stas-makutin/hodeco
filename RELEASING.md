@@ -70,8 +70,11 @@ UI. It runs on pushes to `master` or `main`; update the branch filter in
 
 5. Watch the **Release** workflow. It validates the versions, runs formatting,
    clippy, tests, and the wasm contract check, builds the web UI once, and then
-   builds every target in parallel. The final job creates the GitHub release
-   and attaches all archives, packages, and `SHA256SUMS`.
+   builds every target in parallel. The final job takes the `CHANGELOG.md`
+   section whose heading matches the tag version (for example
+   `## 0.2.0 - 2026-11-21` for `v0.2.0`), uses it as the GitHub release notes,
+   and attaches all archives, packages, and `SHA256SUMS`. The workflow fails if
+   that section is missing; it does not fall back to generated commit notes.
 
 To build without publishing, run the **Release** workflow manually from the
 Actions tab (`workflow_dispatch`). A manual run on a branch keeps the artifacts
@@ -201,6 +204,9 @@ Get-FileHash .\hodeco-0.2.0-windows-x86_64.zip -Algorithm SHA256
 
 - **Tag mismatch:** the tag must be exactly `v` + the workspace version.
   Delete the tag (`git tag -d`, `git push --delete`) and retag.
+- **Missing release notes:** add a `## <version>` section to `CHANGELOG.md` and
+  retag. The version in the heading must match the tag without the `v` prefix;
+  the date and any following text after a space are allowed.
 - **Wiki clone fails:** create the first wiki page in the GitHub UI, confirm
   `WIKI_TOKEN` is set, and re-run the Wiki workflow.
 - **A release already exists:** delete the draft/release with
