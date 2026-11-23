@@ -96,6 +96,7 @@ you.
 | `x86_64-unknown-linux-musl` | `ubuntu-latest` | `.tar.gz` | — |
 | `aarch64-unknown-linux-musl` | `ubuntu-latest` | `.tar.gz` | — |
 | `armv7-unknown-linux-gnueabihf` | `ubuntu-latest` | `.tar.gz` | `.deb`, `.rpm` |
+| `arm-unknown-linux-musleabihf` | `ubuntu-latest` | `.tar.gz` | — |
 
 Portable archives are named `hodeco-<version>-<label>` and contain:
 
@@ -140,6 +141,11 @@ archives. The `armv7` package architecture is `armhf` for Debian and `armv7hl`
 for RPM. RPM
 dependencies use Fedora/RHEL names (`glibc`, `libgcc`); musl archives are the
 distro-independent fallback.
+
+The `linux-armv6` artifact (`arm-unknown-linux-musleabihf`) is the static build
+for Raspberry Pi 1, Zero, Zero W, and 32-bit Raspberry Pi OS. Those systems
+have an ARMv6 userland and cannot run the ARMv7 GNU build; `linux-armv7`
+requires an ARMv7 userland such as Debian or Ubuntu armhf.
 
 ## Installing release artifacts
 

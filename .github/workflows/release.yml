@@ -235,6 +235,15 @@ jobs:
             goarch: arm7
             debarch: armhf
             rpmarch: armv7hl
+          # ARMv6: Raspberry Pi 1/Zero and 32-bit Raspberry Pi OS. The GNU
+          # arm-linux-gnueabihf toolchain targets ARMv7, so use the
+          # self-contained ARMv6 musl target with rust-lld instead.
+          - target: arm-unknown-linux-musleabihf
+            os: ubuntu-latest
+            platform: linux
+            label: linux-armv6
+            toolchain: rust-lld
+            packages: false
     env:
       VERSION: ${{ needs.validate.outputs.version }}
       TARGET: ${{ matrix.target }}
@@ -283,6 +292,16 @@ jobs:
           fi
           echo "CARGO_TARGET_${target_upper}_LINKER=${linker}" >> "$GITHUB_ENV"
 
+      - name: Configure Rust LLD linker
+        if: matrix.toolchain == 'rust-lld'
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          linker="$(rustc --print sysroot)/lib/rustlib/${host}/bin/rust-lld"
+          target_upper="$(printf '%s' "$TARGET" | tr 'a-z-' 'A-Z_')"
+          echo "CARGO_TARGET_${target_upper}_LINKER=${linker}" >> "$GITHUB_ENV"
+
       - name: Install Zig and cargo-zigbuild
         if: matrix.toolchain == 'zig'
         shell: bash
@@ -323,6 +342,17 @@ jobs:
           else
             cargo build --release --locked --target "$TARGET" -p hodeco
           fi
+
+      - name: Verify ARMv6 static binary
+        if: matrix.target == 'arm-unknown-linux-musleabihf'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${TARGET}/release/hodeco"
+          file "$binary"
+          file "$binary" | grep -q 'statically linked'
+          readelf -A "$binary" | grep -q 'Tag_CPU_arch: v6'
+          readelf -A "$binary" | grep -q 'Tag_FP_arch: VFPv2'
 
       - name: Stage portable archive (Windows)
         if: matrix.platform == 'windows'

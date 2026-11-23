@@ -444,6 +444,7 @@ Tagged releases ship the backend and web UI together:
 | Windows x64 / ARM64 | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
 | Linux x64 / ARM64 / ARMv7 (glibc) | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf` |
 | Linux x64 / ARM64 (static) | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
+| Linux ARMv6 (static, Raspberry Pi 1/Zero and 32-bit Raspberry Pi OS) | `arm-unknown-linux-musleabihf` |
 
 Linux glibc targets also produce `.deb` and `.rpm` packages. Each release
 includes `SHA256SUMS` and generated release notes. See

@@ -11,7 +11,8 @@ maintainer process is documented in [`RELEASING.md`](../blob/HEAD/RELEASING.md).
 | Windows on ARM | `hodeco-<version>-windows-aarch64.zip` |
 | A normal Linux x64 machine | `linux-x86_64.tar.gz`, or the `amd64.deb` |
 | A 64-bit Raspberry Pi or ARM server | `linux-aarch64.tar.gz`, or the `arm64.deb` |
-| A 32-bit Raspberry Pi | `linux-armv7.tar.gz`, or the `armhf.deb` |
+| A Raspberry Pi 1 / Zero / 32-bit Raspberry Pi OS (ARMv6) | `linux-armv6.tar.gz` |
+| A 32-bit ARMv7 Linux (for example Debian or Ubuntu armhf) | `linux-armv7.tar.gz`, or the `armhf.deb` |
 | A minimal container or older distro | `linux-x86_64-musl.tar.gz` or `linux-aarch64-musl.tar.gz` |
 
 The `.tar.gz` files are portable archives. The `.deb`/`.rpm` files are
@@ -28,9 +29,15 @@ system-wide packages with a conventional install layout.
 | Linux x64 (static) | `x86_64-unknown-linux-musl` | `.tar.gz` | — |
 | Linux ARM64 (static) | `aarch64-unknown-linux-musl` | `.tar.gz` | — |
 | Linux ARMv7 (glibc) | `armv7-unknown-linux-gnueabihf` | `.tar.gz` | `.deb`, `.rpm` |
+| Linux ARMv6 (static) | `arm-unknown-linux-musleabihf` | `.tar.gz` | — |
 
 Musl builds are fully static and do not depend on the host glibc. They are
 useful for minimal containers and older distributions.
+
+The ARMv6 build is the right choice for Raspberry Pi 1, Zero, Zero W, and
+32-bit Raspberry Pi OS, whose userland is ARMv6. The ARMv7 build requires an
+ARMv7 userland (for example Debian or Ubuntu armhf) and will not run on those
+ARMv6 systems.
 
 ## Archive contents
 
@@ -131,9 +138,13 @@ The generated `log/` directory and `messages.log` live next to the binary when
 using this config. The portable `config.yaml` uses relative paths and is meant
 for foreground runs from the extracted directory.
 
-For a systemd service, prefer the `.deb`/`.rpm` package. If you must run the
-service from a portable directory, create a config with absolute paths and pass
-it to the installer:
+Use `linux-armv6` for Raspberry Pi 1/Zero and 32-bit Raspberry Pi OS, and
+`linux-armv7` for 32-bit ARMv7 systems with a glibc userland.
+
+For a systemd service, prefer the `.deb`/`.rpm` package. The ARMv6 build is
+portable-only; for it, use the installer below. If you must run the service
+from a portable directory, create a config with absolute paths and pass it to
+the installer:
 
 ```sh
 sudo ./hodeco install --config /path/to/config.yaml
