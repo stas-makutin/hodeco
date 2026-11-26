@@ -68,8 +68,8 @@ schedules are reusable catalogs.
 
 **It is easy to operate.** Rotating logs with ZIP archives by default, file-backed
 message and task persistence, a Windows service host, and a systemd installer are
-included. Releases cover Windows x64/ARM64, Linux x64/ARM64/ARMv7/ARMv6, and
-fully static musl builds.
+included. Releases cover Windows x64/ARM64 with a static CRT, glibc Linux
+x64/ARM64/ARMv7, and fully static musl builds for Linux x64/ARM64/ARMv6.
 
 ## Supported controllers
 
@@ -454,15 +454,17 @@ Tagged releases ship the backend and web UI together:
 
 | Platform | Target |
 | --- | --- |
-| Windows x64 / ARM64 | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
+| Windows x64 / ARM64 (static CRT) | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
 | Linux x64 / ARM64 / ARMv7 (glibc) | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf` |
 | Linux x64 / ARM64 (static) | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
 | Linux ARMv6 (static, Raspberry Pi 1/Zero and 32-bit Raspberry Pi OS) | `arm-unknown-linux-musleabihf` |
 
-Linux glibc targets also produce `.deb` and `.rpm` packages. Each release
-includes `SHA256SUMS` and uses the matching `CHANGELOG.md` section as its release
-notes. [Releases](wiki/Releases.md) explains which archive to pick, what is
-inside it, and how upgrades work.
+Windows builds link the MSVC C runtime statically, so the ZIPs do not require
+the Visual C++ Redistributable. Musl builds are fully static and do not depend
+on the host glibc. Linux glibc targets also produce `.deb` and `.rpm` packages.
+Each release includes `SHA256SUMS` and uses the matching `CHANGELOG.md` section
+as its release notes. [Releases](wiki/Releases.md) explains which archive to
+pick, what is inside it, and how upgrades work.
 
 ## Documentation
 

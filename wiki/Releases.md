@@ -25,8 +25,8 @@ system-wide packages with a conventional install layout.
 
 | Platform | Target | Portable archive | Package |
 | --- | --- | --- | --- |
-| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` | — |
-| Windows ARM64 | `aarch64-pc-windows-msvc` | `.zip` | — |
+| Windows x64 (static CRT) | `x86_64-pc-windows-msvc` | `.zip` | — |
+| Windows ARM64 (static CRT) | `aarch64-pc-windows-msvc` | `.zip` | — |
 | Linux x64 (glibc) | `x86_64-unknown-linux-gnu` | `.tar.gz` | `.deb`, `.rpm` |
 | Linux ARM64 (glibc) | `aarch64-unknown-linux-gnu` | `.tar.gz` | `.deb`, `.rpm` |
 | Linux x64 (static) | `x86_64-unknown-linux-musl` | `.tar.gz` | — |
@@ -34,8 +34,9 @@ system-wide packages with a conventional install layout.
 | Linux ARMv7 (glibc) | `armv7-unknown-linux-gnueabihf` | `.tar.gz` | `.deb`, `.rpm` |
 | Linux ARMv6 (static) | `arm-unknown-linux-musleabihf` | `.tar.gz` | — |
 
-Musl builds are fully static and do not depend on the host glibc. They are
-useful for minimal containers and older distributions.
+Windows builds link the MSVC C runtime statically and do not need the Visual
+C++ Redistributable. Musl builds are fully static and do not depend on the host
+glibc. Both are useful on machines without the usual runtime packages.
 
 The ARMv6 build is the right choice for Raspberry Pi 1, Zero, Zero W, and
 32-bit Raspberry Pi OS, whose userland is ARMv6. The ARMv7 build requires an
