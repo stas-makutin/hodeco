@@ -4,9 +4,13 @@ pub mod registry;
 pub mod serial;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod zigbee;
 pub mod zwave;
 
-use hodeco_contract::domain::ParamError;
+use hodeco_contract::domain::{ParamError, ServiceKey, ServiceStatus};
+
+/// Status event shared by all protocol service handles.
+pub type StatusEvent = (ServiceKey, ServiceStatus);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {

@@ -31,28 +31,168 @@
       "id": "office-motion",
       "label": "Office motion",
       "location": "Office"
+    },
+    {
+      "id": "zb-kitchen-light",
+      "label": "Kitchen light",
+      "location": "Kitchen"
+    },
+    {
+      "id": "zb-living-room-strip",
+      "label": "Living room strip",
+      "location": "Living room"
+    },
+    {
+      "id": "zb-hall-button",
+      "label": "Hall button",
+      "location": "Hallway"
+    },
+    {
+      "id": "zb-temperature",
+      "label": "Temperature sensor",
+      "location": "Office"
     }
   ],
   "services": {
     "key:zwave/serial/COM3": {
       "devices": [
-        { "device_id": "controller", "service_id": 1 },
-        { "device_id": "hallway-dimmer", "service_id": 3 },
-        { "device_id": "front-door-sensor", "service_id": 4 }
+        { "deviceId": "controller", "serviceId": 1 },
+        { "deviceId": "hallway-dimmer", "serviceId": 3 },
+        { "deviceId": "front-door-sensor", "serviceId": 4 }
       ]
     },
     "alias:ZW": {
       "devices": [
-        { "device_id": "controller", "service_id": 1 },
-        { "device_id": "office-lamp", "service_id": 2 },
-        { "device_id": "office-motion", "service_id": 4 }
+        { "deviceId": "controller", "serviceId": 1 },
+        { "deviceId": "office-lamp", "serviceId": 2 },
+        { "deviceId": "office-motion", "serviceId": 4 }
       ]
     },
     "alias:ZW-Lab": {
       "devices": [
-        { "device_id": "controller", "service_id": 1 },
-        { "device_id": "kitchen-overhead", "service_id": 2 },
-        { "device_id": "hallway-dimmer", "service_id": 3 }
+        { "deviceId": "controller", "serviceId": 1 },
+        { "deviceId": "kitchen-overhead", "serviceId": 2 },
+        { "deviceId": "hallway-dimmer", "serviceId": 3 }
+      ]
+    },
+    "alias:ZB": {
+      "devices": [
+        {
+          "deviceId": "controller",
+          "serviceId": "0x0000",
+          "eui64": "00124b0000000001",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "office-lamp",
+          "serviceId": "0x1234",
+          "eui64": "00124b000f123456",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "office-motion",
+          "serviceId": "0x1235",
+          "eui64": "00124b000f123457",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "front-door-sensor",
+          "serviceId": "0x1236",
+          "eui64": "00124b000f123458",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-kitchen-light",
+          "serviceId": "0x1237",
+          "eui64": "00124b000f123459",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-living-room-strip",
+          "serviceId": "0x1238",
+          "eui64": "00124b000f12345a",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-hall-button",
+          "serviceId": "0x1239",
+          "eui64": "00124b000f12345b",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-temperature",
+          "serviceId": "0x123a",
+          "eui64": "00124b000f12345c",
+          "endpoint": 1,
+          "profile": 260
+        }
+      ]
+    },
+    "key:zigbee/serial/COM5": {
+      "devices": [
+        {
+          "deviceId": "controller",
+          "serviceId": "0x0000",
+          "eui64": "00124b0000000001",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "office-lamp",
+          "serviceId": "0x1234",
+          "eui64": "00124b000f123456",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "office-motion",
+          "serviceId": "0x1235",
+          "eui64": "00124b000f123457",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "front-door-sensor",
+          "serviceId": "0x1236",
+          "eui64": "00124b000f123458",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-kitchen-light",
+          "serviceId": "0x1237",
+          "eui64": "00124b000f123459",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-living-room-strip",
+          "serviceId": "0x1238",
+          "eui64": "00124b000f12345a",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-hall-button",
+          "serviceId": "0x1239",
+          "eui64": "00124b000f12345b",
+          "endpoint": 1,
+          "profile": 260
+        },
+        {
+          "deviceId": "zb-temperature",
+          "serviceId": "0x123a",
+          "eui64": "00124b000f12345c",
+          "endpoint": 1,
+          "profile": 260
+        }
       ]
     }
   }

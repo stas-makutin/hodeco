@@ -18,6 +18,7 @@ const CONFIG_DIR: &str = "/etc/hodeco";
 const DEFAULT_CONFIG_PATH: &str = "/etc/hodeco/config.yaml";
 const SYSTEMD_RUNTIME_DIR: &str = "/run/systemd/system";
 const SYSTEMD_SERVICE_FILE: &str = "/etc/systemd/system/hodeco.service";
+const PACKAGED_SERVICE_FILE: &str = "/usr/lib/systemd/system/hodeco.service";
 const SYSTEMD_RUNNING_STATE: &str = "active";
 const SYSTEMD_STOPPED_STATE: &str = "inactive";
 const SERVICE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -45,7 +46,9 @@ pub fn run_as_service() -> bool {
         return false;
     }
 
-    service_main::service_main(service_log, CancellationToken::new());
+    if !service_main::service_main(service_log, CancellationToken::new()) {
+        std::process::exit(1);
+    }
     true
 }
 
@@ -158,7 +161,14 @@ struct SystemdServiceManager {
 impl ServiceManagerTrait for SystemdServiceManager {
     fn install(&self, options: &ServiceOptions) -> bool {
         if is_installed() {
-            (self.logger)(&format!("Service '{}' is already installed.", DISPLAY_NAME));
+            if is_package_managed() && !is_manually_installed() {
+                (self.logger)(&format!(
+                    "Service '{}' is installed by the hodeco package; use systemctl to manage it.",
+                    DISPLAY_NAME
+                ));
+            } else {
+                (self.logger)(&format!("Service '{}' is already installed.", DISPLAY_NAME));
+            }
             return false;
         }
 
@@ -247,6 +257,14 @@ impl ServiceManagerTrait for SystemdServiceManager {
     }
 
     fn uninstall(&self) -> bool {
+        if is_package_managed() && !is_manually_installed() {
+            (self.logger)(&format!(
+                "Service '{}' is managed by the hodeco package; remove the package to uninstall it.",
+                DISPLAY_NAME
+            ));
+            return false;
+        }
+
         if !is_installed() {
             (self.logger)(&format!("Service '{}' is not installed.", DISPLAY_NAME));
             return false;
@@ -566,7 +584,15 @@ fn has_serial_group(user: &str) -> bool {
 }
 
 fn is_installed() -> bool {
+    is_manually_installed() || is_package_managed()
+}
+
+fn is_manually_installed() -> bool {
     Path::new(SYSTEMD_SERVICE_FILE).exists()
+}
+
+fn is_package_managed() -> bool {
+    Path::new(PACKAGED_SERVICE_FILE).exists()
 }
 
 fn rollback_install() {

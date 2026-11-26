@@ -6,16 +6,52 @@ interesting part is the split between them — protocol types, decoding, and
 scheduling are shared, while transport and rendering stay on their respective
 sides.
 
-If you are new to the code, start with `cargo test --workspace`, then run the
-backend and the UI separately. The UI's demo mode gives you a populated app
-without a gateway or a serial controller.
+If you are new to the code, start with this page's [first hour](#your-first-hour)
+section, then use [Where to change things](#where-to-change-things) when you
+know what you want to touch.
+
+## Your first hour
+
+1. Read [How hodeco works](Concepts) so the terms in the code match the terms in
+   the docs.
+2. Run the local checks once to make sure the toolchain works:
+
+   ```sh
+   cargo build --workspace
+   cargo test --workspace
+   ```
+
+3. Run the backend and the UI separately. The UI's demo mode gives you a
+   populated app without a gateway or a serial controller:
+
+   ```powershell
+   # terminal 1
+   cargo run -- run
+   ```
+
+   ```powershell
+   # terminal 2
+   cd hodeco-ui
+   cargo run --bin hodeco-ui -- --demo
+   ```
+
+4. Pick the area you want to change from the table below, and read the matching
+   crate or module before editing.
+
+The UI and backend can also run together. Start the backend, then point the UI
+at it:
+
+```powershell
+cd hodeco-ui
+cargo run --bin hodeco-ui -- --gateway-url ws://127.0.0.1:8180/api/ws
+```
 
 ## Where to change things
 
 | If you are changing… | Start in |
 | --- | --- |
 | A wire type, method name, error, or config field | `hodeco-contract/` |
-| Z-Wave decoding, frame building, or definitions | `hodeco-codec/` |
+| Z-Wave or ZigBee decoding, frame building, or definitions | `hodeco-codec/` |
 | HTTP routes, RPC handling, WebSocket behavior | `src/http/` |
 | Serial services, discovery, message storage, logging | `src/services/`, `src/messages/`, `src/logging/` |
 | Tasks, schedules, commands, run history, hooks | `src/automation/` |
@@ -29,18 +65,19 @@ without a gateway or a serial controller.
 | `src/` | Backend server, HTTP/WebSocket API, services, logging, persistence. |
 | `tests/` | Backend integration tests. |
 | `hodeco-contract/` | Shared wire types, DTOs, method names, errors, config schema, and parameter metadata. |
-| `hodeco-codec/` | Pure Z-Wave/frame codec, hex helpers, builder, and static catalog shared with the UI. |
+| `hodeco-codec/` | Pure Z-Wave and ZigBee EZSP/ZCL codec, hex helpers, builders, and static catalogs shared with the UI. |
 | `hodeco-schedule/` | Calendar, solar, repeat, and jitter computation shared with the UI. |
 | `hodeco-ui/` | Separate workspace for the egui admin/diagnostics frontend. |
 | `wiki/` | Source for the GitHub wiki. |
 | `packaging/` | nFPM package definition used by the release workflow. |
 
 `hodeco-codec/data/zwave.json` is the Z-Wave catalog. It covers the Serial API
-function IDs and the known command-class IDs. Common commands have typed
-field-level layouts, including packed bit groups, enums, flags, and signed or
-unsigned integers whose width comes from `lengthFrom` or a fixed `length`;
+function IDs and the known command-class IDs. `hodeco-codec/data/zigbee.json`
+contains the EZSP command layouts and ZCL cluster metadata. Common commands have
+typed field-level layouts, including packed bit groups, enums, flags, and signed
+or unsigned integers whose width comes from `lengthFrom` or a fixed `length`;
 less common layouts fall back to named raw bytes until they are filled in. See
-[Codec Data Files](Data-Files) for both JSON formats.
+[Codec Data Files](Data-Files) for the JSON formats.
 
 ## Build and test
 
@@ -73,6 +110,13 @@ $env:HODECO_SERIAL_PORT = "COM4"
 cargo test --test real_controller -- --ignored --nocapture
 ```
 
+The ZigBee tests use `HODECO_ZIGBEE_PORT` (default `COM5`):
+
+```powershell
+$env:HODECO_ZIGBEE_PORT = "COM5"
+cargo test --test real_zigbee -- --ignored --nocapture
+```
+
 ## Frontend
 
 The UI is a separate workspace. Build and run it with:
@@ -80,7 +124,7 @@ The UI is a separate workspace. Build and run it with:
 ```powershell
 cd hodeco-ui
 cargo run --bin hodeco-ui -- --demo
-cargo run --bin hodeco-ui -- --server ws://127.0.0.1:8180/api/ws
+cargo run --bin hodeco-ui -- --gateway-url ws://127.0.0.1:8180/api/ws
 ```
 
 Build the web assets:
@@ -140,4 +184,12 @@ Wiki pages are edited in `wiki/` and synced to the GitHub wiki by
 navigation helpers.
 
 The workflow treats `wiki/` as the source of truth and replaces the wiki
-contents, so edit pages in `wiki/` rather than in the GitHub wiki UI.
+contents, so edit pages in `wiki/` rather than in the GitHub wiki UI. If you add
+a page, add it to `_Sidebar.md` and link it from `Home.md` so readers can find
+it.
+
+## Related pages
+
+- [How hodeco works](Concepts) — the architecture in plain language.
+- [Codec Data Files](Data-Files) — the JSON schemas for protocol definitions.
+- [Releases](Releases) — what the release workflow produces.

@@ -1,0 +1,2171 @@
+{
+  "version": 1,
+  "protocol": "zigbee",
+  "stack": "ezsp",
+  "commands": [
+    {
+      "id": 0,
+      "name": "version",
+      "description": "Read the NCP EZSP and stack version.",
+      "priority": 10,
+      "fields": [
+        {
+          "name": "desiredProtocolVersion",
+          "label": "Desired protocol version",
+          "kind": "uint8",
+          "min": 4,
+          "max": 19
+        }
+      ],
+      "requestSummary": "version · desired {desiredProtocolVersion}",
+      "responseFields": [
+        {
+          "name": "protocolVersion",
+          "label": "Protocol version",
+          "kind": "uint8"
+        },
+        {
+          "name": "stackType",
+          "label": "Stack type",
+          "kind": "uint8"
+        },
+        {
+          "name": "stackVersion",
+          "label": "Stack version",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        }
+      ],
+      "responseSummary": "version · EZSP v{protocolVersion} · stack {stackVersion}"
+    },
+    {
+      "id": 5,
+      "name": "nop",
+      "description": "Check that the NCP is responsive.",
+      "priority": 20,
+      "noRequestParameters": true
+    },
+    {
+      "id": 23,
+      "name": "networkInit",
+      "description": "Initialize the NCP network state from tokens.",
+      "priority": 30,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "success" },
+            { "value": 7, "name": "no network" },
+            { "value": 147, "name": "network up" },
+            { "value": 148, "name": "network down" }
+          ]
+        }
+      ],
+      "responseSummary": "networkInit · {status}"
+    },
+    {
+      "id": 24,
+      "name": "networkState",
+      "description": "Read the current network state.",
+      "priority": 40,
+      "defaultOperation": true,
+      "emphasize": true,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Network state",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "no network" },
+            { "value": 1, "name": "joining" },
+            { "value": 2, "name": "joined" },
+            { "value": 3, "name": "leaving" }
+          ]
+        }
+      ],
+      "responseSummary": "networkState · {status}"
+    },
+    {
+      "id": 30,
+      "name": "formNetwork",
+      "description": "Form a new ZigBee network.",
+      "priority": 50,
+      "emphasize": true,
+      "fields": [
+        {
+          "name": "extendedPanId",
+          "label": "Extended PAN ID",
+          "kind": "hex",
+          "length": 8,
+          "required": false
+        },
+        {
+          "name": "panId",
+          "label": "PAN ID (0 = choose)",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "radioTxPower",
+          "label": "TX power (dBm)",
+          "kind": "int",
+          "length": 1,
+          "endian": "little"
+        },
+        {
+          "name": "radioChannel",
+          "label": "Radio channel",
+          "kind": "uint8",
+          "min": 11,
+          "max": 26
+        },
+        {
+          "name": "joinMethod",
+          "label": "Join method",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "MAC association" },
+            { "value": 1, "name": "NWK rejoin" },
+            { "value": 2, "name": "NWK rejoin with changed PAN" },
+            { "value": 3, "name": "NWK rejoin with changed channel" },
+            { "value": 4, "name": "NWK rejoin with changed PAN and channel" }
+          ]
+        },
+        {
+          "name": "nwkManagerId",
+          "label": "NWK manager ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "nwkUpdateId",
+          "label": "NWK update ID",
+          "kind": "uint8"
+        },
+        {
+          "name": "channels",
+          "label": "Channel mask",
+          "kind": "uint32",
+          "endian": "little",
+          "format": "hex"
+        }
+      ],
+      "requestSummary": "formNetwork · channel {radioChannel} · PAN {panId}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "success" },
+            { "value": 7, "name": "no network" },
+            { "value": 49, "name": "transmit invalid power" },
+            { "value": 50, "name": "invalid channel" }
+          ]
+        }
+      ],
+      "responseSummary": "formNetwork · {status}"
+    },
+    {
+      "id": 32,
+      "name": "leaveNetwork",
+      "description": "Leave the current network.",
+      "priority": 60,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "success" },
+            { "value": 7, "name": "no network" }
+          ]
+        }
+      ],
+      "responseSummary": "leaveNetwork · {status}"
+    },
+    {
+      "id": 34,
+      "name": "permitJoining",
+      "description": "Allow devices to join for the given number of seconds.",
+      "priority": 70,
+      "emphasize": true,
+      "fields": [
+        {
+          "name": "duration",
+          "label": "Duration (seconds)",
+          "kind": "uint8",
+          "min": 0,
+          "max": 255
+        }
+      ],
+      "requestSummary": "permitJoining · {duration}s",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "success" },
+            { "value": 1, "name": "error" }
+          ]
+        }
+      ],
+      "responseSummary": "permitJoining · {status}"
+    },
+    {
+      "id": 38,
+      "name": "getEui64",
+      "description": "Read the coordinator EUI-64.",
+      "priority": 80,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "eui64",
+          "label": "EUI-64",
+          "kind": "hex",
+          "length": 8
+        }
+      ],
+      "responseSummary": "getEui64 · {eui64}"
+    },
+    {
+      "id": 39,
+      "name": "getNodeId",
+      "description": "Read the coordinator network address.",
+      "priority": 90,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "nodeId",
+          "label": "Node ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "target",
+          "filterSlot": "network"
+        }
+      ],
+      "responseSummary": "getNodeId · {nodeId}"
+    },
+    {
+      "id": 40,
+      "name": "getNetworkParameters",
+      "description": "Read the current network parameters.",
+      "priority": 100,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "success" },
+            { "value": 7, "name": "no network" },
+            { "value": 147, "name": "network up" },
+            { "value": 148, "name": "network down" }
+          ]
+        },
+        {
+          "name": "nodeType",
+          "label": "Node type",
+          "kind": "enum",
+          "values": [
+            { "value": 0, "name": "unknown" },
+            { "value": 1, "name": "coordinator" },
+            { "value": 2, "name": "router" },
+            { "value": 3, "name": "end device" },
+            { "value": 4, "name": "sleepy end device" }
+          ]
+        },
+        {
+          "name": "extendedPanId",
+          "label": "Extended PAN ID",
+          "kind": "hex",
+          "length": 8
+        },
+        {
+          "name": "panId",
+          "label": "PAN ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "radioTxPower",
+          "label": "TX power (dBm)",
+          "kind": "int",
+          "length": 1,
+          "endian": "little"
+        },
+        {
+          "name": "radioChannel",
+          "label": "Radio channel",
+          "kind": "uint8"
+        },
+        {
+          "name": "joinMethod",
+          "label": "Join method",
+          "kind": "uint8"
+        },
+        {
+          "name": "nwkManagerId",
+          "label": "NWK manager ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "nwkUpdateId",
+          "label": "NWK update ID",
+          "kind": "uint8"
+        },
+        {
+          "name": "channels",
+          "label": "Channel mask",
+          "kind": "uint32",
+          "endian": "little",
+          "format": "hex"
+        }
+      ],
+      "responseSummary": "network · {status} · PAN {panId} · channel {radioChannel}"
+    },
+    {
+      "id": 52,
+      "name": "sendUnicast",
+      "description": "Send an APS payload to one node.",
+      "priority": 110,
+      "emphasize": true,
+      "fields": [
+        {
+          "name": "type",
+          "label": "Outgoing type",
+          "kind": "enum",
+          "role": "destinationType",
+          "description": "Known devices apply to the direct destination type.",
+          "values": [
+            { "value": 0, "name": "direct", "direct": true },
+            { "value": 1, "name": "via binding" },
+            { "value": 2, "name": "via group" },
+            { "value": 3, "name": "broadcast" },
+            { "value": 4, "name": "multicast" }
+          ]
+        },
+        {
+          "name": "indexOrDestination",
+          "label": "Destination NWK",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "target",
+          "filterSlot": "network"
+        },
+        {
+          "name": "profileId",
+          "label": "Profile ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "profile",
+          "default": "01 04"
+        },
+        {
+          "name": "clusterId",
+          "label": "Cluster ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "cluster",
+          "filterSlot": "cluster"
+        },
+        {
+          "name": "sourceEndpoint",
+          "label": "Source endpoint",
+          "kind": "uint8"
+        },
+        {
+          "name": "destinationEndpoint",
+          "label": "Destination endpoint",
+          "kind": "uint8",
+          "role": "destinationEndpoint",
+          "filterSlot": "endpoint"
+        },
+        {
+          "name": "apsOptions",
+          "label": "APS options",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "groupId",
+          "label": "Group ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "group",
+          "filterSlot": "group"
+        },
+        {
+          "name": "apsSequence",
+          "label": "APS sequence",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageTag",
+          "label": "Message tag",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageLength",
+          "label": "Message length",
+          "kind": "uint8",
+          "role": "length"
+        },
+        {
+          "name": "messageContents",
+          "label": "Message contents",
+          "kind": "hex",
+          "lengthFrom": "messageLength",
+          "role": "payload",
+          "filterSlot": "payload"
+        }
+      ],
+      "requestSummary": "sendUnicast · node {indexOrDestination} · cluster {clusterId}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "sequence",
+          "label": "Sequence",
+          "kind": "uint8"
+        }
+      ],
+      "responseSummary": "sendUnicast · status {status} · sequence {sequence}"
+    },
+    {
+      "id": 54,
+      "name": "sendBroadcast",
+      "description": "Send an APS payload to a broadcast address.",
+      "priority": 120,
+      "fields": [
+        {
+          "name": "destination",
+          "label": "Destination",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "broadcast",
+          "filterSlot": "network"
+        },
+        {
+          "name": "profileId",
+          "label": "Profile ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "profile",
+          "default": "01 04"
+        },
+        {
+          "name": "clusterId",
+          "label": "Cluster ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "cluster",
+          "filterSlot": "cluster"
+        },
+        {
+          "name": "sourceEndpoint",
+          "label": "Source endpoint",
+          "kind": "uint8"
+        },
+        {
+          "name": "destinationEndpoint",
+          "label": "Destination endpoint",
+          "kind": "uint8",
+          "role": "destinationEndpoint",
+          "filterSlot": "endpoint"
+        },
+        {
+          "name": "apsOptions",
+          "label": "APS options",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "groupId",
+          "label": "Group ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "group",
+          "filterSlot": "group"
+        },
+        {
+          "name": "apsSequence",
+          "label": "APS sequence",
+          "kind": "uint8"
+        },
+        {
+          "name": "radius",
+          "label": "Radius",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageTag",
+          "label": "Message tag",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageLength",
+          "label": "Message length",
+          "kind": "uint8",
+          "role": "length"
+        },
+        {
+          "name": "messageContents",
+          "label": "Message contents",
+          "kind": "hex",
+          "lengthFrom": "messageLength",
+          "role": "payload",
+          "filterSlot": "payload"
+        }
+      ],
+      "requestSummary": "sendBroadcast · cluster {clusterId}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "sequence",
+          "label": "Sequence",
+          "kind": "uint8"
+        }
+      ],
+      "responseSummary": "sendBroadcast · status {status} · sequence {sequence}"
+    },
+    {
+      "id": 56,
+      "name": "sendMulticast",
+      "description": "Send an APS payload to a multicast group.",
+      "priority": 130,
+      "fields": [
+        {
+          "name": "profileId",
+          "label": "Profile ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "profile",
+          "default": "01 04"
+        },
+        {
+          "name": "clusterId",
+          "label": "Cluster ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "cluster",
+          "filterSlot": "cluster"
+        },
+        {
+          "name": "sourceEndpoint",
+          "label": "Source endpoint",
+          "kind": "uint8"
+        },
+        {
+          "name": "destinationEndpoint",
+          "label": "Destination endpoint",
+          "kind": "uint8",
+          "role": "destinationEndpoint",
+          "filterSlot": "endpoint"
+        },
+        {
+          "name": "apsOptions",
+          "label": "APS options",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "groupId",
+          "label": "Group ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "group",
+          "filterSlot": "group"
+        },
+        {
+          "name": "apsSequence",
+          "label": "APS sequence",
+          "kind": "uint8"
+        },
+        {
+          "name": "hops",
+          "label": "Hops",
+          "kind": "uint8"
+        },
+        {
+          "name": "nonmemberRadius",
+          "label": "Non-member radius",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageTag",
+          "label": "Message tag",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageLength",
+          "label": "Message length",
+          "kind": "uint8",
+          "role": "length"
+        },
+        {
+          "name": "messageContents",
+          "label": "Message contents",
+          "kind": "hex",
+          "lengthFrom": "messageLength",
+          "role": "payload",
+          "filterSlot": "payload"
+        }
+      ],
+      "requestSummary": "sendMulticast · cluster {clusterId}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "sequence",
+          "label": "Sequence",
+          "kind": "uint8"
+        }
+      ],
+      "responseSummary": "sendMulticast · status {status} · sequence {sequence}"
+    },
+    {
+      "id": 63,
+      "name": "messageSentHandler",
+      "description": "Notification that a previously sent message completed.",
+      "priority": 140,
+      "incomingOnly": true,
+      "responseFields": [
+        {
+          "name": "type",
+          "label": "Message type",
+          "kind": "uint8"
+        },
+        {
+          "name": "indexOrDestination",
+          "label": "Destination",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "target",
+          "filterSlot": "network"
+        },
+        {
+          "name": "profileId",
+          "label": "Profile ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "profile",
+          "default": "01 04"
+        },
+        {
+          "name": "clusterId",
+          "label": "Cluster ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "cluster",
+          "filterSlot": "cluster"
+        },
+        {
+          "name": "sourceEndpoint",
+          "label": "Source endpoint",
+          "kind": "uint8"
+        },
+        {
+          "name": "destinationEndpoint",
+          "label": "Destination endpoint",
+          "kind": "uint8",
+          "role": "destinationEndpoint",
+          "filterSlot": "endpoint"
+        },
+        {
+          "name": "apsOptions",
+          "label": "APS options",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "groupId",
+          "label": "Group ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "group",
+          "filterSlot": "group"
+        },
+        {
+          "name": "apsSequence",
+          "label": "APS sequence",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageTag",
+          "label": "Message tag",
+          "kind": "uint8"
+        },
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "messageLength",
+          "label": "Message length",
+          "kind": "uint8",
+          "role": "length"
+        },
+        {
+          "name": "messageContents",
+          "label": "Message contents",
+          "kind": "hex",
+          "lengthFrom": "messageLength",
+          "role": "payload",
+          "filterSlot": "payload"
+        }
+      ],
+      "responseSummary": "messageSent · status {status} · node {indexOrDestination}"
+    },
+    {
+      "id": 69,
+      "name": "incomingMessageHandler",
+      "description": "Incoming APS message.",
+      "priority": 150,
+      "incomingOnly": true,
+      "responseFields": [
+        {
+          "name": "type",
+          "label": "Message type",
+          "kind": "uint8"
+        },
+        {
+          "name": "profileId",
+          "label": "Profile ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "profile",
+          "default": "01 04"
+        },
+        {
+          "name": "clusterId",
+          "label": "Cluster ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "cluster",
+          "filterSlot": "cluster"
+        },
+        {
+          "name": "sourceEndpoint",
+          "label": "Source endpoint",
+          "kind": "uint8",
+          "role": "sourceEndpoint",
+          "filterSlot": "endpoint"
+        },
+        {
+          "name": "destinationEndpoint",
+          "label": "Destination endpoint",
+          "kind": "uint8",
+          "role": "destinationEndpoint",
+          "filterSlot": "endpoint"
+        },
+        {
+          "name": "apsOptions",
+          "label": "APS options",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        },
+        {
+          "name": "groupId",
+          "label": "Group ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "group",
+          "filterSlot": "group"
+        },
+        {
+          "name": "apsSequence",
+          "label": "APS sequence",
+          "kind": "uint8"
+        },
+        {
+          "name": "lastHopLqi",
+          "label": "Last hop LQI",
+          "kind": "uint8"
+        },
+        {
+          "name": "lastHopRssi",
+          "label": "Last hop RSSI",
+          "kind": "int",
+          "length": 1,
+          "endian": "little"
+        },
+        {
+          "name": "sender",
+          "label": "Sender NWK",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "source",
+          "filterSlot": "network"
+        },
+        {
+          "name": "bindingIndex",
+          "label": "Binding index",
+          "kind": "uint8"
+        },
+        {
+          "name": "addressIndex",
+          "label": "Address index",
+          "kind": "uint8"
+        },
+        {
+          "name": "messageLength",
+          "label": "Message length",
+          "kind": "uint8",
+          "role": "length"
+        },
+        {
+          "name": "messageContents",
+          "label": "Message contents",
+          "kind": "hex",
+          "lengthFrom": "messageLength",
+          "role": "payload",
+          "filterSlot": "payload"
+        }
+      ],
+      "responseSummary": "incoming · node {sender} · cluster {clusterId}"
+    },
+    {
+      "id": 36,
+      "name": "trustCenterJoinHandler",
+      "description": "A device joined, rejoined, or left the trust center.",
+      "priority": 160,
+      "incomingOnly": true,
+      "responseFields": [
+        {
+          "name": "newNodeId",
+          "label": "New node ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "target",
+          "filterSlot": "network"
+        },
+        {
+          "name": "newNodeEui64",
+          "label": "New node EUI-64",
+          "kind": "hex",
+          "length": 8
+        },
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8"
+        },
+        {
+          "name": "policyDecision",
+          "label": "Policy decision",
+          "kind": "uint8"
+        },
+        {
+          "name": "parentOfNewNodeId",
+          "label": "Parent node ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex"
+        }
+      ],
+      "responseSummary": "trust center join · node {newNodeId} · {newNodeEui64}"
+    },
+    {
+      "id": 25,
+      "name": "stackStatusHandler",
+      "description": "The NCP stack changed state.",
+      "priority": 170,
+      "incomingOnly": true,
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        }
+      ],
+      "responseSummary": "stack status · {status}"
+    },
+    {
+      "id": 35,
+      "name": "childJoinHandler",
+      "description": "A child joined or left.",
+      "priority": 180,
+      "incomingOnly": true,
+      "responseFields": [
+        {
+          "name": "index",
+          "label": "Index",
+          "kind": "uint8"
+        },
+        {
+          "name": "joining",
+          "label": "Joining",
+          "kind": "bool"
+        },
+        {
+          "name": "childId",
+          "label": "Child node ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "target",
+          "filterSlot": "network"
+        },
+        {
+          "name": "childEui64",
+          "label": "Child EUI-64",
+          "kind": "hex",
+          "length": 8
+        },
+        {
+          "name": "childType",
+          "label": "Child type",
+          "kind": "uint8"
+        }
+      ],
+      "responseSummary": "child join · node {childId} · {childEui64}"
+    },
+    {
+      "id": 74,
+      "name": "getChildData",
+      "description": "Read one child table entry.",
+      "priority": 190,
+      "fields": [
+        {
+          "name": "index",
+          "label": "Index",
+          "kind": "uint8"
+        }
+      ],
+      "requestSummary": "getChildData · index {index}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "childId",
+          "label": "Child node ID",
+          "kind": "uint16",
+          "endian": "little",
+          "format": "hex",
+          "role": "target",
+          "filterSlot": "network"
+        },
+        {
+          "name": "childEui64",
+          "label": "Child EUI-64",
+          "kind": "hex",
+          "length": 8
+        },
+        {
+          "name": "childType",
+          "label": "Child type",
+          "kind": "uint8"
+        }
+      ],
+      "responseSummary": "child {childId} · {childEui64} · status {status}"
+    },
+    {
+      "id": 82,
+      "name": "getConfigurationValue",
+      "description": "Read an NCP configuration value.",
+      "priority": 200,
+      "fields": [
+        {
+          "name": "configId",
+          "label": "Configuration ID",
+          "kind": "uint8"
+        }
+      ],
+      "requestSummary": "getConfigurationValue · {configId}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "value",
+          "label": "Value",
+          "kind": "uint16",
+          "endian": "little"
+        }
+      ],
+      "responseSummary": "config {configId} = {value} · status {status}"
+    },
+    {
+      "id": 83,
+      "name": "setConfigurationValue",
+      "description": "Write an NCP configuration value.",
+      "priority": 210,
+      "fields": [
+        {
+          "name": "configId",
+          "label": "Configuration ID",
+          "kind": "uint8"
+        },
+        {
+          "name": "value",
+          "label": "Value",
+          "kind": "uint16",
+          "endian": "little"
+        }
+      ],
+      "requestSummary": "setConfigurationValue · {configId} = {value}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        }
+      ],
+      "responseSummary": "setConfigurationValue · status {status}"
+    },
+    {
+      "id": 105,
+      "name": "getCurrentSecurityState",
+      "description": "Read the current security state.",
+      "priority": 220,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "bitmask",
+          "label": "Security bitmask",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "trustCenterLongAddress",
+          "label": "Trust center EUI-64",
+          "kind": "hex",
+          "length": 8
+        }
+      ],
+      "responseSummary": "security · {status} · trust center {trustCenterLongAddress}"
+    },
+    {
+      "id": 170,
+      "name": "getValue",
+      "description": "Read an NCP value.",
+      "priority": 230,
+      "fields": [
+        {
+          "name": "valueId",
+          "label": "Value ID",
+          "kind": "uint8"
+        }
+      ],
+      "requestSummary": "getValue · {valueId}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        },
+        {
+          "name": "valueLength",
+          "label": "Value length",
+          "kind": "uint8",
+          "role": "length"
+        },
+        {
+          "name": "value",
+          "label": "Value",
+          "kind": "hex",
+          "lengthFrom": "valueLength"
+        }
+      ],
+      "responseSummary": "value {valueId} · {value} · status {status}"
+    },
+    {
+      "id": 171,
+      "name": "setValue",
+      "description": "Write an NCP value.",
+      "priority": 240,
+      "fields": [
+        {
+          "name": "valueId",
+          "label": "Value ID",
+          "kind": "uint8"
+        },
+        {
+          "name": "valueLength",
+          "label": "Value length",
+          "kind": "uint8",
+          "role": "length"
+        },
+        {
+          "name": "value",
+          "label": "Value",
+          "kind": "hex",
+          "lengthFrom": "valueLength"
+        }
+      ],
+      "requestSummary": "setValue · {valueId}",
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        }
+      ],
+      "responseSummary": "setValue · status {status}"
+    },
+    {
+      "id": 177,
+      "name": "clearKeyTable",
+      "description": "Clear the link key table.",
+      "priority": 250,
+      "noRequestParameters": true,
+      "responseFields": [
+        {
+          "name": "status",
+          "label": "Status",
+          "kind": "uint8",
+          "format": "hex"
+        }
+      ],
+      "responseSummary": "clearKeyTable · status {status}"
+    }
+  ],
+  "generalCommands": [
+    {
+      "id": 0,
+      "name": "Read attributes",
+      "description": "Read one or more attributes from a cluster.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 1,
+      "name": "Read attributes response",
+      "description": "Response to a read attributes request.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 2,
+      "name": "Write attributes",
+      "description": "Write one or more attributes.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 3,
+      "name": "Write attributes undivided",
+      "description": "Write attributes as an indivisible transaction.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 4,
+      "name": "Write attributes response",
+      "description": "Response to a write attributes request.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 5,
+      "name": "Write attributes no response",
+      "description": "Write attributes without a response.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 6,
+      "name": "Configure reporting",
+      "description": "Configure attribute reporting.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 7,
+      "name": "Configure reporting response",
+      "description": "Response to configure reporting.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 8,
+      "name": "Read reporting configuration",
+      "description": "Read reporting configuration.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 9,
+      "name": "Read reporting configuration response",
+      "description": "Response to read reporting configuration.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 10,
+      "name": "Report attributes",
+      "description": "Report attribute values.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 11,
+      "name": "Default response",
+      "description": "Default response to a ZCL command.",
+      "direction": "both"
+    },
+    {
+      "id": 12,
+      "name": "Discover attributes",
+      "description": "Discover supported attributes.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 13,
+      "name": "Discover attributes response",
+      "description": "Response to discover attributes.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 14,
+      "name": "Read attributes structured",
+      "description": "Read structured attribute data.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 15,
+      "name": "Write attributes structured",
+      "description": "Write structured attribute data.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 16,
+      "name": "Write attributes structured response",
+      "description": "Response to write attributes structured.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 17,
+      "name": "Discover commands received",
+      "description": "Discover commands received by a cluster.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 18,
+      "name": "Discover commands received response",
+      "description": "Response to discover commands received.",
+      "direction": "serverToClient"
+    },
+    {
+      "id": 19,
+      "name": "Discover commands generated",
+      "description": "Discover commands generated by a cluster.",
+      "direction": "clientToServer"
+    },
+    {
+      "id": 20,
+      "name": "Discover commands generated response",
+      "description": "Response to discover commands generated.",
+      "direction": "serverToClient"
+    }
+  ],
+  "zclFrame": {
+    "frameTypeMask": 3,
+    "generalFrameType": 0,
+    "clusterFrameType": 1,
+    "directionToClientBit": 8,
+    "disableDefaultResponseBit": 16,
+    "manufacturerSpecificBit": 4,
+    "frameControlMask": 31,
+    "manufacturerCodeLength": 2,
+    "manufacturerCodeEndian": "little"
+  },
+  "clusters": [
+    {
+      "id": 0,
+      "name": "Basic",
+      "commands": [
+        {
+          "id": 0,
+          "name": "Reset to factory defaults",
+          "summary": "reset to factory defaults"
+        }
+      ],
+      "attributes": [
+        { "id": 0, "name": "ZCL version", "type": "uint8" },
+        { "id": 1, "name": "Application version", "type": "uint8" },
+        { "id": 2, "name": "Stack version", "type": "uint8" },
+        { "id": 3, "name": "Hardware version", "type": "uint8" },
+        { "id": 4, "name": "Manufacturer name", "type": "string" },
+        { "id": 5, "name": "Model identifier", "type": "string" },
+        { "id": 6, "name": "Date code", "type": "string" },
+        { "id": 7, "name": "Power source", "type": "enum8" },
+        { "id": 16384, "name": "SW build ID", "type": "string" }
+      ]
+    },
+    {
+      "id": 1,
+      "name": "Power Configuration",
+      "attributes": [
+        { "id": 32, "name": "Battery voltage", "type": "uint8" },
+        { "id": 33, "name": "Battery percentage remaining", "type": "uint8" }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Identify",
+      "commands": [
+        {
+          "id": 0,
+          "name": "Identify",
+          "fields": [
+            {
+              "name": "identifyTime",
+              "label": "Identify time (s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "identify {identifyTime}s",
+          "responseFields": [
+            {
+              "name": "identifyTime",
+              "label": "Identify time (s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "responseSummary": "identify response {identifyTime}s"
+        },
+        {
+          "id": 1,
+          "name": "Identify query",
+          "summary": "identify query"
+        }
+      ],
+      "attributes": [
+        { "id": 0, "name": "Identify time", "type": "uint16" }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Groups",
+      "commands": [
+        {
+          "id": 0,
+          "name": "Add group",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            },
+            {
+              "name": "groupNameLength",
+              "label": "Group name length",
+              "kind": "uint8",
+              "role": "length"
+            },
+            {
+              "name": "groupName",
+              "label": "Group name",
+              "kind": "text",
+              "lengthFrom": "groupNameLength"
+            }
+          ],
+          "summary": "add group {groupId}"
+        },
+        {
+          "id": 1,
+          "name": "View group",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            }
+          ],
+          "summary": "view group {groupId}"
+        },
+        {
+          "id": 2,
+          "name": "Get group membership",
+          "fields": [
+            {
+              "name": "groupCount",
+              "label": "Group count",
+              "kind": "uint8",
+              "role": "length"
+            },
+            {
+              "name": "groupList",
+              "label": "Group IDs",
+              "kind": "hex",
+              "remaining": true
+            }
+          ],
+          "summary": "membership for {groupCount} groups"
+        },
+        {
+          "id": 3,
+          "name": "Remove group",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            }
+          ],
+          "summary": "remove group {groupId}"
+        },
+        {
+          "id": 4,
+          "name": "Remove all groups",
+          "summary": "remove all groups"
+        },
+        {
+          "id": 5,
+          "name": "Add group if identifying",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            },
+            {
+              "name": "groupNameLength",
+              "label": "Group name length",
+              "kind": "uint8",
+              "role": "length"
+            },
+            {
+              "name": "groupName",
+              "label": "Group name",
+              "kind": "text",
+              "lengthFrom": "groupNameLength"
+            }
+          ],
+          "summary": "add group {groupId} if identifying"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Scenes",
+      "commands": [
+        {
+          "id": 0,
+          "name": "Add scene",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            },
+            {
+              "name": "sceneId",
+              "label": "Scene ID",
+              "kind": "uint8"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "sceneNameLength",
+              "label": "Scene name length",
+              "kind": "uint8",
+              "role": "length"
+            },
+            {
+              "name": "sceneName",
+              "label": "Scene name",
+              "kind": "text",
+              "lengthFrom": "sceneNameLength"
+            },
+            {
+              "name": "extensionFields",
+              "label": "Extension fields (hex)",
+              "kind": "hex",
+              "remaining": true
+            }
+          ],
+          "summary": "add scene {sceneId} to group {groupId}"
+        },
+        {
+          "id": 1,
+          "name": "View scene",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            },
+            {
+              "name": "sceneId",
+              "label": "Scene ID",
+              "kind": "uint8"
+            }
+          ],
+          "summary": "view scene {sceneId} in group {groupId}"
+        },
+        {
+          "id": 2,
+          "name": "Remove scene",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            },
+            {
+              "name": "sceneId",
+              "label": "Scene ID",
+              "kind": "uint8"
+            }
+          ],
+          "summary": "remove scene {sceneId} from group {groupId}"
+        },
+        {
+          "id": 3,
+          "name": "Remove all scenes",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            }
+          ],
+          "summary": "remove all scenes from group {groupId}"
+        },
+        {
+          "id": 4,
+          "name": "Store scene",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            },
+            {
+              "name": "sceneId",
+              "label": "Scene ID",
+              "kind": "uint8"
+            }
+          ],
+          "summary": "store scene {sceneId} in group {groupId}"
+        },
+        {
+          "id": 5,
+          "name": "Recall scene",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            },
+            {
+              "name": "sceneId",
+              "label": "Scene ID",
+              "kind": "uint8"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "recall scene {sceneId} in group {groupId}"
+        },
+        {
+          "id": 6,
+          "name": "Get scene membership",
+          "fields": [
+            {
+              "name": "groupId",
+              "label": "Group ID",
+              "kind": "uint16",
+              "endian": "little",
+              "format": "hex"
+            }
+          ],
+          "summary": "get scene membership for group {groupId}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "On/Off",
+      "commands": [
+        { "id": 0, "name": "Off", "summary": "off" },
+        { "id": 1, "name": "On", "summary": "on" },
+        { "id": 2, "name": "Toggle", "summary": "toggle" },
+        {
+          "id": 64,
+          "name": "Off with effect",
+          "fields": [
+            {
+              "name": "effectIdentifier",
+              "label": "Effect",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "delayed all off" },
+                { "value": 1, "name": "dying light" }
+              ]
+            },
+            {
+              "name": "effectVariant",
+              "label": "Variant",
+              "kind": "uint8"
+            }
+          ],
+          "summary": "off with effect {effectIdentifier} · variant {effectVariant}"
+        },
+        {
+          "id": 65,
+          "name": "On with recall global scene",
+          "summary": "on with recall global scene"
+        },
+        {
+          "id": 66,
+          "name": "On with timed off",
+          "fields": [
+            {
+              "name": "onTime",
+              "label": "On time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "offWaitTime",
+              "label": "Off wait time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "on for {onTime} · off wait {offWaitTime}"
+        },
+        {
+          "id": 67,
+          "name": "Off with timed off",
+          "fields": [
+            {
+              "name": "onTime",
+              "label": "On time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "offWaitTime",
+              "label": "Off wait time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "off for {onTime} · wait {offWaitTime}"
+        }
+      ],
+      "attributes": [
+        { "id": 0, "name": "OnOff", "type": "bool" }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "Level",
+      "commands": [
+        {
+          "id": 0,
+          "name": "Move to level",
+          "fields": [
+            {
+              "name": "level",
+              "label": "Level",
+              "kind": "uint8"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "level {level} · transition {transitionTime}"
+        },
+        {
+          "id": 1,
+          "name": "Move",
+          "fields": [
+            {
+              "name": "moveMode",
+              "label": "Move mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "up" },
+                { "value": 1, "name": "down" }
+              ]
+            },
+            {
+              "name": "rate",
+              "label": "Rate",
+              "kind": "uint8"
+            }
+          ],
+          "summary": "move {moveMode} · rate {rate}"
+        },
+        {
+          "id": 2,
+          "name": "Step",
+          "fields": [
+            {
+              "name": "stepMode",
+              "label": "Step mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "up" },
+                { "value": 1, "name": "down" }
+              ]
+            },
+            {
+              "name": "stepSize",
+              "label": "Step size",
+              "kind": "uint8"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "step {stepMode} {stepSize} · transition {transitionTime}"
+        },
+        { "id": 3, "name": "Stop", "summary": "stop" },
+        {
+          "id": 4,
+          "name": "Move to level with on/off",
+          "fields": [
+            {
+              "name": "level",
+              "label": "Level",
+              "kind": "uint8"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "level {level} · transition {transitionTime}"
+        },
+        {
+          "id": 5,
+          "name": "Move with on/off",
+          "fields": [
+            {
+              "name": "moveMode",
+              "label": "Move mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "up" },
+                { "value": 1, "name": "down" }
+              ]
+            },
+            {
+              "name": "rate",
+              "label": "Rate",
+              "kind": "uint8"
+            }
+          ],
+          "summary": "move {moveMode} · rate {rate}"
+        },
+        {
+          "id": 6,
+          "name": "Step with on/off",
+          "fields": [
+            {
+              "name": "stepMode",
+              "label": "Step mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "up" },
+                { "value": 1, "name": "down" }
+              ]
+            },
+            {
+              "name": "stepSize",
+              "label": "Step size",
+              "kind": "uint8"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "step {stepMode} {stepSize} · transition {transitionTime}"
+        },
+        { "id": 7, "name": "Stop with on/off", "summary": "stop" }
+      ],
+      "attributes": [
+        { "id": 0, "name": "Current level", "type": "uint8" }
+      ]
+    },
+    {
+      "id": 768,
+      "name": "Color Control",
+      "commands": [
+        {
+          "id": 0,
+          "name": "Move to hue",
+          "fields": [
+            { "name": "hue", "label": "Hue", "kind": "uint8" },
+            {
+              "name": "direction",
+              "label": "Direction",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "shortest" },
+                { "value": 1, "name": "longest" },
+                { "value": 2, "name": "up" },
+                { "value": 3, "name": "down" }
+              ]
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "hue {hue} · {direction} · transition {transitionTime}"
+        },
+        {
+          "id": 1,
+          "name": "Move hue",
+          "fields": [
+            {
+              "name": "moveMode",
+              "label": "Move mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "stop" },
+                { "value": 1, "name": "up" },
+                { "value": 3, "name": "down" }
+              ]
+            },
+            { "name": "rate", "label": "Rate", "kind": "uint8" }
+          ],
+          "summary": "move hue {moveMode} · rate {rate}"
+        },
+        {
+          "id": 2,
+          "name": "Step hue",
+          "fields": [
+            {
+              "name": "stepMode",
+              "label": "Step mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "up" },
+                { "value": 1, "name": "down" }
+              ]
+            },
+            { "name": "stepSize", "label": "Step size", "kind": "uint8" },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "step hue {stepMode} {stepSize}"
+        },
+        {
+          "id": 3,
+          "name": "Move to saturation",
+          "fields": [
+            { "name": "saturation", "label": "Saturation", "kind": "uint8" },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "saturation {saturation} · transition {transitionTime}"
+        },
+        {
+          "id": 4,
+          "name": "Move saturation",
+          "fields": [
+            {
+              "name": "moveMode",
+              "label": "Move mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "stop" },
+                { "value": 1, "name": "up" },
+                { "value": 3, "name": "down" }
+              ]
+            },
+            { "name": "rate", "label": "Rate", "kind": "uint8" }
+          ],
+          "summary": "move saturation {moveMode} · rate {rate}"
+        },
+        {
+          "id": 5,
+          "name": "Step saturation",
+          "fields": [
+            {
+              "name": "stepMode",
+              "label": "Step mode",
+              "kind": "enum",
+              "values": [
+                { "value": 0, "name": "up" },
+                { "value": 1, "name": "down" }
+              ]
+            },
+            { "name": "stepSize", "label": "Step size", "kind": "uint8" },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "step saturation {stepMode} {stepSize}"
+        },
+        {
+          "id": 6,
+          "name": "Move to hue and saturation",
+          "fields": [
+            { "name": "hue", "label": "Hue", "kind": "uint8" },
+            { "name": "saturation", "label": "Saturation", "kind": "uint8" },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "hue {hue} · saturation {saturation}"
+        },
+        {
+          "id": 7,
+          "name": "Move to color",
+          "fields": [
+            {
+              "name": "colorX",
+              "label": "Color X",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "colorY",
+              "label": "Color Y",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "color {colorX},{colorY}"
+        },
+        {
+          "id": 8,
+          "name": "Move color",
+          "fields": [
+            {
+              "name": "rateX",
+              "label": "Rate X",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "rateY",
+              "label": "Rate Y",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "move color by {rateX},{rateY}"
+        },
+        {
+          "id": 9,
+          "name": "Step color",
+          "fields": [
+            {
+              "name": "stepX",
+              "label": "Step X",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "stepY",
+              "label": "Step Y",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "step color {stepX},{stepY}"
+        },
+        {
+          "id": 10,
+          "name": "Move to color temperature",
+          "fields": [
+            {
+              "name": "colorTemperature",
+              "label": "Color temperature",
+              "kind": "uint16",
+              "endian": "little"
+            },
+            {
+              "name": "transitionTime",
+              "label": "Transition time (1/10 s)",
+              "kind": "uint16",
+              "endian": "little"
+            }
+          ],
+          "summary": "color temperature {colorTemperature}"
+        }
+      ],
+      "attributes": [
+        { "id": 0, "name": "Current hue", "type": "uint8" },
+        { "id": 1, "name": "Current saturation", "type": "uint8" },
+        { "id": 3, "name": "Current X", "type": "uint16" },
+        { "id": 4, "name": "Current Y", "type": "uint16" },
+        { "id": 7, "name": "Color temperature", "type": "uint16" }
+      ]
+    },
+    {
+      "id": 1024,
+      "name": "Illuminance Measurement",
+      "attributes": [
+        { "id": 0, "name": "Measured value", "type": "uint16" }
+      ]
+    },
+    {
+      "id": 1026,
+      "name": "Temperature Measurement",
+      "attributes": [
+        { "id": 0, "name": "Measured value", "type": "int16" }
+      ]
+    },
+    {
+      "id": 1030,
+      "name": "Occupancy Sensing",
+      "attributes": [
+        { "id": 0, "name": "Occupancy", "type": "bitmap8" }
+      ]
+    },
+    {
+      "id": 1280,
+      "name": "IAS Zone",
+      "attributes": [
+        { "id": 0, "name": "Zone state", "type": "enum8" },
+        { "id": 1, "name": "Zone type", "type": "enum16" },
+        { "id": 2, "name": "Zone status", "type": "bitmap16" }
+      ]
+    },
+    {
+      "id": 1794,
+      "name": "Metering",
+      "attributes": [
+        { "id": 0, "name": "Current summation delivered", "type": "uint24" }
+      ]
+    },
+    {
+      "id": 2820,
+      "name": "Electrical Measurement",
+      "attributes": [
+        { "id": 1291, "name": "Active power", "type": "int16" }
+      ]
+    }
+  ]
+}

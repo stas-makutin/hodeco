@@ -169,7 +169,7 @@ fn start(
 
     let state = state.clone();
     let task = task.clone();
-    tokio::spawn(run_task_boxed(
+    tokio::spawn(run_task(
         state,
         task,
         trigger,
@@ -183,33 +183,6 @@ fn start(
     ));
 
     Ok(run_id)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_task_boxed(
-    state: AppState,
-    task: TaskDefinition,
-    trigger: RunTrigger,
-    run_id: Uuid,
-    started_at: DateTime<Utc>,
-    delayed_until: Option<DateTime<Utc>>,
-    delay: std::time::Duration,
-    chain: RunChain,
-    guard: crate::automation::runtime::RunGuard,
-    control: RunControl,
-) -> futures_util::future::BoxFuture<'static, ()> {
-    Box::pin(run_task(
-        state,
-        task,
-        trigger,
-        run_id,
-        started_at,
-        delayed_until,
-        delay,
-        chain,
-        guard,
-        control,
-    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -987,6 +960,13 @@ pub fn handle_store_event(state: &AppState, event: &StoreEvent) {
         }
         StoreEvent::Dropped { .. } => return,
     };
+    // ASH link frames are diagnostics, not application messages. Never let a
+    // ZigBee ACK/NAK/RST trigger a task.
+    if key.protocol == crate::services::catalog::PROTOCOL_ZIGBEE
+        && crate::services::zigbee::is_link_frame(message.payload.as_slice())
+    {
+        return;
+    }
     let snapshot = state.automation.snapshot();
     for task in snapshot.tasks.values() {
         if !task.enabled {

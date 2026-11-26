@@ -1,0 +1,21 @@
+[Unit]
+Description=Hodeco - Home devices HTTP gateway service
+Documentation=https://github.com/stas-makutin/hodeco
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hodeco --config /etc/hodeco/config.yaml
+WorkingDirectory=/var/lib/hodeco
+User=hodeco
+Group=hodeco
+StateDirectory=hodeco
+StateDirectoryMode=0750
+LogsDirectory=hodeco
+LogsDirectoryMode=0750
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=35
+
+[Install]
+WantedBy=multi-user.target

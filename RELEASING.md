@@ -14,8 +14,8 @@ The project uses one version for the root workspace and one for the separate
 
 All crates in the root workspace inherit the root version (`hodeco`,
 `hodeco-contract`, `hodeco-codec`, and `hodeco-schedule`), and `hodeco-ui`
-inherits its workspace version. Tags use a `v` prefix: `v0.2.0`, or
-`v0.2.0-rc.1` for a pre-release.
+inherits its workspace version. Tags use a `v` prefix: `v0.3.0`, or
+`v0.3.0-rc.1` for a pre-release.
 
 The release workflow refuses to build or publish when the tag, root workspace,
 and UI versions do not agree.
@@ -61,7 +61,7 @@ UI. It runs on pushes to `master` or `main`; update the branch filter in
 4. Tag and push:
 
    ```sh
-   git tag -a v0.2.0 -m "hodeco 0.2.0"
+   git tag -a v0.3.0 -m "hodeco 0.3.0"
    git push origin master --follow-tags
    ```
 
@@ -72,7 +72,7 @@ UI. It runs on pushes to `master` or `main`; update the branch filter in
    clippy, tests, and the wasm contract check, builds the web UI once, and then
    builds every target in parallel. The final job takes the `CHANGELOG.md`
    section whose heading matches the tag version (for example
-   `## 0.2.0 - 2026-11-21` for `v0.2.0`), uses it as the GitHub release notes,
+   `## 0.3.0 — 2026-11-25` for `v0.3.0`), uses it as the GitHub release notes,
    and attaches all archives, packages, and `SHA256SUMS`. The workflow fails if
    that section is missing; it does not fall back to generated commit notes.
 
@@ -122,20 +122,24 @@ are kept at the application level, not inside `site/`.
 Packages install the same files under:
 
 ```text
+/etc/hodeco/config.yaml
 /usr/bin/hodeco
+/usr/lib/systemd/system/hodeco.service
+/usr/lib/sysusers.d/hodeco.conf
 /usr/share/hodeco/site/
 /usr/share/doc/hodeco/
 ```
 
 Package documentation includes both `THIRD-PARTY-LICENSES.md` (backend) and
-`THIRD-PARTY-LICENSES-UI.md` (frontend).
+`THIRD-PARTY-LICENSES-UI.md` (frontend). `/etc/hodeco/config.yaml` is installed
+as a configuration file, so local edits are preserved on upgrade.
 
 Package filenames follow the normal conventions, for example:
 
 ```text
-hodeco_0.2.0_amd64.deb
-hodeco-0.2.0-1.x86_64.rpm
-hodeco_0.2.0_armhf.deb
+hodeco_0.3.0_amd64.deb
+hodeco-0.3.0-1.x86_64.rpm
+hodeco_0.3.0_armhf.deb
 ```
 
 Windows builds use the static MSVC CRT, so the ZIPs do not require the Visual
@@ -155,7 +159,7 @@ requires an ARMv7 userland such as Debian or Ubuntu armhf.
 Windows (portable, static CRT):
 
 ```powershell
-Expand-Archive hodeco-0.2.0-windows-x86_64.zip -DestinationPath hodeco
+Expand-Archive hodeco-0.3.0-windows-x86_64.zip -DestinationPath hodeco
 cd hodeco
 .\hodeco.exe run
 ```
@@ -163,26 +167,33 @@ cd hodeco
 Linux (portable):
 
 ```sh
-tar -xzf hodeco-0.2.0-linux-x86_64.tar.gz
-cd hodeco-0.2.0-linux-x86_64
+tar -xzf hodeco-0.3.0-linux-x86_64.tar.gz
+cd hodeco-0.3.0-linux-x86_64
 ./hodeco run --config config.yaml
 ```
 
 Linux package:
 
 ```sh
-sudo dpkg -i hodeco_0.2.0_amd64.deb
+sudo apt install ./hodeco_0.3.0_amd64.deb
 # or
-sudo rpm -i hodeco-0.2.0-1.x86_64.rpm
+sudo dnf install ./hodeco-0.3.0-1.x86_64.rpm
 ```
 
-Packages do not install or start the service automatically. Register the
-systemd unit after installing:
+The package creates or repairs the `hodeco` system user and group, prepares
+`/etc/hodeco`, `/var/lib/hodeco`, and `/var/log/hodeco` with the correct
+ownership, enables `hodeco.service`, and starts it on a fresh install. On an
+upgrade it stops the running service before replacing files and starts it again
+only if it had been running. Manage it with `systemctl`:
 
 ```sh
-sudo hodeco install
-sudo hodeco start
+sudo systemctl status hodeco
+sudo systemctl restart hodeco
 ```
+
+Uninstalling stops and disables the unit but keeps the `hodeco` user and the
+data in `/var/lib/hodeco` and `/var/log/hodeco`. Remove them manually if they
+are no longer needed.
 
 See [the wiki](../../wiki/Releases) for operator-facing notes.
 
@@ -197,7 +208,7 @@ sha256sum --check SHA256SUMS
 On Windows:
 
 ```powershell
-Get-FileHash .\hodeco-0.2.0-windows-x86_64.zip -Algorithm SHA256
+Get-FileHash .\hodeco-0.3.0-windows-x86_64.zip -Algorithm SHA256
 ```
 
 ## Troubleshooting

@@ -6,6 +6,7 @@
 use chrono::{DateTime, Local, Utc};
 use hodeco_codec::entities;
 use hodeco_codec::hex::spaced_hex;
+use hodeco_codec::zigbee;
 use hodeco_codec::zwave;
 use hodeco_contract::domain::{
     Message, MessageState, PayloadExpr, PayloadOffset, ProtocolInfo, ServiceInfo, ServiceRef,
@@ -537,6 +538,7 @@ pub type MessageParser = fn(&[u8]) -> hodeco_codec::parsed::DecodeResult;
 pub fn parser_for_protocol(protocol: &str) -> Option<MessageParser> {
     match protocol {
         "zwave" => Some(zwave::decode),
+        "zigbee" => Some(zigbee::decode),
         _ => None,
     }
 }
@@ -752,6 +754,7 @@ mod tests {
             status: hodeco_contract::domain::ServiceStatus {
                 state: hodeco_contract::domain::ServiceState::Running,
                 error: None,
+                detail: None,
             },
             params: Default::default(),
         }
@@ -919,6 +922,7 @@ mod tests {
             status: hodeco_contract::domain::ServiceStatus {
                 state: hodeco_contract::domain::ServiceState::Running,
                 error: None,
+                detail: None,
             },
             params: Default::default(),
         }];
@@ -944,5 +948,43 @@ mod tests {
             message_summary(&unresolved, &message),
             "Raw payload · 7 bytes"
         );
+    }
+
+    #[test]
+    fn zigbee_messages_use_the_zigbee_parser() {
+        let services = vec![ServiceInfo {
+            alias: Some("ZB".to_string()),
+            protocol: "zigbee".to_string(),
+            transport: "serial".to_string(),
+            entry: "COM5".to_string(),
+            status: hodeco_contract::domain::ServiceStatus {
+                state: hodeco_contract::domain::ServiceState::Running,
+                error: None,
+                detail: Some("EZSP v4 · stack 0x5410".to_string()),
+            },
+            params: Default::default(),
+        }];
+        let version = Message {
+            id: Uuid::new_v4(),
+            time: Utc::now(),
+            service: ServiceRef::Alias {
+                alias: "ZB".to_string(),
+            },
+            state: MessageState::Incoming,
+            payload: Base64Bytes::from(vec![0x00, 0x80, 0x01, 0x00, 0x00, 0x04, 0x02, 0x10, 0x54]),
+        };
+        assert_eq!(message_protocol(&services, &version), Some("zigbee"));
+        assert!(message_summary(&services, &version).contains("EZSP v4"));
+
+        let ack = Message {
+            id: Uuid::new_v4(),
+            time: Utc::now(),
+            service: ServiceRef::Alias {
+                alias: "ZB".to_string(),
+            },
+            state: MessageState::Incoming,
+            payload: Base64Bytes::from(vec![0x81, 0x60, 0x59, 0x7e]),
+        };
+        assert_eq!(message_summary(&services, &ack), "ASH ACK · ack 1");
     }
 }

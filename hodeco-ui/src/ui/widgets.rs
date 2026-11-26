@@ -46,7 +46,7 @@ pub struct ComboOptions<'a, T> {
 
 /// Maximum height of the scrollable result list inside a [`searchable_combo`]
 /// popup.
-const LIST_MAX_HEIGHT: f32 = 270.0;
+pub(crate) const LIST_MAX_HEIGHT: f32 = 270.0;
 
 /// A combo box with a filter field in its popup.
 ///
@@ -1001,6 +1001,36 @@ fn normalize_signed(text: &str) -> String {
     }
 }
 
+/// Compact, non-interactive chip used for tags and labels.
+pub fn chip(ui: &mut Ui, theme: UiTheme, text: &str, tone: Tone) {
+    let color = tone.color(theme);
+    Frame::new()
+        .fill(color.gamma_multiply(0.12))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.45)))
+        .corner_radius(9)
+        .inner_margin(Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(12.0).color(color));
+        });
+}
+
+/// Removable filter chip rendered as a single button.
+///
+/// Unlike [`removable_chip`], this is one widget and therefore wraps correctly
+/// inside [`Ui::horizontal_wrapped`]. Clicking anywhere on the chip removes it.
+pub fn removable_chip_button(ui: &mut Ui, theme: UiTheme, text: &str, tone: Tone) -> bool {
+    let color = tone.color(theme);
+    ui.add(
+        egui::Button::new(RichText::new(format!("{text}  ×")).size(13.5).color(color))
+            .fill(color.gamma_multiply(0.12))
+            .stroke(Stroke::new(1.0, color.gamma_multiply(0.45)))
+            .corner_radius(9)
+            .small(),
+    )
+    .on_hover_text("Remove filter")
+    .clicked()
+}
+
 /// Removable filter chip. Returns true when the user clicked the `x`.
 pub fn removable_chip(ui: &mut Ui, theme: UiTheme, text: &str, tone: Tone) -> bool {
     let color = tone.color(theme);
@@ -1123,12 +1153,36 @@ pub fn dialog_body(ui: &mut Ui, max_height: f32, body: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// Fixed dialog footer with right-aligned actions.
-pub fn dialog_footer(ui: &mut Ui, footer: impl FnOnce(&mut Ui)) {
+/// Fixed dialog footer with right-aligned actions and an optional error on the
+/// same row. The error is truncated before it can squeeze or move the actions.
+pub fn dialog_footer(
+    ui: &mut Ui,
+    theme: UiTheme,
+    error: Option<&str>,
+    footer: impl FnOnce(&mut Ui),
+) {
     ui.add_space(4.0);
     ui.separator();
     ui.horizontal(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), footer);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            footer(ui);
+            if let Some(error) = error {
+                let remaining = ui.available_width();
+                if remaining > 8.0 {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(remaining, ui.spacing().interact_size.y),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.add_space(8.0);
+                            ui.add(
+                                Label::new(RichText::new(error).color(palette(theme).red))
+                                    .truncate(),
+                            );
+                        },
+                    );
+                }
+            }
+        });
     });
 }
 
@@ -1158,7 +1212,7 @@ pub fn confirm_modal(
             dialog_body(ui, 180.0, |ui| {
                 ui.label(detail);
             });
-            dialog_footer(ui, |ui| {
+            dialog_footer(ui, theme, None, |ui| {
                 if ui.button("Cancel").clicked() {
                     result = Some(false);
                 }
@@ -1239,6 +1293,36 @@ pub fn param_value_text(
 mod tests {
     use super::*;
     use egui::TextBuffer as _;
+
+    #[test]
+    fn dialog_footer_error_stays_on_the_action_row() {
+        let ctx = egui::Context::default();
+        let mut heights = Vec::new();
+        for error in [None, Some("a service for COM4 already exists")] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(720.0);
+                        let top = ui.cursor().top();
+                        dialog_footer(ui, UiTheme::Dark, error, |ui| {
+                            let _ = ui.button("Cancel");
+                            let _ = ui.button("Add service");
+                        });
+                        heights.push(ui.min_rect().bottom() - top);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert!((heights[0] - heights[1]).abs() < 1.0);
+    }
 
     #[test]
     fn signed_numbers_keep_one_leading_minus() {

@@ -6,6 +6,7 @@
 //! Nothing here touches the network, so it also works in the browser.
 
 use chrono::{DateTime, TimeDelta, Utc};
+use hodeco_codec::zigbee;
 use hodeco_codec::zwave::{request as frame_request, response as frame_response};
 use hodeco_contract::api::notifications::{
     DiscoveryNotification, MessageNotification, Notification, TaskRunFinishedNotification,
@@ -93,6 +94,7 @@ impl DemoServer {
                 status: ServiceStatus {
                     state: ServiceState::Running,
                     error: None,
+                    detail: None,
                 },
                 params: BTreeMap::from([
                     ("baudRate".to_string(), json!(115_200)),
@@ -108,6 +110,7 @@ impl DemoServer {
                 status: ServiceStatus {
                     state: ServiceState::Error,
                     error: Some("access denied while opening COM3".to_string()),
+                    detail: None,
                 },
                 params: BTreeMap::new(),
             },
@@ -119,6 +122,7 @@ impl DemoServer {
                 status: ServiceStatus {
                     state: ServiceState::Starting,
                     error: None,
+                    detail: None,
                 },
                 params: BTreeMap::from([("baudRate".to_string(), json!(57_600))]),
             },
@@ -130,10 +134,28 @@ impl DemoServer {
                 status: ServiceStatus {
                     state: ServiceState::Running,
                     error: None,
+                    detail: None,
                 },
                 params: BTreeMap::from([
                     ("connectTimeout".to_string(), json!("10 s")),
                     ("readTimeout".to_string(), json!("30 s")),
+                ]),
+            },
+            ServiceInfo {
+                alias: Some("ZB".to_string()),
+                protocol: "zigbee".to_string(),
+                transport: "serial".to_string(),
+                entry: "COM5".to_string(),
+                status: ServiceStatus {
+                    state: ServiceState::Running,
+                    error: None,
+                    detail: Some("EZSP v4 · stack 0x5410".to_string()),
+                },
+                params: BTreeMap::from([
+                    ("baudRate".to_string(), json!(57_600)),
+                    ("flowControl".to_string(), json!("none")),
+                    ("openAttemptsInterval".to_string(), json!("3 s")),
+                    ("outgoingMaxTTL".to_string(), json!("10 s")),
                 ]),
             },
         ];
@@ -143,6 +165,9 @@ impl DemoServer {
         };
         let http = ServiceRef::Alias {
             alias: "HTTP".to_string(),
+        };
+        let zigbee = ServiceRef::Alias {
+            alias: "ZB".to_string(),
         };
         let mut messages = vec![
             new_message(
@@ -248,6 +273,120 @@ impl DemoServer {
                 MessageState::Incoming,
                 large_http_response_payload(102_400),
             ),
+            new_message(
+                now - TimeDelta::seconds(18),
+                &zigbee,
+                MessageState::Incoming,
+                vec![0x81, 0x60, 0x59, 0x7e],
+            ),
+            new_message(
+                now - TimeDelta::seconds(16),
+                &zigbee,
+                MessageState::Outgoing,
+                vec![0x00, 0x00, 0x01, 0x00, 0x00, 0x04],
+            ),
+            new_message(
+                now - TimeDelta::seconds(15),
+                &zigbee,
+                MessageState::Incoming,
+                vec![0x00, 0x80, 0x01, 0x00, 0x00, 0x04, 0x02, 0x10, 0x54],
+            ),
+            new_message(
+                now - TimeDelta::seconds(12),
+                &zigbee,
+                MessageState::Outgoing,
+                vec![0x01, 0x00, 0x01, 0x18, 0x00],
+            ),
+            new_message(
+                now - TimeDelta::seconds(11),
+                &zigbee,
+                MessageState::Incoming,
+                vec![0xa1, 0x44, 0x3b, 0x7e],
+            ),
+            new_message(
+                now - TimeDelta::seconds(10),
+                &zigbee,
+                MessageState::Incoming,
+                vec![0x01, 0x80, 0x01, 0x18, 0x00, 0x02],
+            ),
+            new_message(
+                now - TimeDelta::seconds(8),
+                &zigbee,
+                MessageState::Incoming,
+                vec![
+                    0x02, 0x80, 0x01, 0x45, 0x00, 0x00, 0x04, 0x01, 0x06, 0x00, 0x01, 0x01,
+                    0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xce, 0x34, 0x12, 0x00, 0x00, 0x07,
+                    0x18, 0x05, 0x0a, 0x00, 0x00, 0x10, 0x01,
+                ],
+            ),
+            new_message(
+                now - TimeDelta::seconds(7),
+                &zigbee,
+                MessageState::Outgoing,
+                zigbee::build_request(2, zigbee::EZSP_PERMIT_JOINING, &[180]),
+            ),
+            new_message(
+                now - TimeDelta::seconds(7),
+                &zigbee,
+                MessageState::Incoming,
+                zigbee_response(2, zigbee::EZSP_PERMIT_JOINING, &[0x00]),
+            ),
+            new_message(
+                now - TimeDelta::seconds(6),
+                &zigbee,
+                MessageState::Outgoing,
+                zigbee_send_unicast(4, 0x1234, 0x0006, &[0x01, 0x01, 0x01]),
+            ),
+            new_message(
+                now - TimeDelta::seconds(6),
+                &zigbee,
+                MessageState::Incoming,
+                zigbee_response(4, zigbee::EZSP_SEND_UNICAST, &[0x00, 0x01]),
+            ),
+            new_message(
+                now - TimeDelta::seconds(5),
+                &zigbee,
+                MessageState::Outgoing,
+                zigbee_send_unicast(
+                    5,
+                    0x1237,
+                    0x0008,
+                    &[0x01, 0x02, 0x00, 0x64, 0x0a, 0x00],
+                ),
+            ),
+            new_message(
+                now - TimeDelta::seconds(4),
+                &zigbee,
+                MessageState::Incoming,
+                zigbee_incoming(
+                    6,
+                    0x1237,
+                    0x0008,
+                    &[0x18, 0x03, 0x0a, 0x00, 0x00, 0x20, 0x64],
+                ),
+            ),
+            new_message(
+                now - TimeDelta::seconds(3),
+                &zigbee,
+                MessageState::Incoming,
+                zigbee_incoming(
+                    7,
+                    0x123a,
+                    0x0402,
+                    &[0x18, 0x04, 0x0a, 0x00, 0x00, 0x29, 0x66, 0x08],
+                ),
+            ),
+            new_message(
+                now - TimeDelta::seconds(2),
+                &zigbee,
+                MessageState::Outgoing,
+                zigbee_send_unicast(
+                    8,
+                    0x1238,
+                    0x0300,
+                    &[0x01, 0x05, 0x00, 0x80, 0x00, 0x02, 0x00],
+                ),
+            ),
         ];
         messages.sort_by_key(|message| message.time);
         let mut last_time = messages.first().map(|message| message.time).unwrap_or(now);
@@ -341,6 +480,7 @@ impl DemoServer {
             id: "evening-lights".to_string(),
             name: "Evening lights".to_string(),
             description: "Turn on the porch lights before sunset".to_string(),
+            labels: demo_labels("area", 1, 24, &["lighting"]),
             triggers: vec![TaskTrigger::Schedule(ScheduleTrigger {
                 id: "sunset".to_string(),
                 schedule: "before-sunset".to_string(),
@@ -360,6 +500,7 @@ impl DemoServer {
             id: "porch-motion".to_string(),
             name: "Porch motion".to_string(),
             description: "Notify when the porch sensor reports motion".to_string(),
+            labels: demo_labels("device", 1, 23, &["automated", "security"]),
             triggers: vec![TaskTrigger::Message(
                 hodeco_contract::domain::MessageTrigger {
                     id: "motion".to_string(),
@@ -386,12 +527,22 @@ impl DemoServer {
             id: "winter-lights".to_string(),
             name: "Winter lights".to_string(),
             description: "Seasonal lights; disabled outside winter".to_string(),
+            labels: demo_labels("zone", 1, 24, &["seasonal"]),
             enabled: false,
             triggers: vec![TaskTrigger::Schedule(ScheduleTrigger {
                 id: "winter-sunset".to_string(),
                 schedule: "before-sunset".to_string(),
                 max_runs: Some(120),
             })],
+            ..TaskDefinition::default()
+        };
+        // The fourth task exists so the demo catalog can carry 100 distinct
+        // labels without exceeding the 32-label limit on any one task.
+        let label_catalog = TaskDefinition {
+            id: "label-catalog".to_string(),
+            name: "Label catalog".to_string(),
+            description: "Demo task with a large label set for filter testing".to_string(),
+            labels: demo_labels("automation", 1, 24, &["maintenance"]),
             ..TaskDefinition::default()
         };
         let now_summary = RunSummary {
@@ -537,6 +688,15 @@ impl DemoServer {
                 suppressed_runs: 0,
                 last_suppressed_reason: None,
             },
+            TaskInfo {
+                task: label_catalog,
+                running: false,
+                running_run_id: None,
+                last_run: None,
+                next: None,
+                suppressed_runs: 0,
+                last_suppressed_reason: None,
+            },
         ];
 
         Self {
@@ -620,6 +780,7 @@ impl DemoServer {
                 let params: ProtocolInfoParams = parse(&request.params)?;
                 let protocol = match params.protocol.as_str() {
                     "zwave" => catalog::zwave_protocol_info(),
+                    "zigbee" => catalog::zigbee_protocol_info(),
                     "http" => http_protocol_info(),
                     _ => {
                         return Err(ApiError::new(
@@ -637,7 +798,7 @@ impl DemoServer {
             }
             Method::DiscoveryStart => {
                 let params: DiscoveryStartParams = parse(&request.params)?;
-                if !matches!(params.protocol.as_str(), "zwave" | "http") {
+                if !matches!(params.protocol.as_str(), "zwave" | "zigbee" | "http") {
                     return Err(ApiError::new(
                         ErrorCode::UnknownProtocol,
                         format!("unknown protocol '{}'", params.protocol),
@@ -734,6 +895,8 @@ impl DemoServer {
                         format!("the alias '{alias}' is already in use"),
                     ));
                 }
+                let detail =
+                    (params.protocol == "zigbee").then(|| "EZSP v4 · stack 0x5410".to_string());
                 let service = ServiceInfo {
                     alias,
                     protocol: params.protocol,
@@ -742,6 +905,7 @@ impl DemoServer {
                     status: ServiceStatus {
                         state: ServiceState::Running,
                         error: None,
+                        detail,
                     },
                     params: params.params,
                 };
@@ -1645,6 +1809,61 @@ fn new_message(
     }
 }
 
+fn zigbee_response(seq: u8, command: u16, params: &[u8]) -> Vec<u8> {
+    let mut frame = zigbee::build_request(seq, command, params);
+    frame[1] |= 0x80;
+    frame
+}
+
+fn zigbee_send_unicast(seq: u8, destination: u16, cluster: u16, zcl: &[u8]) -> Vec<u8> {
+    let mut params = vec![
+        0x00, // direct
+        destination as u8,
+        (destination >> 8) as u8,
+        0x04,
+        0x01, // Home Automation profile
+        cluster as u8,
+        (cluster >> 8) as u8,
+        0x01, // source endpoint
+        0x01, // destination endpoint
+        0x00,
+        0x00, // APS options
+        0x00,
+        0x00, // group ID
+        0x01, // APS sequence
+        0x01, // message tag
+        zcl.len() as u8,
+    ];
+    params.extend_from_slice(zcl);
+    zigbee::build_request(seq, zigbee::EZSP_SEND_UNICAST, &params)
+}
+
+fn zigbee_incoming(seq: u8, sender: u16, cluster: u16, zcl: &[u8]) -> Vec<u8> {
+    let mut params = vec![
+        0x00, // unicast
+        0x04,
+        0x01, // Home Automation profile
+        cluster as u8,
+        (cluster >> 8) as u8,
+        0x01, // source endpoint
+        0x01, // destination endpoint
+        0x00,
+        0x00, // APS options
+        0x00,
+        0x00, // group ID
+        0x01, // APS sequence
+        0xff, // LQI
+        0xce, // RSSI
+        sender as u8,
+        (sender >> 8) as u8,
+        0x00, // binding index
+        0x00, // address index
+        zcl.len() as u8,
+    ];
+    params.extend_from_slice(zcl);
+    zigbee_response(seq, zigbee::EZSP_INCOMING_MESSAGE_HANDLER, &params)
+}
+
 fn traffic_payload(index: usize) -> Vec<u8> {
     match index % 5 {
         0 => frame_request(&[0x04, 0x00, 0x04, 0x03, 0x20, 0x01, 0x45]),
@@ -1699,6 +1918,30 @@ fn large_http_payload(size: usize, header: &str) -> Vec<u8> {
 }
 
 fn discovery_entries(protocol: &str) -> Vec<DiscoveryEntry> {
+    if protocol == "zigbee" {
+        return vec![
+            DiscoveryEntry {
+                entry: "COM4".to_string(),
+                available: false,
+                description: None,
+                error: Some("no EZSP version response".to_string()),
+            },
+            DiscoveryEntry {
+                entry: "COM5".to_string(),
+                available: false,
+                description: None,
+                error: Some("port is already in use by ZB".to_string()),
+            },
+            DiscoveryEntry {
+                entry: "COM8".to_string(),
+                available: true,
+                description: Some(
+                    "Nortec HUSBZB-1 ZigBee Hub [EZSP v4 · stack 0x5410]".to_string(),
+                ),
+                error: None,
+            },
+        ];
+    }
     if protocol == "http" {
         vec![
             DiscoveryEntry {
@@ -1730,12 +1973,18 @@ fn discovery_entries(protocol: &str) -> Vec<DiscoveryEntry> {
             },
             DiscoveryEntry {
                 entry: "COM4".to_string(),
-                available: true,
-                description: Some("USB serial controller".to_string()),
-                error: None,
+                available: false,
+                description: None,
+                error: Some("port is already in use by ZW".to_string()),
             },
             DiscoveryEntry {
                 entry: "COM7".to_string(),
+                available: false,
+                description: None,
+                error: Some("port is already in use by ZW-Lab".to_string()),
+            },
+            DiscoveryEntry {
+                entry: "COM6".to_string(),
                 available: true,
                 description: Some("USB serial controller".to_string()),
                 error: None,
@@ -1817,8 +2066,21 @@ fn protocol_transport_params(protocol: &str, transport: &str) -> Result<Vec<Para
             definitions.extend(catalog::zwave_params());
             Ok(definitions)
         }
+        ("zigbee", "serial") => {
+            let mut definitions = catalog::serial_params();
+            for definition in &mut definitions {
+                if definition.name == catalog::SERIAL_PARAM_BAUD_RATE {
+                    definition.default = Some(json!(57_600));
+                }
+                if definition.name == catalog::SERIAL_PARAM_FLOW_CONTROL {
+                    definition.default = Some(json!("none"));
+                }
+            }
+            definitions.extend(catalog::zigbee_params());
+            Ok(definitions)
+        }
         ("http", "tcp") => Ok(tcp_transport_info().params),
-        (protocol, _) if !matches!(protocol, "zwave" | "http") => Err(ApiError::new(
+        (protocol, _) if !matches!(protocol, "zwave" | "zigbee" | "http") => Err(ApiError::new(
             ErrorCode::UnknownProtocol,
             format!("unknown protocol '{protocol}'"),
         )),
@@ -1868,8 +2130,20 @@ fn matches_message_ref(message: &Message, reference: &ServiceRef) -> bool {
     }
 }
 
+/// Builds a deterministic demo label set with one of each `extra` label and
+/// `prefix-NN` labels in the inclusive range.
+fn demo_labels(prefix: &str, first: usize, last: usize, extra: &[&str]) -> Vec<String> {
+    let mut labels: Vec<String> = extra.iter().map(|label| (*label).to_string()).collect();
+    labels.extend((first..=last).map(|index| format!("{prefix}-{index:02}")));
+    labels
+}
+
 fn protocol_infos() -> Vec<ProtocolInfo> {
-    vec![catalog::zwave_protocol_info(), http_protocol_info()]
+    vec![
+        catalog::zwave_protocol_info(),
+        catalog::zigbee_protocol_info(),
+        http_protocol_info(),
+    ]
 }
 
 fn http_protocol_info() -> ProtocolInfo {
@@ -1921,13 +2195,32 @@ mod tests {
     }
 
     #[test]
+    fn demo_exposes_one_hundred_distinct_labels() {
+        let demo = DemoServer::new();
+        let labels: std::collections::HashSet<&str> = demo
+            .tasks
+            .iter()
+            .flat_map(|info| info.task.labels.iter().map(String::as_str))
+            .collect();
+        assert_eq!(labels.len(), 100);
+        for info in &demo.tasks {
+            hodeco_contract::domain::validate_task_labels(&info.task.labels).unwrap();
+            assert!(
+                info.task.labels.len() <= hodeco_contract::domain::MAX_TASK_LABELS,
+                "{} has too many labels",
+                info.task.id
+            );
+        }
+    }
+
+    #[test]
     fn lists_fixture_services_and_messages() {
         let mut server = DemoServer::new();
         let responses = server.handle(&request("1", "services.list", json!({})));
         assert_eq!(responses.len(), 1);
         let response = parse_response(&responses[0]);
         assert_eq!(response["id"], "1");
-        assert_eq!(response["result"]["services"].as_array().unwrap().len(), 4);
+        assert_eq!(response["result"]["services"].as_array().unwrap().len(), 5);
 
         let responses = server.handle(&request("2", "messages.list", json!({"limit": 5})));
         let response = parse_response(&responses[0]);
@@ -2100,7 +2393,77 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            3
+            4
+        );
+    }
+
+    #[test]
+    fn zigbee_discovery_returns_ezsp_entries() {
+        let mut server = DemoServer::new();
+        let responses = server.handle(&request(
+            "1",
+            "discovery.start",
+            json!({"protocol": "zigbee", "transport": "serial"}),
+        ));
+        assert!(parse_response(&responses[0])["error"].is_null());
+        server.tick();
+        let discovery = server.discovery.as_ref().expect("discovery exists");
+        assert_eq!(discovery.protocol, "zigbee");
+        assert!(discovery.entries.iter().any(|entry| {
+            entry.entry == "COM8"
+                && entry.available
+                && entry
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains("EZSP v4"))
+        }));
+        assert!(discovery.entries.iter().any(|entry| {
+            entry.entry == "COM5"
+                && !entry.available
+                && entry
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("already in use"))
+        }));
+    }
+
+    #[test]
+    fn discovery_entry_can_be_added_to_demo_services() {
+        let mut server = DemoServer::new();
+        server.handle(&request(
+            "1",
+            "discovery.start",
+            json!({"protocol": "zigbee", "transport": "serial"}),
+        ));
+        server.tick();
+        let discovery = server.discovery.as_ref().expect("discovery exists");
+        let entry = discovery
+            .entries
+            .iter()
+            .find(|entry| entry.available)
+            .map(|entry| entry.entry.clone())
+            .expect("available discovery entry");
+        let services_before = server.services.len();
+
+        let response = parse_response(
+            &server.handle(&request(
+                "2",
+                "services.add",
+                json!({
+                    "alias": "ZB2",
+                    "protocol": "zigbee",
+                    "transport": "serial",
+                    "entry": entry,
+                }),
+            ))[0],
+        );
+        assert!(response["error"].is_null(), "{response}");
+        assert_eq!(server.services.len(), services_before + 1);
+        assert!(
+            server
+                .services
+                .iter()
+                .any(|service| service.alias.as_deref() == Some("ZB2"))
         );
     }
 
@@ -2246,6 +2609,100 @@ mod tests {
     }
 
     #[test]
+    fn demo_catalog_payloads_match_contract_types() {
+        use hodeco_contract::api::payloads::{
+            ProtocolsListResult, ServicesListResult, TransportsListResult,
+        };
+
+        let mut server = DemoServer::new();
+        for (method, parse) in [
+            (
+                "protocols.list",
+                (|value| serde_json::from_value::<ProtocolsListResult>(value).map(|_| ()))
+                    as fn(serde_json::Value) -> Result<(), _>,
+            ),
+            (
+                "transports.list",
+                (|value| serde_json::from_value::<TransportsListResult>(value).map(|_| ()))
+                    as fn(serde_json::Value) -> Result<(), _>,
+            ),
+            (
+                "services.list",
+                (|value| serde_json::from_value::<ServicesListResult>(value).map(|_| ()))
+                    as fn(serde_json::Value) -> Result<(), _>,
+            ),
+        ] {
+            let response = parse_response(&server.handle(&request("1", method, json!({})))[0]);
+            parse(response["result"].clone())
+                .unwrap_or_else(|error| panic!("{method} result does not match: {error}"));
+        }
+    }
+
+    #[test]
+    fn zigbee_protocol_and_fixtures_are_exposed() {
+        let mut server = DemoServer::new();
+        let response = parse_response(
+            &server.handle(&request(
+                "1",
+                "protocols.params",
+                json!({"protocol": "zigbee", "transport": "serial"}),
+            ))[0],
+        );
+        let params = response["result"]["params"].as_array().unwrap();
+        assert!(
+            params
+                .iter()
+                .any(|param| { param["name"] == "baudRate" && param["default"] == json!(57_600) })
+        );
+        assert!(
+            params.iter().any(|param| {
+                param["name"] == "flowControl" && param["default"] == json!("none")
+            })
+        );
+        assert!(params.iter().any(|param| param["name"] == "ashAckTimeout"));
+
+        let response = parse_response(&server.handle(&request("2", "services.list", json!({})))[0]);
+        let services = response["result"]["services"].as_array().unwrap();
+        let zigbee = services
+            .iter()
+            .find(|service| service["alias"] == "ZB")
+            .expect("zigbee fixture");
+        assert_eq!(zigbee["protocol"], "zigbee");
+        assert_eq!(zigbee["status"]["detail"], "EZSP v4 · stack 0x5410");
+    }
+
+    #[test]
+    fn zigbee_command_fixtures_decode() {
+        let server = DemoServer::new();
+        let zigbee = ServiceRef::Alias {
+            alias: "ZB".to_string(),
+        };
+        let decoded: Vec<String> = server
+            .messages
+            .iter()
+            .filter(|message| message.service == zigbee)
+            .map(|message| zigbee::decode(message.payload.as_slice()).summary)
+            .collect();
+
+        assert!(
+            decoded
+                .iter()
+                .any(|summary| summary.contains("permitJoining"))
+        );
+        assert!(decoded.iter().any(|summary| summary.contains("level 100")));
+        assert!(
+            decoded
+                .iter()
+                .any(|summary| summary.contains("Color Control"))
+        );
+        assert!(
+            decoded
+                .iter()
+                .any(|summary| summary.contains("Temperature Measurement"))
+        );
+    }
+
+    #[test]
     fn config_update_does_not_touch_services() {
         let mut server = DemoServer::new();
         let mut config = server.config();
@@ -2256,6 +2713,6 @@ mod tests {
         );
         assert!(response["error"].is_null());
         assert_eq!(response["result"]["restartRequired"], json!(["log"]));
-        assert_eq!(server.services.len(), 4);
+        assert_eq!(server.services.len(), 5);
     }
 }

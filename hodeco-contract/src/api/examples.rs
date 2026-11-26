@@ -102,6 +102,7 @@ pub fn example_params(method: Method) -> Value {
             task: TaskDefinition {
                 id: "evening-lights".to_string(),
                 name: "Evening lights".to_string(),
+                labels: vec!["lighting".to_string()],
                 ..TaskDefinition::default()
             },
         }),
@@ -110,6 +111,7 @@ pub fn example_params(method: Method) -> Value {
             task: TaskDefinition {
                 id: "evening-lights".to_string(),
                 name: "Evening lights".to_string(),
+                labels: vec!["lighting".to_string()],
                 ..TaskDefinition::default()
             },
         }),

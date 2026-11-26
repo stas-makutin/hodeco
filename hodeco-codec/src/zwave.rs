@@ -813,7 +813,7 @@ fn push_field(
     }
 
     match field.role {
-        FieldRole::Target => {
+        FieldRole::Target | FieldRole::Broadcast => {
             if let Some(node) = bytes.first() {
                 meta.targets.push(*node);
             }
@@ -824,7 +824,18 @@ fn push_field(
         FieldRole::Source => {
             meta.source = bytes.first().copied();
         }
-        FieldRole::Value | FieldRole::Length | FieldRole::CommandClass => {}
+        FieldRole::Value
+        | FieldRole::Length
+        | FieldRole::CommandClass
+        | FieldRole::Cluster
+        | FieldRole::Profile
+        | FieldRole::Group
+        | FieldRole::SourceEndpoint
+        | FieldRole::DestinationEndpoint
+        | FieldRole::Payload
+        | FieldRole::DestinationType
+        | FieldRole::RxStatus
+        | FieldRole::TxStatus => {}
     }
 }
 
@@ -833,23 +844,26 @@ fn decode_field_value(field: &FieldDef, bytes: &[u8]) -> FieldValue {
         FieldType::Node => numeric_value(field, bytes.first().copied().map(u64::from), 1),
         FieldType::Uint8 => numeric_value(field, bytes.first().copied().map(u64::from), 1),
         FieldType::Uint16 => {
-            let value =
-                (bytes.len() >= 2).then(|| u64::from(u16::from_be_bytes([bytes[0], bytes[1]])));
+            let value = (bytes.len() >= 2).then(|| {
+                let mut value = [0u8; 2];
+                value.copy_from_slice(&bytes[..2]);
+                field.endian.read_unsigned(&value)
+            });
             numeric_value(field, value, 2)
         }
         FieldType::Uint32 => {
-            let value = (bytes.len() >= 4)
-                .then(|| u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])));
+            let value = (bytes.len() >= 4).then(|| {
+                let mut value = [0u8; 4];
+                value.copy_from_slice(&bytes[..4]);
+                field.endian.read_unsigned(&value)
+            });
             numeric_value(field, value, 4)
         }
         FieldType::Int => {
-            let value = match bytes.len() {
-                1 => Some(i64::from(bytes[0] as i8)),
-                2 => Some(i64::from(i16::from_be_bytes([bytes[0], bytes[1]]))),
-                4 => Some(i64::from(i32::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                ]))),
-                _ => None,
+            let value = if matches!(bytes.len(), 1 | 2 | 4) {
+                Some(field.endian.read_signed(bytes))
+            } else {
+                None
             };
             value.map_or_else(
                 || FieldValue {
@@ -863,9 +877,7 @@ fn decode_field_value(field: &FieldDef, bytes: &[u8]) -> FieldValue {
             )
         }
         FieldType::Uint => {
-            let value = bytes
-                .iter()
-                .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+            let value = field.endian.read_unsigned(bytes);
             numeric_value(field, Some(value), bytes.len().max(1))
         }
         FieldType::Bool => {
@@ -1000,9 +1012,20 @@ fn format_numeric(field: &FieldDef, value: u64, width: usize) -> String {
 fn field_kind(field: &FieldDef) -> FieldKind {
     match field.role {
         FieldRole::Length => FieldKind::Length,
-        FieldRole::Target | FieldRole::Targets | FieldRole::Source => FieldKind::Node,
+        FieldRole::Target | FieldRole::Targets | FieldRole::Source | FieldRole::Broadcast => {
+            FieldKind::Node
+        }
         FieldRole::CommandClass => FieldKind::CommandClass,
-        FieldRole::Value => match field.kind {
+        FieldRole::Value
+        | FieldRole::Cluster
+        | FieldRole::Profile
+        | FieldRole::Group
+        | FieldRole::SourceEndpoint
+        | FieldRole::DestinationEndpoint
+        | FieldRole::Payload
+        | FieldRole::DestinationType
+        | FieldRole::RxStatus
+        | FieldRole::TxStatus => match field.kind {
             FieldType::Node | FieldType::NodeList => FieldKind::Node,
             FieldType::CommandClassData => FieldKind::CommandClass,
             _ => FieldKind::Value,
@@ -1465,7 +1488,7 @@ mod tests {
             5,
         ]);
         let decoded = decode(&frame);
-        assert_eq!(decoded.summary, "SwitchMultilevel Report · 72% · 5 s");
+        assert_eq!(decoded.summary, "Switch Multilevel Report · 72% · 5 s");
 
         let sensor = request(&[
             SERIAL_APPLICATION_COMMAND_HANDLER,
@@ -1562,7 +1585,7 @@ mod tests {
             72,
         ]);
         let decoded = decode(&frame);
-        assert_eq!(decoded.summary, "SwitchMultilevel Report · 72%");
+        assert_eq!(decoded.summary, "Switch Multilevel Report · 72%");
         assert!(decoded.issues.is_empty());
     }
 

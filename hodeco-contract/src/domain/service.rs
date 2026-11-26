@@ -90,6 +90,9 @@ pub struct ServiceStatus {
     pub state: ServiceState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional protocol-specific detail, e.g. `EZSP v4 · stack 0x5410`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -3,17 +3,24 @@
 # The release workflow sets the HODECO_* variables before invoking nfpm.
 # For a local build, stage the files under $HODECO_STAGE as:
 #
+#   etc/hodeco/config.yaml
 #   usr/bin/hodeco
+#   usr/lib/systemd/system/hodeco.service
+#   usr/lib/sysusers.d/hodeco.conf
 #   usr/share/hodeco/site/
 #   usr/share/doc/hodeco/
 #
 # and run, for example:
 #
-#   HODECO_VERSION=0.2.0 HODECO_ARCH=amd64 HODECO_STAGE="$PWD/pkgroot" \
+#   HODECO_VERSION=0.3.0 HODECO_ARCH=amd64 HODECO_STAGE="$PWD/pkgroot" \
 #   HODECO_MAINTAINER="Stas Makutin <33303268+stas-makutin@users.noreply.github.com>" \
 #   HODECO_HOMEPAGE="https://github.com/OWNER/REPO" \
 #   nfpm package --config packaging/nfpm.yaml --packager deb --target /tmp/hodeco.deb
-
+#
+# The maintainer scripts create the hodeco service account, prepare /etc,
+# /var/lib, and /var/log permissions, and enable/start the systemd unit. On an
+# upgrade they stop the old process before unpacking and restart it afterwards
+# only if it had been running.
 name: hodeco
 arch: ${HODECO_ARCH}
 platform: linux
@@ -39,6 +46,25 @@ contents:
     file_info:
       mode: 0755
 
+  - src: ${HODECO_STAGE}/etc/hodeco/config.yaml
+    dst: /etc/hodeco/config.yaml
+    type: config|noreplace
+    expand: true
+    file_info:
+      mode: 0644
+
+  - src: ${HODECO_STAGE}/usr/lib/systemd/system/hodeco.service
+    dst: /usr/lib/systemd/system/hodeco.service
+    expand: true
+    file_info:
+      mode: 0644
+
+  - src: ${HODECO_STAGE}/usr/lib/sysusers.d/hodeco.conf
+    dst: /usr/lib/sysusers.d/hodeco.conf
+    expand: true
+    file_info:
+      mode: 0644
+
   - src: ${HODECO_STAGE}/usr/share/hodeco/site
     dst: /usr/share/hodeco/site
     type: tree
@@ -49,12 +75,20 @@ contents:
     type: tree
     expand: true
 
+scripts:
+  preinstall: packaging/scripts/preinstall.sh
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
 overrides:
   deb:
     depends:
       - libc6
       - libgcc-s1
+      - systemd
   rpm:
     depends:
       - glibc
       - libgcc
+      - systemd

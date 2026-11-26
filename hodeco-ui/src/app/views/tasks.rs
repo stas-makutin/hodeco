@@ -8,16 +8,26 @@ use crate::ui::widgets;
 use egui::{PopupCloseBehavior, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use hodeco_contract::domain::{
-    ActionKind, CommandAction, HttpMethod, HttpTrigger, MAX_TASK_START_DELAY, MessageAction,
-    MessageActionPayload, MessageDirection, MessageTrigger, MessageTriggerWhen, NextCondition,
-    NextRule, OneOrMany, OutputMode, PayloadExpr, PayloadLeaf, PayloadOffset, PayloadOp,
-    ScheduleTrigger, ServiceRef, TaskAction, TaskDefinition, TaskInfo, TaskTrigger, TriggerType,
+    ActionKind, CommandAction, HttpMethod, HttpTrigger, MAX_TASK_LABEL_LEN, MAX_TASK_LABELS,
+    MAX_TASK_START_DELAY, MessageAction, MessageActionPayload, MessageDirection, MessageTrigger,
+    MessageTriggerWhen, NextCondition, NextRule, OneOrMany, OutputMode, PayloadExpr, PayloadLeaf,
+    PayloadOffset, PayloadOp, ScheduleTrigger, ServiceRef, TaskAction, TaskDefinition, TaskInfo,
+    TaskTrigger, TriggerType, validate_task_labels,
 };
 use hodeco_contract::utils::{Base64Bytes, HumanDuration, Size, id_from_name};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 const DEFAULT_HISTORY_ROWS: u32 = 200;
+const LABEL_PICKER_HEIGHT: f32 = 360.0;
+
+#[derive(Debug, Clone)]
+pub(crate) struct LabelOption {
+    pub key: String,
+    pub label: String,
+    pub count: usize,
+}
 
 #[derive(Debug)]
 pub(crate) struct TasksUi {
@@ -27,6 +37,9 @@ pub(crate) struct TasksUi {
     pub search: String,
     pub show_disabled: bool,
     pub selected: Option<usize>,
+    pub selected_labels: BTreeSet<String>,
+    pub label_filter_search: String,
+    pub label_filter_was_open: bool,
     pub editor: Option<TaskEditor>,
     pub history: Option<super::task_history::TaskHistoryUi>,
     pub confirm_delete: Option<String>,
@@ -44,6 +57,14 @@ impl TasksUi {
             .iter()
             .filter(|info| self.show_disabled || info.task.enabled)
             .filter(|info| {
+                self.selected_labels.is_empty()
+                    || info
+                        .task
+                        .labels
+                        .iter()
+                        .any(|label| self.selected_labels.contains(&label.trim().to_lowercase()))
+            })
+            .filter(|info| {
                 needle.is_empty()
                     || info.task.name.to_ascii_lowercase().contains(&needle)
                     || info.task.id.contains(&needle)
@@ -55,6 +76,45 @@ impl TasksUi {
                         .any(|trigger| trigger.id().to_ascii_lowercase().contains(&needle))
             })
             .collect()
+    }
+
+    /// Derives the case-insensitive label catalog and task counts.
+    pub fn label_options(&self) -> Vec<LabelOption> {
+        let mut options = BTreeMap::new();
+        for info in &self.tasks {
+            for label in &info.task.labels {
+                let label = label.trim();
+                if label.is_empty() {
+                    continue;
+                }
+                let key = label.to_lowercase();
+                options
+                    .entry(key.clone())
+                    .and_modify(|option: &mut LabelOption| option.count += 1)
+                    .or_insert_with(|| LabelOption {
+                        key,
+                        label: label.to_string(),
+                        count: 1,
+                    });
+            }
+        }
+        let mut options: Vec<LabelOption> = options.into_values().collect();
+        options.sort_by_key(|option| option.label.to_lowercase());
+        options
+    }
+
+    /// Drops filter selections whose labels no longer exist on any task.
+    pub fn prune_selected_labels(&mut self) {
+        if self.selected_labels.is_empty() {
+            return;
+        }
+        let available: BTreeSet<String> = self
+            .tasks
+            .iter()
+            .flat_map(|info| info.task.labels.iter())
+            .map(|label| label.trim().to_lowercase())
+            .collect();
+        self.selected_labels.retain(|key| available.contains(key));
     }
 
     pub fn editor_dirty(&self) -> bool {
@@ -71,6 +131,9 @@ impl Default for TasksUi {
             search: String::new(),
             show_disabled: true,
             selected: None,
+            selected_labels: BTreeSet::new(),
+            label_filter_search: String::new(),
+            label_filter_was_open: false,
             editor: None,
             history: None,
             confirm_delete: None,
@@ -128,6 +191,8 @@ pub(crate) struct TaskEditor {
     pub confirm_delete: bool,
     pub run_now: Option<RunNow>,
     pub payload_filter: Option<PayloadFilterDialog>,
+    pub label_search: String,
+    pub label_picker_was_open: bool,
 }
 
 #[derive(Debug)]
@@ -241,6 +306,8 @@ impl TaskEditor {
             confirm_delete: false,
             run_now: None,
             payload_filter: None,
+            label_search: String::new(),
+            label_picker_was_open: false,
         }
     }
 
@@ -249,6 +316,10 @@ impl TaskEditor {
         task.name = task.name.trim().to_string();
         if task.name.is_empty() {
             return Err("Name must not be empty.".to_string());
+        }
+        task.normalize_labels();
+        if let Err(error) = validate_task_labels(&task.labels) {
+            return Err(format!("Labels: {error}."));
         }
         for trigger in &mut task.triggers {
             let id = trigger_id_mut(trigger);
@@ -435,12 +506,130 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
     list_ui(app, ui);
 }
 
+fn truncated_label(label: &str, max_chars: usize) -> String {
+    let mut chars = label.chars();
+    let mut text: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        text.push('…');
+    }
+    text
+}
+
+fn matching_labels<'a>(options: &'a [LabelOption], search: &str) -> Vec<&'a LabelOption> {
+    let needle = search.trim().to_lowercase();
+    options
+        .iter()
+        .filter(|option| needle.is_empty() || option.label.to_lowercase().contains(&needle))
+        .collect()
+}
+
+fn label_filter_ui(app: &mut App, ui: &mut Ui) {
+    app.tasks.prune_selected_labels();
+    let theme = app.theme;
+    let palette = app.palette();
+    let options = app.tasks.label_options();
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Labels:").size(13.5).color(palette.muted));
+        // Match ComboBox's derived popup id so the search text resets when the
+        // picker closes.
+        let popup_id = ui
+            .make_persistent_id(egui::IdSalt::new("task-label-filter"))
+            .with("popup");
+        let was_open = app.tasks.label_filter_was_open;
+        let search_before = app.tasks.label_filter_search.clone();
+        egui::ComboBox::from_id_salt("task-label-filter")
+            .selected_text("Filter by label…")
+            .width(180.0)
+            .height(LABEL_PICKER_HEIGHT)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(300.0);
+                ui.set_max_width(340.0);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                let search = ui.add(
+                    egui::TextEdit::singleline(&mut app.tasks.label_filter_search)
+                        .hint_text("Filter labels…")
+                        .char_limit(MAX_TASK_LABEL_LEN)
+                        .desired_width(ui.available_width()),
+                );
+                if !was_open {
+                    search.request_focus();
+                }
+                ui.separator();
+                let search_changed = app.tasks.label_filter_search != search_before;
+                let visible = matching_labels(&options, &app.tasks.label_filter_search);
+                let list = egui::ScrollArea::vertical()
+                    .max_height(widgets::LIST_MAX_HEIGHT)
+                    .min_scrolled_height(widgets::LIST_MAX_HEIGHT)
+                    .auto_shrink([false, false]);
+                let list = if !was_open || search_changed {
+                    list.vertical_scroll_offset(0.0)
+                } else {
+                    list
+                };
+                list.show(ui, |ui| {
+                    if visible.is_empty() {
+                        ui.label(
+                            RichText::new(if options.is_empty() {
+                                "No labels yet."
+                            } else {
+                                "No labels match."
+                            })
+                            .color(palette.muted),
+                        );
+                    } else {
+                        for option in visible {
+                            let mut checked = app.tasks.selected_labels.contains(&option.key);
+                            if ui
+                                .checkbox(
+                                    &mut checked,
+                                    format!("{} ({})", option.label, option.count),
+                                )
+                                .changed()
+                            {
+                                if checked {
+                                    app.tasks.selected_labels.insert(option.key.clone());
+                                } else {
+                                    app.tasks.selected_labels.remove(&option.key);
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+        let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+        if was_open && !is_open {
+            app.tasks.label_filter_search.clear();
+        }
+        app.tasks.label_filter_was_open = is_open;
+        if !app.tasks.selected_labels.is_empty() && ui.small_button("Clear").clicked() {
+            app.tasks.selected_labels.clear();
+        }
+    });
+
+    if !app.tasks.selected_labels.is_empty() {
+        let mut remove = Vec::new();
+        ui.horizontal_wrapped(|ui| {
+            for option in &options {
+                if app.tasks.selected_labels.contains(&option.key)
+                    && widgets::removable_chip_button(ui, theme, &option.label, widgets::Tone::Info)
+                {
+                    remove.push(option.key.clone());
+                }
+            }
+        });
+        for key in remove {
+            app.tasks.selected_labels.remove(&key);
+        }
+    }
+}
+
 fn list_ui(app: &mut App, ui: &mut Ui) {
     let theme = app.theme;
     let palette = app.palette();
     let live = app.gateway.phase().is_live();
     let ready = app.gateway.phase() == crate::client::Phase::Ready;
-    let filtered = app.tasks.filtered();
     let total = app.tasks.tasks.len();
     let running = app.tasks.tasks.iter().filter(|task| task.running).count();
     let disabled = app
@@ -449,9 +638,6 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
         .iter()
         .filter(|task| !task.task.enabled)
         .count();
-    let filtered_count = filtered.len();
-    let rows: Vec<TaskInfo> = filtered.into_iter().cloned().collect();
-    let mut selected = app.tasks.selected.filter(|index| *index < rows.len());
 
     widgets::page_header(
         ui,
@@ -488,6 +674,13 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
         }
     });
     ui.add_space(2.0);
+    label_filter_ui(app, ui);
+    ui.add_space(2.0);
+
+    let filtered = app.tasks.filtered();
+    let filtered_count = filtered.len();
+    let rows: Vec<TaskInfo> = filtered.into_iter().cloned().collect();
+    let mut selected = app.tasks.selected.filter(|index| *index < rows.len());
 
     let status = if total == 0 {
         "0 tasks".to_string()
@@ -535,7 +728,7 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
         .id_salt("tasks-horizontal")
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            ui.set_min_width(980.0);
+            ui.set_min_width(1170.0);
             let mut table = TableBuilder::new(ui)
                 .id_salt("tasks-table")
                 .striped(true)
@@ -544,6 +737,7 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::initial(170.0).at_least(140.0))
                 .column(Column::initial(65.0).at_least(60.0))
+                .column(Column::initial(180.0).at_least(150.0))
                 .column(Column::initial(200.0).at_least(160.0))
                 .column(Column::initial(150.0).at_least(125.0))
                 .column(Column::initial(150.0).at_least(125.0))
@@ -556,6 +750,7 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
                     for title in [
                         "Name / ID",
                         "Enabled",
+                        "Labels",
                         "Triggers",
                         "Last run",
                         "Next",
@@ -596,6 +791,35 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
                                 .changed()
                             {
                                 app.set_task_enabled(task, enabled);
+                            }
+                        });
+                        row.col(|ui| {
+                            if task.labels.is_empty() {
+                                ui.label(RichText::new("—").color(palette.muted));
+                            } else {
+                                let mut labels = task.labels.clone();
+                                labels.sort_by_key(|label| label.to_lowercase());
+                                let shown = labels.iter().take(2);
+                                let response = ui
+                                    .horizontal(|ui| {
+                                        for label in shown {
+                                            widgets::chip(
+                                                ui,
+                                                theme,
+                                                &truncated_label(label.trim(), 10),
+                                                widgets::Tone::Neutral,
+                                            );
+                                        }
+                                        if labels.len() > 2 {
+                                            ui.label(
+                                                RichText::new(format!("+{}", labels.len() - 2))
+                                                    .small()
+                                                    .color(palette.muted),
+                                            );
+                                        }
+                                    })
+                                    .response;
+                                response.on_hover_text(labels.join("\n"));
                             }
                         });
                         row.col(|ui| {
@@ -744,7 +968,7 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
         } else {
             (
                 "No tasks match the current filter",
-                "Change the search or show disabled tasks.",
+                "Change the search, labels, or show disabled tasks.",
             )
         };
         let width = ui.available_width().max(200.0);
@@ -1010,6 +1234,195 @@ fn editor_ui(app: &mut App, ui: &mut Ui) {
     }
 }
 
+fn labels_editor(app: &mut App, ui: &mut Ui, editor: &mut TaskEditor) {
+    let palette = app.palette();
+    let mut options = app.tasks.label_options();
+    for label in &editor.draft.labels {
+        let label = label.trim();
+        if label.is_empty() {
+            continue;
+        }
+        let key = label.to_lowercase();
+        if !options.iter().any(|option| option.key == key) {
+            options.push(LabelOption {
+                key,
+                label: label.to_string(),
+                count: 0,
+            });
+        }
+    }
+    options.sort_by_key(|option| option.label.to_lowercase());
+
+    ui.set_width(420.0);
+    ui.horizontal(|ui| {
+        // Match ComboBox's derived popup id so the search text resets when the
+        // picker closes.
+        let popup_id = ui
+            .make_persistent_id(egui::IdSalt::new("task-label-picker"))
+            .with("popup");
+        let was_open = editor.label_picker_was_open;
+        let search_before = editor.label_search.clone();
+        egui::ComboBox::from_id_salt("task-label-picker")
+            .selected_text("Add label…")
+            .width(180.0)
+            .height(LABEL_PICKER_HEIGHT)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(300.0);
+                ui.set_max_width(340.0);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                let search_response = ui.add(
+                    egui::TextEdit::singleline(&mut editor.label_search)
+                        .hint_text("Search or create…")
+                        .char_limit(MAX_TASK_LABEL_LEN)
+                        .desired_width(ui.available_width()),
+                );
+                if !was_open {
+                    search_response.request_focus();
+                }
+                ui.separator();
+
+                let search = editor.label_search.trim().to_string();
+                let needle = search.to_lowercase();
+                let exact = options
+                    .iter()
+                    .any(|option| option.label.to_lowercase() == needle);
+                let row_height = ui.spacing().interact_size.y;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), row_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        if !search.is_empty() && !exact {
+                            let error = if search.chars().count() > MAX_TASK_LABEL_LEN {
+                                Some("Label is too long.")
+                            } else if search.chars().any(char::is_control) {
+                                Some("Label contains control characters.")
+                            } else if editor.draft.labels.len() >= MAX_TASK_LABELS {
+                                Some("Maximum number of labels reached.")
+                            } else {
+                                None
+                            };
+                            if let Some(error) = error {
+                                ui.label(RichText::new(error).small().color(palette.red));
+                            } else if ui.button(format!("Create \"{search}\"")).clicked() {
+                                editor.draft.labels.push(search.clone());
+                                editor.label_search.clear();
+                            }
+                        } else if search.is_empty() {
+                            ui.label(
+                                RichText::new("Type to search or create…")
+                                    .small()
+                                    .color(palette.muted),
+                            );
+                        }
+                    },
+                );
+
+                let search_changed = editor.label_search != search_before;
+                let visible = matching_labels(&options, &search);
+                let list = egui::ScrollArea::vertical()
+                    .max_height(widgets::LIST_MAX_HEIGHT)
+                    .min_scrolled_height(widgets::LIST_MAX_HEIGHT)
+                    .auto_shrink([false, false]);
+                let list = if !was_open || search_changed {
+                    list.vertical_scroll_offset(0.0)
+                } else {
+                    list
+                };
+                list.show(ui, |ui| {
+                    if visible.is_empty() {
+                        ui.label(
+                            RichText::new(if options.is_empty() {
+                                "No labels yet."
+                            } else {
+                                "No labels match."
+                            })
+                            .color(palette.muted),
+                        );
+                    } else {
+                        for option in visible {
+                            let selected = editor
+                                .draft
+                                .labels
+                                .iter()
+                                .any(|label| label.trim().eq_ignore_ascii_case(&option.label));
+                            let mut checked = selected;
+                            let text = if option.count > 0 {
+                                format!("{} ({})", option.label, option.count)
+                            } else {
+                                option.label.clone()
+                            };
+                            if ui.checkbox(&mut checked, text).changed() {
+                                if checked {
+                                    if !editor.draft.labels.iter().any(|label| {
+                                        label.trim().eq_ignore_ascii_case(&option.label)
+                                    }) {
+                                        editor.draft.labels.push(option.label.clone());
+                                    }
+                                } else {
+                                    editor.draft.labels.retain(|label| {
+                                        !label.trim().eq_ignore_ascii_case(&option.label)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+        let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+        if was_open && !is_open {
+            editor.label_search.clear();
+        }
+        editor.label_picker_was_open = is_open;
+    });
+
+    let mut labels: Vec<String> = editor
+        .draft
+        .labels
+        .iter()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect();
+    if labels.is_empty() {
+        ui.label(RichText::new("No labels.").small().color(palette.muted));
+    } else {
+        labels.sort_by_key(|label| label.to_lowercase());
+        let mut remove = None;
+        egui::Frame::new()
+            .fill(palette.panel)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(6, 4))
+            .show(ui, |ui| {
+                ui.set_min_width(400.0);
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for label in &labels {
+                            ui.horizontal(|ui| {
+                                ui.label(label);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Remove").clicked() {
+                                            remove = Some(label.clone());
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+            });
+        if let Some(label) = remove {
+            editor
+                .draft
+                .labels
+                .retain(|candidate| !candidate.trim().eq_ignore_ascii_case(&label));
+        }
+    }
+}
+
 fn general_section(app: &mut App, ui: &mut Ui, editor: &mut TaskEditor) {
     widgets::control_group_fill(ui, "Details", |ui| {
         egui::Grid::new("task-details-grid")
@@ -1075,6 +1488,15 @@ fn general_section(app: &mut App, ui: &mut Ui, editor: &mut TaskEditor) {
                                 .desired_width(420.0),
                         );
                     },
+                );
+                ui.end_row();
+
+                widgets::field_label(ui, app.theme, "Labels");
+                widgets::field_with_note(
+                    ui,
+                    app.theme,
+                    "Optional labels for filtering. They do not affect how the task runs.",
+                    |ui| labels_editor(app, ui, editor),
                 );
                 ui.end_row();
 
@@ -2230,12 +2652,8 @@ fn payload_filter_dialog(app: &mut App, ui: &mut Ui, editor: &mut TaskEditor) {
                     &mut dialog.draft,
                     &mut dialog.condition_editor,
                 );
-                if let Some(error) = &dialog.error {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(error).size(13.5).color(palette.red));
-                }
             });
-            widgets::dialog_footer(ui, |ui| {
+            widgets::dialog_footer(ui, theme, dialog.error.as_deref(), |ui| {
                 if ui.button("Cancel").clicked() {
                     close = true;
                 }
@@ -2676,7 +3094,6 @@ fn run_now_dialog(app: &mut App, ui: &mut Ui, task_id: &str, slot: &mut Option<R
         return;
     };
     let theme = app.theme;
-    let palette = app.palette();
     let mut close = false;
     let mut run = false;
     let response = egui::Modal::new(egui::Id::unique("hodeco-run-now"))
@@ -2739,12 +3156,8 @@ fn run_now_dialog(app: &mut App, ui: &mut Ui, task_id: &str, slot: &mut Option<R
                         );
                         ui.end_row();
                     });
-                if let Some(error) = &dialog.error {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(error).color(palette.red));
-                }
             });
-            widgets::dialog_footer(ui, |ui| {
+            widgets::dialog_footer(ui, theme, dialog.error.as_deref(), |ui| {
                 if ui.button("Cancel").clicked() {
                     close = true;
                 }
@@ -2851,6 +3264,133 @@ mod tests {
         ui.show_disabled = false;
         assert_eq!(ui.filtered().len(), 1);
         assert_eq!(ui.filtered()[0].task.id, "evening");
+    }
+
+    #[test]
+    fn filters_by_labels_with_or_semantics() {
+        let mut evening = info("evening", true);
+        evening.task.labels = vec!["lighting".to_string(), "automated".to_string()];
+        let mut winter = info("winter", true);
+        winter.task.labels = vec!["Lighting".to_string()];
+        let plain = info("plain", true);
+        let mut ui = TasksUi {
+            tasks: vec![evening, winter, plain],
+            ..TasksUi::default()
+        };
+        assert_eq!(ui.filtered().len(), 3);
+
+        ui.selected_labels.insert("automated".to_string());
+        assert_eq!(ui.filtered().len(), 1);
+        assert_eq!(ui.filtered()[0].task.id, "evening");
+
+        ui.selected_labels.insert("lighting".to_string());
+        assert_eq!(ui.filtered().len(), 2);
+
+        ui.selected_labels.clear();
+        assert_eq!(ui.filtered().len(), 3);
+
+        let options = ui.label_options();
+        assert_eq!(options.len(), 2);
+        assert_eq!(
+            options
+                .iter()
+                .find(|option| option.key == "lighting")
+                .unwrap()
+                .count,
+            2
+        );
+    }
+
+    #[test]
+    fn task_search_does_not_match_labels() {
+        let mut ui = TasksUi {
+            tasks: vec![info("plain", true)],
+            ..TasksUi::default()
+        };
+        ui.tasks[0].task.labels = vec!["automated".to_string()];
+        ui.search = "automated".to_string();
+        assert!(ui.filtered().is_empty());
+        ui.search = "plain".to_string();
+        assert_eq!(ui.filtered().len(), 1);
+    }
+
+    #[test]
+    fn filter_chips_wrap_in_a_narrow_row() {
+        let mut height = 0.0;
+        egui::__run_test_ui(|ui| {
+            ui.set_max_width(100.0);
+            let response = ui.horizontal_wrapped(|ui| {
+                for index in 0..10 {
+                    widgets::removable_chip_button(
+                        ui,
+                        crate::theme::UiTheme::Dark,
+                        &format!("label-{index}"),
+                        widgets::Tone::Info,
+                    );
+                }
+            });
+            height = response.response.rect.height();
+        });
+        assert!(height > 30.0, "chips did not wrap: height {height}");
+    }
+
+    #[test]
+    fn label_picker_search_is_case_insensitive() {
+        let options = vec![
+            LabelOption {
+                key: "automated".to_string(),
+                label: "automated".to_string(),
+                count: 1,
+            },
+            LabelOption {
+                key: "lighting".to_string(),
+                label: "lighting".to_string(),
+                count: 2,
+            },
+        ];
+        assert_eq!(matching_labels(&options, "").len(), 2);
+        assert_eq!(matching_labels(&options, "AUTO").len(), 1);
+        assert_eq!(matching_labels(&options, "light").len(), 1);
+        assert!(matching_labels(&options, "missing").is_empty());
+    }
+
+    #[test]
+    fn prunes_stale_selected_labels() {
+        let mut ui = TasksUi {
+            tasks: vec![info("plain", true)],
+            ..TasksUi::default()
+        };
+        ui.selected_labels.insert("missing".to_string());
+        ui.prune_selected_labels();
+        assert!(ui.selected_labels.is_empty());
+    }
+
+    #[test]
+    fn task_editor_validates_and_trims_labels() {
+        let mut editor = TaskEditor::new(
+            TaskDefinition {
+                name: "Labeled".to_string(),
+                labels: vec![" automated ".to_string(), "lighting".to_string()],
+                ..TaskDefinition::default()
+            },
+            true,
+        );
+        let task = editor.build().unwrap();
+        assert_eq!(task.labels, vec!["automated", "lighting"]);
+
+        editor.draft.labels = vec!["Automated".to_string(), "automated".to_string()];
+        assert!(editor.build().is_err());
+
+        editor.draft.labels = vec!["x".repeat(MAX_TASK_LABEL_LEN + 1)];
+        assert!(editor.build().is_err());
+
+        editor.draft.labels = (0..=MAX_TASK_LABELS)
+            .map(|index| format!("label-{index}"))
+            .collect();
+        assert!(editor.build().is_err());
+
+        editor.draft.labels = vec![String::new()];
+        assert!(editor.build().is_err());
     }
 
     #[test]

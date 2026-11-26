@@ -354,10 +354,22 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                                         }
                                     });
                                     row.col(|ui| {
+                                        let enabled = ready && entry.available;
                                         let response = ui.add_enabled(
-                                            ready && entry.available,
+                                            enabled,
                                             egui::Button::new("Add service").small(),
                                         );
+                                        let response = if enabled {
+                                            response
+                                        } else {
+                                            response.on_disabled_hover_text(if ready {
+                                                entry.error.as_deref().unwrap_or(
+                                                    "Only available entries can be added.",
+                                                )
+                                            } else {
+                                                "The gateway must be synced before adding a service."
+                                            })
+                                        };
                                         if index == action_row {
                                             action_focus_id = Some(response.id);
                                         }

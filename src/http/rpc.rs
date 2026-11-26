@@ -483,6 +483,7 @@ async fn dispatch(
             let _guard = state.automation.lock().await;
             let snapshot = state.automation.snapshot();
             let mut task = params.task;
+            task.normalize_labels();
             if task.id.is_empty() {
                 task.id = unique_id("task", &task.name, snapshot.tasks.keys());
             }
@@ -523,6 +524,7 @@ async fn dispatch(
                 return Err(task_not_found(&params.task_id));
             };
             let mut task = params.task;
+            task.normalize_labels();
             if !task.id.is_empty() && task.id != params.task_id {
                 return Err(ApiError::new(
                     ErrorCode::InvalidParams,
@@ -658,7 +660,7 @@ async fn dispatch(
         }
         Method::SchedulesList => {
             let snapshot = state.automation.snapshot();
-            let context = schedule_context(&snapshot);
+            let context = schedule_context(state, &snapshot);
             let schedules = snapshot
                 .schedules
                 .values()
@@ -683,7 +685,7 @@ async fn dispatch(
             let Some(schedule) = snapshot.schedules.get(&params.schedule_id) else {
                 return Err(schedule_not_found(&params.schedule_id));
             };
-            let context = schedule_context(&snapshot);
+            let context = schedule_context(state, &snapshot);
             let next = schedule::next_occurrence(schedule, context, chrono::Utc::now(), true)
                 .ok()
                 .flatten();
@@ -718,7 +720,7 @@ async fn dispatch(
             state.runtime.wake_scheduler();
             let next = schedule::next_occurrence(
                 &schedule,
-                schedule_context(&state.automation.snapshot()),
+                schedule_context(state, &state.automation.snapshot()),
                 chrono::Utc::now(),
                 true,
             )
@@ -757,7 +759,7 @@ async fn dispatch(
             let snapshot = state.automation.snapshot();
             let next = schedule::next_occurrence(
                 &schedule,
-                schedule_context(&snapshot),
+                schedule_context(state, &snapshot),
                 chrono::Utc::now(),
                 true,
             )
@@ -803,7 +805,7 @@ async fn dispatch(
             let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
             let occurrences = schedule::preview(
                 &params.schedule,
-                schedule_context(&snapshot),
+                schedule_context(state, &snapshot),
                 chrono::Utc::now(),
                 limit,
                 true,
@@ -873,11 +875,14 @@ async fn dispatch(
                 Some(timezone) => timezone.parse::<chrono_tz::Tz>().map_err(|_| {
                     validation_error(format!("timezone '{timezone}' is not an IANA timezone"))
                 })?,
-                None => schedule_context(&snapshot)
+                None => schedule_context(state, &snapshot)
                     .default_timezone
-                    .map(Ok)
-                    .unwrap_or_else(schedule::system_timezone)
-                    .map_err(validation_error)?,
+                    .ok_or_else(|| {
+                        validation_error(
+                            "unable to determine the system timezone; set schedules.timezone"
+                                .to_string(),
+                        )
+                    })?,
             };
             let mut events = Vec::with_capacity(SolarEvent::ALL.len());
             for event in SolarEvent::ALL {
@@ -1159,13 +1164,22 @@ fn schedule_defaults(snapshot: &crate::automation::AutomationSnapshot) -> Schedu
     }
 }
 
-fn schedule_context(snapshot: &crate::automation::AutomationSnapshot) -> ScheduleContext {
+fn schedule_context(
+    state: &AppState,
+    snapshot: &crate::automation::AutomationSnapshot,
+) -> ScheduleContext {
     ScheduleContext {
         default_location: snapshot.location,
         default_timezone: snapshot
             .timezone
             .as_deref()
-            .and_then(|timezone| timezone.parse().ok()),
+            .and_then(|timezone| timezone.parse().ok())
+            .or_else(|| {
+                state
+                    .system_timezone
+                    .as_deref()
+                    .and_then(|timezone| timezone.parse().ok())
+            }),
     }
 }
 

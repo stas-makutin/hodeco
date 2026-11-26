@@ -1,6 +1,6 @@
-use super::ServiceError;
-use super::catalog::{ZWAVE_PARAM_OPEN_ATTEMPTS_INTERVAL, ZWAVE_PARAM_OUTGOING_MAX_TTL};
+use super::catalog::{SERVICE_PARAM_OPEN_ATTEMPTS_INTERVAL, SERVICE_PARAM_OUTGOING_MAX_TTL};
 use super::serial::{Port, PortOpener, SerialSettings};
+use super::{ServiceError, StatusEvent};
 use crate::messages::MessageRecorder;
 use hodeco_contract::domain::{
     Message, MessageState, ParamValues, ServiceKey, ServiceState, ServiceStatus, param_duration,
@@ -125,7 +125,7 @@ pub struct ZWaveSettings {
 
 impl ZWaveSettings {
     pub fn from_params(params: &ParamValues) -> Self {
-        let open_attempts_interval = param_duration(params, ZWAVE_PARAM_OPEN_ATTEMPTS_INTERVAL)
+        let open_attempts_interval = param_duration(params, SERVICE_PARAM_OPEN_ATTEMPTS_INTERVAL)
             .unwrap_or(Duration::from_secs(3));
         let open_attempts_interval = if open_attempts_interval.is_zero() {
             Duration::from_millis(100)
@@ -133,8 +133,8 @@ impl ZWaveSettings {
             open_attempts_interval
         };
 
-        let outgoing_max_ttl =
-            param_duration(params, ZWAVE_PARAM_OUTGOING_MAX_TTL).unwrap_or(Duration::from_secs(10));
+        let outgoing_max_ttl = param_duration(params, SERVICE_PARAM_OUTGOING_MAX_TTL)
+            .unwrap_or(Duration::from_secs(10));
         let outgoing_max_ttl = if outgoing_max_ttl.is_zero() {
             Duration::ZERO
         } else if outgoing_max_ttl < Duration::from_secs(1) {
@@ -167,8 +167,6 @@ struct Outgoing {
     created: Instant,
 }
 
-pub type StatusEvent = (ServiceKey, ServiceStatus);
-
 pub struct ZWaveHandle {
     key: ServiceKey,
     recorder: Arc<dyn MessageRecorder>,
@@ -195,6 +193,7 @@ impl ZWaveHandle {
         let (status_tx, status) = watch::channel(ServiceStatus {
             state: ServiceState::Starting,
             error: None,
+            detail: None,
         });
         let cancel = parent_cancel.child_token();
 
@@ -739,7 +738,11 @@ fn update_status(
     state: ServiceState,
     error: Option<String>,
 ) {
-    let _ = status.send(ServiceStatus { state, error });
+    let _ = status.send(ServiceStatus {
+        state,
+        error,
+        detail: None,
+    });
 }
 
 fn purge(receiver: &mut mpsc::Receiver<Outgoing>, recorder: &dyn MessageRecorder) {

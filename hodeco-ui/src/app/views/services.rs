@@ -10,6 +10,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
     let palette = app.palette();
     let ready = app.gateway.phase() == crate::client::Phase::Ready;
     let live = app.gateway.phase().is_live();
+    let catalogs_ready = !app.protocols.is_empty() && !app.transports.is_empty();
     let services = app.services.clone();
 
     widgets::page_header(
@@ -28,7 +29,12 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                 app.open_builder(None);
             }
             if ui
-                .add_enabled(ready, egui::Button::new("Add service"))
+                .add_enabled(ready && catalogs_ready, egui::Button::new("Add service"))
+                .on_disabled_hover_text(if ready {
+                    "Waiting for the protocol and transport catalogs."
+                } else {
+                    "The gateway must be synced before adding a service."
+                })
                 .clicked()
             {
                 let protocol = app

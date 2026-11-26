@@ -5,15 +5,17 @@ use hodeco_contract::domain::{
 };
 
 pub use hodeco_contract::catalog::{
-    PROTOCOL_ZWAVE, SERIAL_PARAM_BAUD_RATE, SERIAL_PARAM_DATA_BITS, SERIAL_PARAM_PARITY,
-    SERIAL_PARAM_READ_TIMEOUT, SERIAL_PARAM_STOP_BITS, SERIAL_PARAM_WRITE_TIMEOUT,
-    TRANSPORT_SERIAL, ZWAVE_PARAM_OPEN_ATTEMPTS_INTERVAL, ZWAVE_PARAM_OUTGOING_MAX_TTL,
+    PROTOCOL_ZIGBEE, PROTOCOL_ZWAVE, SERIAL_PARAM_BAUD_RATE, SERIAL_PARAM_DATA_BITS,
+    SERIAL_PARAM_FLOW_CONTROL, SERIAL_PARAM_PARITY, SERIAL_PARAM_READ_TIMEOUT,
+    SERIAL_PARAM_STOP_BITS, SERIAL_PARAM_WRITE_TIMEOUT, SERVICE_PARAM_OPEN_ATTEMPTS_INTERVAL,
+    SERVICE_PARAM_OUTGOING_MAX_TTL, TRANSPORT_SERIAL, ZIGBEE_PARAM_ASH_ACK_TIMEOUT,
+    ZIGBEE_PARAM_ASH_MAX_RETRIES,
 };
 
 /// Transport IDs a protocol can use. `None` means the protocol is unknown.
 pub fn supported_transports(protocol: &str) -> Option<&'static [&'static str]> {
     match protocol {
-        PROTOCOL_ZWAVE => Some(&[TRANSPORT_SERIAL]),
+        PROTOCOL_ZWAVE | PROTOCOL_ZIGBEE => Some(&[TRANSPORT_SERIAL]),
         _ => None,
     }
 }
@@ -40,7 +42,24 @@ pub fn protocol_transport_params(
     }
 
     let mut definitions = shared::serial_params();
-    definitions.extend(shared::zwave_params());
+    match protocol {
+        PROTOCOL_ZWAVE => {
+            definitions.extend(shared::zwave_params());
+        }
+        PROTOCOL_ZIGBEE => {
+            // The HUSBZB-1 ZigBee side runs at 57600 8N1 by default.
+            for definition in &mut definitions {
+                if definition.name == SERIAL_PARAM_BAUD_RATE {
+                    definition.default = Some(serde_json::json!(57_600));
+                }
+                if definition.name == SERIAL_PARAM_FLOW_CONTROL {
+                    definition.default = Some(serde_json::json!("none"));
+                }
+            }
+            definitions.extend(shared::zigbee_params());
+        }
+        _ => unreachable!("supported_transports rejects unknown protocols"),
+    }
     Ok(definitions)
 }
 
@@ -62,11 +81,18 @@ pub fn transport_infos() -> Vec<TransportInfo> {
 }
 
 pub fn protocol_info(id: &str) -> Option<ProtocolInfo> {
-    (id == PROTOCOL_ZWAVE).then(shared::zwave_protocol_info)
+    match id {
+        PROTOCOL_ZWAVE => Some(shared::zwave_protocol_info()),
+        PROTOCOL_ZIGBEE => Some(shared::zigbee_protocol_info()),
+        _ => None,
+    }
 }
 
 pub fn protocol_infos() -> Vec<ProtocolInfo> {
-    vec![protocol_info(PROTOCOL_ZWAVE).expect("zwave protocol is defined")]
+    vec![
+        protocol_info(PROTOCOL_ZWAVE).expect("zwave protocol is defined"),
+        protocol_info(PROTOCOL_ZIGBEE).expect("zigbee protocol is defined"),
+    ]
 }
 
 #[cfg(test)]
@@ -77,11 +103,14 @@ mod tests {
     #[test]
     fn exposes_protocol_and_transport_info() {
         let protocols = protocol_infos();
-        assert_eq!(protocols.len(), 1);
+        assert_eq!(protocols.len(), 2);
         assert_eq!(protocols[0].id, PROTOCOL_ZWAVE);
         assert_eq!(protocols[0].name, "Z-Wave");
+        assert_eq!(protocols[1].id, PROTOCOL_ZIGBEE);
+        assert_eq!(protocols[1].name, "ZigBee");
 
         assert_eq!(protocols[0].transports, vec![TRANSPORT_SERIAL]);
+        assert_eq!(protocols[1].transports, vec![TRANSPORT_SERIAL]);
 
         let transports = transport_infos();
         assert_eq!(transports.len(), 1);
@@ -100,6 +129,7 @@ mod tests {
             Err(ServiceError::UnknownTransport(_))
         ));
         assert!(supports_transport(PROTOCOL_ZWAVE, TRANSPORT_SERIAL));
+        assert!(supports_transport(PROTOCOL_ZIGBEE, TRANSPORT_SERIAL));
         assert!(!supports_transport("unknown", TRANSPORT_SERIAL));
     }
 
@@ -120,5 +150,17 @@ mod tests {
 
         let params = ParamValues::from([("baudRate".to_string(), json!("fast"))]);
         assert!(validate_service(PROTOCOL_ZWAVE, TRANSPORT_SERIAL, &params).is_err());
+    }
+
+    #[test]
+    fn applies_zigbee_defaults() {
+        let parsed = validate_service(PROTOCOL_ZIGBEE, TRANSPORT_SERIAL, &ParamValues::new())
+            .expect("zigbee defaults");
+        assert_eq!(parsed.get("baudRate"), Some(&json!(57_600)));
+        assert_eq!(parsed.get("flowControl"), Some(&json!("none")));
+        assert_eq!(parsed.get("openAttemptsInterval"), Some(&json!("3 s")));
+        assert_eq!(parsed.get("outgoingMaxTTL"), Some(&json!("10 s")));
+        assert_eq!(parsed.get("ashAckTimeout"), Some(&json!("1600 ms")));
+        assert_eq!(parsed.get("ashMaxRetries"), Some(&json!(5)));
     }
 }

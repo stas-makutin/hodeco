@@ -8,9 +8,9 @@ use crate::config::{ConfigBundle, ConfigStore, ServicesStore, catalog_path};
 use crate::events::{self, Event};
 use crate::http;
 use crate::messages::{MessageStore, persist};
+use crate::services::StatusEvent;
 use crate::services::discovery::DiscoveryRegistry;
 use crate::services::registry::ServiceRegistry;
-use crate::services::zwave::StatusEvent;
 use chrono::{DateTime, Utc};
 use hodeco_contract::config::{Config, CorruptPolicy, MessageLogConfig};
 use hodeco_contract::domain::{ServiceKey, ServiceRef};
@@ -295,6 +295,14 @@ pub async fn run(
         config.http_server.max_connections as usize
     };
     let ws_limits = Arc::new(Semaphore::new(ws_limit));
+    let system_timezone = tokio::task::spawn_blocking(hodeco_schedule::system_timezone)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|timezone| timezone.name().to_string());
+    if system_timezone.is_none() {
+        warn!("unable to determine the system timezone; set schedules.timezone");
+    }
     let state = AppState {
         config: config.clone(),
         config_store,
@@ -312,9 +320,7 @@ pub async fn run(
         shutting_down: Arc::new(AtomicBool::new(false)),
         ws_limits,
         started_at: Utc::now(),
-        system_timezone: hodeco_schedule::system_timezone()
-            .ok()
-            .map(|timezone| timezone.name().to_string()),
+        system_timezone,
     };
 
     for service in &services_store.snapshot() {

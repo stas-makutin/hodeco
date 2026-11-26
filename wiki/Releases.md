@@ -3,6 +3,9 @@
 Published builds are available on the [Releases page](../releases). The
 maintainer process is documented in [`RELEASING.md`](../blob/HEAD/RELEASING.md).
 
+This page helps you pick the right file, understand what is inside it, and
+upgrade without losing your configuration.
+
 ## Which file should I download?
 
 | You have | Pick |
@@ -39,6 +42,38 @@ The ARMv6 build is the right choice for Raspberry Pi 1, Zero, Zero W, and
 ARMv7 userland (for example Debian or Ubuntu armhf) and will not run on those
 ARMv6 systems.
 
+## After you download
+
+For a portable archive, extract it and run the binary in the foreground:
+
+```powershell
+# Windows
+Expand-Archive hodeco-<version>-windows-x86_64.zip -DestinationPath hodeco
+cd hodeco
+.\hodeco.exe run
+```
+
+```sh
+# Linux
+tar -xzf hodeco-<version>-linux-x86_64.tar.gz
+cd hodeco-<version>-linux-x86_64
+./hodeco run --config config.yaml
+```
+
+Then open <http://127.0.0.1:8180/>. [Getting Started](Getting-Started) has the
+first-run checklist and the serial-port setup.
+
+Windows builds use the static MSVC CRT, so no Visual C++ Redistributable is
+required. To install the Windows service, run from an elevated prompt:
+
+```text
+hodeco install
+hodeco start
+```
+
+The service runs as `LocalSystem`. An explicit `--config` path is converted to
+an absolute path during installation.
+
 ## Archive contents
 
 Portable archives are named `hodeco-<version>-<label>` and contain:
@@ -71,72 +106,79 @@ For glibc Linux targets, the release also includes `.deb` and `.rpm` packages.
 They install:
 
 ```text
+/etc/hodeco/config.yaml
 /usr/bin/hodeco
+/usr/lib/systemd/system/hodeco.service
+/usr/lib/sysusers.d/hodeco.conf
 /usr/share/hodeco/site/
 /usr/share/doc/hodeco/
 ```
 
 The documentation directory contains the app licenses and both backend and
 frontend third-party notices (`THIRD-PARTY-LICENSES.md` and
-`THIRD-PARTY-LICENSES-UI.md`).
+`THIRD-PARTY-LICENSES-UI.md`). The configuration file is installed as a package
+configuration file, so local edits survive upgrades.
 
 Install with the normal package manager:
 
 ```sh
-sudo dpkg -i hodeco_<version>_amd64.deb
+sudo apt install ./hodeco_<version>_amd64.deb
 # or
-sudo rpm -i hodeco-<version>-1.x86_64.rpm
+sudo dnf install ./hodeco-<version>-1.x86_64.rpm
 ```
 
-RPM packages use the Fedora/RHEL dependency names (`glibc`, `libgcc`). On
-distributions with different package names, use the static musl archive instead
-of the RPM.
+RPM packages use the Fedora/RHEL dependency names (`glibc`, `libgcc`, and
+`systemd`). On distributions with different package names, use the static musl
+archive instead of the RPM.
 
-Packages do not install or start the service automatically. Register the
-systemd unit after installing:
+The package creates or repairs the `hodeco` system user and group, adds the
+account to `dialout`, `uucp`, and `plugdev` when those groups exist, and
+prepares `/etc/hodeco`, `/var/lib/hodeco`, and `/var/log/hodeco` with the
+correct ownership. It enables `hodeco.service` and starts it on a fresh
+install. On an upgrade it stops the running service before replacing files and
+starts it again only if it had been running. While the package owns the unit,
+`hodeco install` and `hodeco uninstall` leave it alone; use the package manager
+instead.
 
 ```sh
-sudo hodeco install
-sudo hodeco start
-sudo hodeco status
+sudo systemctl status hodeco
+sudo systemctl restart hodeco
 ```
 
-`hodeco install` accepts `--config` and `--user`; see
-[Getting Started](Getting-Started). The default config path is
-`/etc/hodeco/config.yaml`.
+`/etc/hodeco` is group-writable by `hodeco` so configuration and catalog
+write-back through the API works. Uninstalling stops and disables the unit but
+keeps the `hodeco` user and the data directories for a later reinstall.
 
-## Windows
+For a portable archive, register the systemd unit manually with
+`hodeco install`; see [Getting Started](Getting-Started). The default config
+path is `/etc/hodeco/config.yaml`.
 
-Extract the archive and run the executable:
+## Upgrading
 
-```powershell
-Expand-Archive hodeco-<version>-windows-x86_64.zip -DestinationPath hodeco
-cd hodeco
-.\hodeco.exe run
-```
+**With a package:** use the package manager as usual. The package stops the
+running service before replacing files and starts it again only if it had been
+running. `/etc/hodeco/config.yaml` is preserved, so local edits survive.
 
-Windows builds use the static MSVC CRT, so no Visual C++ Redistributable is
-required. To install the Windows service, run from an elevated prompt:
+**With a portable archive:** stop the old process or service, extract the new
+archive to a new directory, and copy over the files you want to keep:
 
-```text
-hodeco install
-hodeco start
-```
+- `config.yaml` and the four catalogs;
+- `messages.log`;
+- the `tasks/` history directory, if you use task history.
 
-The service runs as `LocalSystem`. An explicit `--config` path is converted to
-an absolute path during installation.
+Then start the new binary with the same `--config` path. If the config uses
+relative paths, keep the same directory layout, or switch to absolute paths
+before moving.
 
-## Linux portable
+**From 0.1.x:** archive or delete the old message log before upgrading; see
+[Persistence](Persistence). Protocol compatibility is tracked separately through
+`server.info.protocolVersion`, currently `1.0`.
 
-```sh
-tar -xzf hodeco-<version>-linux-x86_64.tar.gz
-cd hodeco-<version>-linux-x86_64
-./hodeco run --config config.yaml
-```
+## Portable archive notes
 
 The generated `log/` directory and `messages.log` live next to the binary when
-using this config. The portable `config.yaml` uses relative paths and is meant
-for foreground runs from the extracted directory.
+using the Linux portable config. The portable `config.yaml` uses relative paths
+and is meant for foreground runs from the extracted directory.
 
 Use `linux-armv6` for Raspberry Pi 1/Zero and 32-bit Raspberry Pi OS, and
 `linux-armv7` for 32-bit ARMv7 systems with a glibc userland.
@@ -173,5 +215,13 @@ Get-FileHash .\hodeco-<version>-windows-x86_64.zip -Algorithm SHA256
 
 Release tags are `v<version>` and must match both workspace versions
 (`Cargo.toml` and `hodeco-ui/Cargo.toml`). Pre-release tags such as
-`v0.2.0-rc.1` are marked as pre-releases on GitHub. Protocol compatibility is
+`v0.3.0-rc.1` are marked as pre-releases on GitHub. The GitHub release notes are
+the `CHANGELOG.md` section for the tag version. Protocol compatibility is
 tracked separately through `server.info.protocolVersion`, currently `1.0`.
+
+## Related pages
+
+- [Getting Started](Getting-Started) — first run and service installation.
+- [Configuration](Configuration) — the files to keep across upgrades.
+- [Persistence](Persistence) — what survives a restart and what to back up.
+- [Development](Development) — building from source.

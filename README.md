@@ -3,91 +3,118 @@
 **Share the home devices on your serial controllers with everything else on your
 network.**
 
-hodeco turns a serial controller into a shared gateway for your local network.
-Z-Wave is supported today; ZigBee is planned. One process owns the controller,
-and the bundled web UI, your scripts, and your own automation all use the same
-typed JSON-RPC API, live WebSocket stream, and searchable message history.
+hodeco is a local gateway for Z-Wave and ZigBee serial controllers. It owns the
+serial port once, keeps the device state and message history, and gives the
+bundled web UI, your scripts, and your own automation the same typed JSON-RPC
+API and live WebSocket stream.
 
-That means no more fighting over the serial port: connect the controller once,
-then let every local client share the same devices, state, and history. hodeco
-is built to run on a small always-on machine — a Raspberry Pi, a mini-PC, a
-Windows box — and to stay out of the way: one binary, a small set of YAML files,
-no external database, no cloud account.
+No more fighting over the serial port: connect the controller once, then let
+every local client share the same devices, state, and history. hodeco is built
+to run on a small always-on machine — a Raspberry Pi, a mini-PC, a Windows box —
+and to stay out of the way: one binary, a small set of YAML files, no external
+database, no cloud account.
 
 > **Trusted networks only.** Authentication and TLS are not implemented, and the
 > default bind address is `127.0.0.1`. If you expose it beyond your LAN, put it
 > behind a reverse proxy that provides both.
 
-**Contents:** [What you get](#what-you-get) ·
-[Supported controllers](#supported-controllers) · [Quick start](#quick-start) ·
-[How it fits together](#how-it-fits-together) · [API tour](#a-tour-of-the-api) ·
-[Message builder](#message-builder) · [Configuration](#configuration) ·
-[Running as a service](#running-as-a-service) · [Build and test](#build-and-test) ·
-[Releases](#releases) · [Changelog](CHANGELOG.md) · [Documentation](#documentation) ·
-[License](#license)
+**On this page:** [What hodeco does](#what-hodeco-does) ·
+[Quick start](#quick-start) · [Connect a controller](#connect-a-controller) ·
+[How it fits together](#how-it-fits-together) · [Use the API](#use-the-api) ·
+[Send and inspect messages](#send-and-inspect-messages) ·
+[Configuration](#configuration) · [Running as a service](#running-as-a-service) ·
+[Build and test](#build-and-test) · [Releases](#releases) ·
+[Documentation](#documentation) · [License](#license)
 
-## What you get
+## New here? Pick a path
 
-- **One owner for the serial controller.** The gateway holds the serial port, so
-  the UI, your scripts, and your own automation share one device state and one
-  history instead of competing for the port.
-- **One process, one deployment.** The backend serves the API, the WebSocket
-  stream, and the compiled WASM UI. No separate frontend server, database, or
-  container stack.
-- **Typed end to end.** `hodeco-contract` is the shared source of truth for
-  methods, payloads, errors, and the configuration schema. The backend and the
-  WASM frontend compile against the same types.
-- **A real event stream.** Subscribe to messages, discovery, and service state.
-  A slow consumer is disconnected with code `1013` instead of silently losing
-  events, so clients know when to resynchronize.
-- **Built for diagnostics.** Page through message history, filter by time,
-  metadata, IDs, or masked payload expressions, inspect parsed Z-Wave frames,
-  and build outgoing frames with typed controls, packed bit fields, signed or
-  unsigned integer widths, TX options, and a per-send TTL override.
-- **Automation included.** Tasks run commands and send messages on schedules,
-  messages, HTTP hooks, or manual triggers; next rules chain tasks, a bounded
-  recent-run feed powers the Runs view, and opt-in per-task history keeps runs on
-  disk. Commands and schedules are reusable catalogs.
-- **Operations included.** Rotating logs with optional ZIP archives, file-backed
-  message and task persistence, a Windows service host, and a systemd installer.
-- **Portable releases.** Windows x64/ARM64, Linux x64/ARM64/ARMv7, and fully
-  static musl builds. Windows builds use the static CRT.
+| I want to… | Start with |
+| --- | --- |
+| Try it quickly and see the UI | [Quick start](#quick-start) |
+| Connect my Z-Wave or ZigBee controller | [Quick start](#quick-start), then [Connect a controller](#connect-a-controller) |
+| Understand the terms first | [How hodeco works](wiki/Concepts.md) |
+| Automate something | [Tasks](wiki/Tasks.md) and [Schedules](wiki/Schedules.md) |
+| Call hodeco from a script | [HTTP API](wiki/HTTP-API.md) and [WebSocket](wiki/WebSocket.md) |
+| Build it from source or contribute | [Build and test](#build-and-test) and [Development](wiki/Development.md) |
+
+The full documentation lives in [`wiki/`](wiki/) and is published as the
+[wiki](../../wiki); this README is the short front door.
+
+## What hodeco does
+
+hodeco has one main job and a few useful extras.
+
+**It owns the controller.** A Z-Wave or ZigBee stick is a serial device, and
+normally only one program can open its port. hodeco holds the port, then serves
+the same devices to the UI, your scripts, and your automation. One service entry
+per controller; every client sees the same state and history.
+
+**It keeps a real message history.** Incoming and outgoing frames are stored in
+a bounded, file-backed log. You can page through it, filter by time, metadata,
+IDs, or masked payload expressions, and inspect parsed Z-Wave frames and ZigBee
+EZSP/ZCL frames. The message builder can also compose outgoing frames with typed
+fields, packed bit groups, integer widths, TX options, and a per-send TTL.
+
+**It streams events.** The UI and your own clients can subscribe over a
+WebSocket to messages, discovery, service state, and task runs. A slow consumer
+is disconnected with code `1013` rather than silently losing events, so clients
+know when to resynchronize.
+
+**It includes automation.** Tasks run commands and send messages on schedules,
+incoming messages, HTTP hooks, or manual triggers. Next rules chain tasks, a
+bounded recent-run feed powers the Runs view, and opt-in per-task history keeps
+runs on disk. Free-form task labels drive the task-list filter, and commands and
+schedules are reusable catalogs.
+
+**It is easy to operate.** Rotating logs with ZIP archives by default, file-backed
+message and task persistence, a Windows service host, and a systemd installer are
+included. Releases cover Windows x64/ARM64, Linux x64/ARM64/ARMv7/ARMv6, and
+fully static musl builds.
 
 ## Supported controllers
 
 | Protocol | Transport | Status |
 | --- | --- | --- |
 | Z-Wave | serial | Supported |
-| ZigBee | serial | Planned |
+| ZigBee (Ember EZSP) | serial | Supported |
 
 Each controller is one entry in `services.yaml`. The gateway owns the serial
-port; clients share the devices through the API. New protocols are added
-behind the same contract, so the API shape stays consistent as support grows.
+port; clients share the devices through the API. New protocols are added behind
+the same contract, so the API shape stays consistent as support grows.
 
 ## Quick start
 
 ### Run a release
 
 Download the archive for your platform from [Releases](../../releases), extract
-it, and start the service:
+it, and start the service.
+
+Windows:
 
 ```powershell
-# Windows
 Expand-Archive hodeco-<version>-windows-x86_64.zip -DestinationPath hodeco
 cd hodeco
 .\hodeco.exe run
 ```
 
+Linux portable:
+
 ```sh
-# Linux portable
 tar -xzf hodeco-<version>-linux-x86_64.tar.gz
 cd hodeco-<version>-linux-x86_64
 ./hodeco run --config config.yaml
 ```
 
-Open <http://127.0.0.1:8180/> for the web UI. The Windows archive works with the
-platform defaults; the Linux archive includes a portable `config.yaml` so the
-working directory, logs, and `site/` assets stay next to the binary.
+Then:
+
+1. Open <http://127.0.0.1:8180/> for the web UI.
+2. Check <http://127.0.0.1:8180/api/health> if the page does not load.
+3. Add your controller in the UI, or put it in `services.yaml` and restart.
+
+The Windows archive works with the platform defaults. The Linux archive includes
+a portable `config.yaml` so the working directory, logs, and `site/` assets stay
+next to the binary. The `.deb`/`.rpm` packages install a systemd service and are
+covered in [Running as a service](#running-as-a-service).
 
 ### Build from source
 
@@ -99,7 +126,7 @@ cargo build --workspace
 cargo run -- run
 ```
 
-The backend is checked for Linux and the shared contract is checked for WASM:
+The backend is checked for Linux and the shared contract for WASM:
 
 ```sh
 cargo check --target x86_64-unknown-linux-gnu --all-targets
@@ -130,6 +157,51 @@ The output is `hodeco-ui/dist`: raw assets, Brotli sidecars, and gzip sidecars.
 Point `httpServer.static.dir` at that directory. Precompressed serving is on by
 default; clients that do not accept Brotli or gzip still receive the raw files.
 
+**Next:** [Getting Started](wiki/Getting-Started.md) walks through finding your
+serial port, adding the first controller, and checking that frames arrive.
+
+## Connect a controller
+
+Each controller is one entry in `services.yaml`, next to `config.yaml`:
+
+```yaml
+services:
+  - alias: ZW
+    protocol: zwave
+    transport: serial
+    entry: /dev/ttyUSB0   # COM4 on Windows
+    params:
+      baudRate: 115200
+  - alias: ZB
+    protocol: zigbee
+    transport: serial
+    entry: /dev/ttyUSB1   # COM5 on Windows
+    params:
+      baudRate: 57600
+      flowControl: none
+```
+
+The baud rates above are common defaults, not universal. Check the controller's
+manual. `alias` is the short name used by the UI and by task references, so keep
+it stable.
+
+You can also add the service in the UI. Changes made through the API/UI apply
+immediately. If you edit `services.yaml` yourself, restart hodeco; there is no
+file watcher.
+
+If you do not know the port name:
+
+- **Windows:** check Device Manager under **Ports (COM & LPT)**, or run
+  `Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Description`.
+- **Linux:** run `ls -l /dev/serial/by-id/` or `ls /dev/ttyUSB* /dev/ttyACM*`.
+  Prefer the stable `/dev/serial/by-id/...` path when one exists.
+- **Permissions:** the service account must be in `dialout`, `uucp`, or
+  `plugdev` (whichever exists). The packages handle this; for a manual install,
+  add the user and sign out and back in.
+
+[Configuration](wiki/Configuration.md) covers the remaining service parameters,
+including timeouts, flow control, reconnect interval, and `outgoingMaxTTL`.
+
 ## How it fits together
 
 ```text
@@ -144,19 +216,19 @@ default; clients that do not accept Brotli or gzip still receive the raw files.
              hodeco-contract ──┘   │   └── operational log + message log
              (wire types,          │
               methods, schema)     └── serial ── controller
-                                                (Z-Wave now,
-                                                 ZigBee planned)
+                                                (Z-Wave and
+                                                 ZigBee EZSP)
 ```
 
 | Crate | What it does |
 | --- | --- |
-| `hodeco` | Backend server: HTTP/WebSocket API, service lifecycle, logging, message store, and the serial services (Z-Wave today, ZigBee planned). |
-| `hodeco-contract` | Shared wire types, method names, errors, configuration schema, parameter metadata, and the static Z-Wave/serial catalog. No Tokio or transport dependencies; builds for WASM. |
+| `hodeco` | Backend server: HTTP/WebSocket API, service lifecycle, logging, message store, and the serial services (Z-Wave and ZigBee EZSP). |
+| `hodeco-contract` | Shared wire types, method names, errors, configuration schema, parameter metadata, and the static protocol catalog. No Tokio or transport dependencies; builds for WASM. |
 | `hodeco-schedule` | Pure calendar, solar, repeat, and jitter computation shared by the gateway scheduler and the UI preview/demo paths. |
 | `hodeco-ui` | egui admin and diagnostics frontend. Native and browser/WASM builds from the same code. |
-| `hodeco-codec` | Pure Z-Wave/Parsed decoding, hex helpers, frame builder, command definitions, and entity catalog shared with the UI. |
+| `hodeco-codec` | Pure Z-Wave and ZigBee EZSP/ZCL decoding, hex helpers, frame builders, command definitions, and entity catalog shared with the UI. |
 
-## A tour of the API
+## Use the API
 
 The gateway exposes the API, the live WebSocket, health, task hooks, and the
 static frontend:
@@ -169,7 +241,7 @@ static frontend:
 | `GET/POST /api/hooks/{task}` | Starts a task's HTTP trigger. |
 | `GET /*` | Static frontend assets. |
 
-A request is intentionally boring:
+A first request is intentionally boring:
 
 ```sh
 curl -s http://127.0.0.1:8180/api/rpc \
@@ -180,13 +252,17 @@ curl -s http://127.0.0.1:8180/api/rpc \
 The envelope is JSON-RPC-flavored but minimal: `id` is a string, `method` is a
 known method name, and `params` is an object. The `jsonrpc` field is not used.
 
-The method surface covers server and config (`server.info`, `system.restart`,
-`config.get`, `config.update`), metadata (`protocols.*`, `transports.list`), discovery
-(`discovery.start`, `discovery.get`, `discovery.cancel`), services
-(`services.list`, `services.add`, `services.remove`, `services.alias`,
-`services.status`, `services.params`, `services.send`), messages
-(`messages.list`, `messages.get`), automation (`tasks.*`, `schedules.*`,
-`commands.*`), and events (`events.subscribe`, `events.unsubscribe`).
+The method surface is grouped by job:
+
+| Area | Methods |
+| --- | --- |
+| Server and config | `server.info`, `system.restart`, `config.get`, `config.update` |
+| Metadata | `protocols.*`, `transports.list` |
+| Discovery | `discovery.start`, `discovery.get`, `discovery.cancel` |
+| Services | `services.list`, `services.add`, `services.remove`, `services.alias`, `services.status`, `services.params`, `services.send` |
+| Messages | `messages.list`, `messages.get` |
+| Automation | `tasks.*`, `schedules.*`, `commands.*` |
+| Events | `events.subscribe`, `events.unsubscribe` |
 
 `messages.list` is the workhorse: timestamp-bounded paging, metadata and ID
 filters, and protocol-neutral masked `PayloadExpr` trees evaluated by the
@@ -198,50 +274,50 @@ On the WebSocket, no events are delivered until the client subscribes:
 {"id":"1","method":"events.subscribe","params":{"topics":["messages","services"]}}
 ```
 
-Topics are `messages`, `discovery`, `services`, and `tasks`. Each connection has a bounded
-outgoing queue; a slow consumer, or a lagging server-side event stream, closes
-the connection with `1013`. Reconnect, resubscribe, and resynchronize with the
-list methods.
+Topics are `messages`, `discovery`, `services`, and `tasks`. Each connection has
+a bounded outgoing queue; a slow consumer, or a lagging server-side event stream,
+closes the connection with `1013`. Reconnect, resubscribe, and resynchronize with
+the list methods.
 
 The included UI is an egui app compiled to WASM. It covers services, discovery,
 message history, tasks/schedules/commands/runs, configuration, server details,
 and a console, plus a protocol builder and a demo/fixture mode that works without
-a gateway. The browser
-connects to `ws(s)://<page-host>/api/ws` by default; use `?server=` only for a
-remote gateway.
+a gateway. The browser connects to `ws(s)://<page-host>/api/ws` by default; use
+`?gateway_url=` for a remote gateway or a reverse-proxy prefix.
 
-`services.send` accepts an optional `ttl`. Omit it to inherit the service's
-`outgoingMaxTTL` (10 s by default), then the protocol default.
+See [HTTP API](wiki/HTTP-API.md) for recipes and [WebSocket](wiki/WebSocket.md)
+for the event stream and reconnect sequence.
 
-## Message builder
+## Send and inspect messages
 
-The UI's **Send message** dialog is driven by
-[`hodeco-codec/data/zwave.json`](hodeco-codec/data/zwave.json):
+The **Messages** view shows the history and a decoded view for each frame. The
+**Send message** dialog is driven by
+[`hodeco-codec/data/zwave.json`](hodeco-codec/data/zwave.json) and
+[`hodeco-codec/data/zigbee.json`](hodeco-codec/data/zigbee.json).
 
-- Operations are searchable and include a universal raw message, a raw Serial
-  API frame, `ZW_SendData`/`ZW_SendDataMulti`, broadcast, and the catalog's
-  serial commands. Command classes are searchable; commands for the selected
-  class use a normal dropdown.
-- Request fields use typed controls. Enums, flags, packed bit groups, nodes,
-  durations, text, and signed or unsigned integers come from the definition;
-  `int` and `uint` widths come from a `lengthFrom` enum mapping or a fixed
-  `length`. `hex` is reserved for bitmasks, keys, repeated lists, offsets, and
-  genuinely raw payloads.
-- `ZW_SendData` and `ZW_SendDataMulti` read their TX options from the serial
-  command's `txOptions` values: `ACK`, `LOW_POWER`, `AUTO_ROUTE`, `NO_ROUTE`,
-  and `EXPLORE`. Broadcast keeps its fixed recommended options.
-- The per-send TTL uses the same integer-and-unit editor as the service
-  parameter editor. Unchecked inherits the service override and then the 10 s
-  protocol default; checked sends an explicit value.
-- Lengths and counts are computed from the entered data, and the command ID,
-  frame length, and checksum are added automatically. Commands without a
-  documented layout still accept optional raw parameter bytes.
+- Operations are searchable. Every protocol gets a universal raw message; Z-Wave
+  also has a raw Serial API frame and a broadcast shortcut, and both protocols
+  list their catalog entries.
+- Request fields use typed controls: enums, flags, packed bit groups, nodes,
+  durations, text, and signed or unsigned integers. Lengths and counts are
+  computed where the definition allows it.
+- Z-Wave `ZW_SendData` and `ZW_SendDataMulti` read TX options from the serial
+  command definition. Broadcast keeps its fixed recommended options.
+- The per-send TTL overrides the service's `outgoingMaxTTL` for one message
+  without changing the service configuration.
+- ZigBee operations cover the EZSP coordinator commands in `zigbee.json`. The
+  gateway adds ASH framing, CRC, escaping, and ACK handling; the builder shows
+  the canonical EZSP frame and the decoded ZCL payload where applicable.
+- Commands without a documented layout still accept optional raw parameter
+  bytes, so the builder never blocks you on a missing definition.
 
-See [Codec Data Files](wiki/Data-Files.md) for the full schema.
+If you need to extend the builder or label devices, see
+[Codec Data Files](wiki/Data-Files.md) for the JSON schema.
 
 ## Configuration
 
-The configuration file is optional. These are the platform defaults:
+Configuration is optional. With no files at all, hodeco starts with platform
+defaults. These are the paths to know:
 
 | Item | Windows | Linux |
 | --- | --- | --- |
@@ -251,73 +327,20 @@ The configuration file is optional. These are the platform defaults:
 | Message log | `<exe_dir>\messages.log` | `/var/lib/hodeco/messages.log` |
 | Static assets | `<exe_dir>\site` | `/usr/share/hodeco/site` |
 
-Configuration is split into five sibling files. `config.yaml` holds the core
-settings and points at the catalogs; the catalog files live next to it.
+The configuration is split into five sibling files. `config.yaml` holds the core
+settings and points at the catalogs.
+
+| File | Purpose |
+| --- | --- |
+| `config.yaml` | Server, logging, message history, file paths, task-engine limits. |
+| `services.yaml` | One entry per controller. |
+| `commands.yaml` | External programs that tasks can run. |
+| `schedules.yaml` | Shared timezone/location and reusable schedules. |
+| `tasks.yaml` | Triggers, actions, next rules, and history settings. |
+
+A minimal `services.yaml` is enough to get started:
 
 ```yaml
-# config.yaml
-workingDir: /var/lib/hodeco
-
-log:
-  dir: /var/log/hodeco
-  file: hodeco.log
-  dirMode: "0755"
-  fileMode: "0644"
-  maxSize: 100 MiB
-  maxAge: 1 d
-  backups: 5
-  backupDays: 14
-  archive: none       # none or zip
-
-httpServer:
-  bind: 127.0.0.1
-  port: 8180
-  maxConnections: 1000
-  readTimeout: 5 s
-  readHeaderTimeout: 5 s
-  writeTimeout: 5 s
-  idleTimeout: 2 m
-  maxHeaderBytes: 8192
-  static:
-    dir: /usr/share/hodeco/site
-    index: index.html
-    spaFallback: true
-    precompressed: true
-
-messageLog:
-  maxSize: 10 MiB
-  file: /var/lib/hodeco/messages.log
-  fileMode: "0644"
-  autoPersist: 60 s
-  compactionFactor: 2.0
-  compactInterval: 30 d
-  onCorrupt: ignore  # ignore or fail
-
-files:
-  services: services.yaml
-  tasks: tasks.yaml
-  schedules: schedules.yaml
-  commands: commands.yaml
-
-taskLog:
-  dir: tasks
-  fileMode: "0640"
-  compactionFactor: 2.0
-  compactInterval: 30 d
-  onCorrupt: ignore
-
-taskEngine:
-  maxTriggerPayloadSize: 16 KiB
-  maxConcurrentRuns: 32
-  maxChainDepth: 16
-  maxFanOut: 16
-  runFeed:
-    maxRows: 1000
-    maxSize: 4 MiB
-```
-
-```yaml
-# services.yaml
 services:
   - alias: ZW
     protocol: zwave
@@ -325,64 +348,46 @@ services:
     entry: /dev/ttyUSB0
     params:
       baudRate: 115200
-      openAttemptsInterval: 3 s
-      outgoingMaxTTL: 10 s
 ```
-
-```yaml
-# commands.yaml
-commands:
-  - id: meter
-    name: Meter poll
-    executable: /usr/local/bin/meter-poll
-    args: ["--json"]
-    timeout: 10s
-    description: Read the meter value
-```
-
-```yaml
-# schedules.yaml
-location: [52.52, 13.405, 34]
-timezone: Europe/Berlin
-
-schedules:
-  - id: before-sunset
-    name: Before sunset
-    at: "sunset - 15m"
-    days: [mon, tue, wed, thu, fri]
-```
-
-```yaml
-# tasks.yaml
-tasks:
-  - id: evening-lights
-    name: Evening lights
-    triggers:
-      - id: sunset
-        type: schedule
-        schedule: before-sunset
-    actions:
-      - id: meter
-        command: meter
-        output: capture
-```
-
-`outgoingMaxTTL` bounds how long a queued outgoing message may wait; `0 s`
-disables the TTL. The builder's **Override TTL** sends an explicit per-message
-value without changing the service configuration.
 
 Relative core paths are resolved after the configured `workingDir` is created
 and entered. Catalog paths in `files` are resolved against the directory that
-contains `config.yaml`. Unknown fields are rejected. Service aliases and keys,
-task/schedule/command IDs, and trigger/action IDs must be unique. Outside
-changes to any file require a manual restart; there is no file watcher.
+contains `config.yaml`. Unknown fields are rejected, and service aliases and
+keys, task/schedule/command IDs, and trigger/action IDs must be unique. Changes
+made by editing the files directly require a manual restart; there is no file
+watcher.
 
-The service, task, schedule, and command RPC methods rewrite the relevant file
-atomically. The service account must be able to write those files for write-back
-to succeed. See [`CHANGELOG.md`](CHANGELOG.md) for the 0.2.0 configuration and
-message-log incompatibilities.
+[Configuration](wiki/Configuration.md) has the full reference, platform
+defaults, service parameters, and the notes on write-back and permissions.
 
 ## Running as a service
+
+The `.deb` and `.rpm` packages install the systemd unit and manage the account
+and permissions:
+
+```sh
+sudo apt install ./hodeco_0.3.0_amd64.deb
+# or
+sudo dnf install ./hodeco-0.3.0-1.x86_64.rpm
+```
+
+Installation creates the `hodeco` system user and group, adds the account to
+`dialout`, `uucp`, and `plugdev` when those groups exist, and creates
+`/etc/hodeco`, `/var/lib/hodeco`, and `/var/log/hodeco`. The package enables
+`hodeco.service` and starts it on a fresh install. On upgrade it stops the
+running service before replacing files and starts it again only if it had been
+running. `/etc/hodeco/config.yaml` is a package configuration file, and
+`/etc/hodeco` is group-writable by `hodeco` so configuration and catalog
+write-back through the API works. While the package owns the unit,
+`hodeco install` and `hodeco uninstall` leave it alone; use the package manager
+instead.
+
+```sh
+sudo systemctl status hodeco
+sudo systemctl restart hodeco
+```
+
+For a portable archive, register the service manually.
 
 Windows, from an elevated prompt:
 
@@ -406,11 +411,12 @@ sudo hodeco status
 ```
 
 `--user` defaults to `SUDO_USER`, then `USER`. The account must exist. A warning
-is printed when it is not a member of `dialout`, `uucp`, or `plugdev`.
+is printed when it is not a member of `dialout`, `uucp`, or `plugdev`. The unit
+uses `LogsDirectory=hodeco` and `StateDirectory=hodeco`, which create
+`/var/log/hodeco` and `/var/lib/hodeco` for the service user.
 
-The unit uses `LogsDirectory=hodeco` and `StateDirectory=hodeco`, which create
-`/var/log/hodeco` and `/var/lib/hodeco` for the service user. `/etc/hodeco` is
-root-owned and the config file is expected to be `0644`.
+See [Getting Started](wiki/Getting-Started.md) for the full service-install
+notes and the differences between package and manual installs.
 
 ## Build and test
 
@@ -431,6 +437,13 @@ $env:HODECO_SERIAL_PORT = "COM4"
 cargo test --test real_controller -- --ignored --nocapture
 ```
 
+The ZigBee probe uses `HODECO_ZIGBEE_PORT`, defaulting to `COM5`:
+
+```powershell
+$env:HODECO_ZIGBEE_PORT = "COM5"
+cargo test --test real_zigbee -- --ignored --nocapture
+```
+
 Tagged releases are built by GitHub Actions; ordinary branch and pull-request
 pushes do not run CI. See [`RELEASING.md`](RELEASING.md) for the release
 checklist, target matrix, and artifact layout.
@@ -447,27 +460,40 @@ Tagged releases ship the backend and web UI together:
 | Linux ARMv6 (static, Raspberry Pi 1/Zero and 32-bit Raspberry Pi OS) | `arm-unknown-linux-musleabihf` |
 
 Linux glibc targets also produce `.deb` and `.rpm` packages. Each release
-includes `SHA256SUMS` and generated release notes. See
-[`RELEASING.md`](RELEASING.md) for the full artifact layout.
+includes `SHA256SUMS` and uses the matching `CHANGELOG.md` section as its release
+notes. [Releases](wiki/Releases.md) explains which archive to pick, what is
+inside it, and how upgrades work.
 
 ## Documentation
 
-The [wiki](../../wiki) is the operator and integrator manual:
+The [wiki](../../wiki) is the operator and integrator manual. The source lives
+in [`wiki/`](wiki/) and is published by a workflow.
 
-- [Getting Started](wiki/Getting-Started.md) — run a release or build from source.
-- [Changelog](CHANGELOG.md) — release history and breaking changes.
-- [Configuration](wiki/Configuration.md) — full config reference and paths.
+**Learn**
+
+- [How hodeco works](wiki/Concepts.md) — vocabulary and mental model.
+- [Getting Started](wiki/Getting-Started.md) — release, package, or source, plus a first-run check.
+- [Configuration](wiki/Configuration.md) — full config reference and platform paths.
+
+**Use**
+
 - [Tasks](wiki/Tasks.md) — triggers, actions, next rules, hooks, and run history.
 - [Schedules](wiki/Schedules.md) — recurrence, solar events, repeats, and previews.
 - [Persistence](wiki/Persistence.md) — message and task-history storage.
-- [HTTP API](wiki/HTTP-API.md) — endpoints, RPC methods, and static assets.
-- [WebSocket](wiki/WebSocket.md) — subscriptions, notifications, and backpressure.
 - [Logging](wiki/Logging.md) — operational logs and message persistence.
+
+**Integrate**
+
+- [HTTP API](wiki/HTTP-API.md) — endpoints, RPC methods, and recipes.
+- [WebSocket](wiki/WebSocket.md) — subscriptions, notifications, and backpressure.
+- [Codec Data Files](wiki/Data-Files.md) — `zwave.json`, `zigbee.json`, and `entities.json` formats.
+
+**Project**
+
 - [Releases](wiki/Releases.md) — supported targets, archive layout, and packages.
 - [Development](wiki/Development.md) — workspace commands and cross-checks.
-- [Codec Data Files](wiki/Data-Files.md) — `zwave.json` and `entities.json` formats.
-
-Maintainer release instructions live in [`RELEASING.md`](RELEASING.md).
+- [Changelog](CHANGELOG.md) — release history and breaking changes.
+- [RELEASING.md](RELEASING.md) — maintainer release instructions.
 
 ## License
 

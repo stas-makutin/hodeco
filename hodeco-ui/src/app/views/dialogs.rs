@@ -83,7 +83,7 @@ fn show_connect(app: &mut App, ctx: &Context, dialog: &mut ConnectDialog, keep_o
             );
             ui.label(
                 RichText::new(
-                    "The web build defaults to this page's origin. Use ?server=… or this dialog only for remote gateways.",
+                    "The web build defaults to this page's origin. Use ?gateway_url=… or this dialog only for remote gateways.",
                 )
                 .size(13.5)
                 .color(palette.muted),
@@ -98,13 +98,8 @@ fn show_connect(app: &mut App, ctx: &Context, dialog: &mut ConnectDialog, keep_o
                         .color(palette.muted),
                 );
             }
-
-            if let Some(error) = &dialog.error {
-                ui.add_space(6.0);
-                ui.label(RichText::new(error).color(palette.red));
-            }
         });
-        widgets::dialog_footer(ui, |ui| {
+        widgets::dialog_footer(ui, theme, dialog.error.as_deref(), |ui| {
             if ui.button("Cancel").clicked() {
                 cancel = true;
             }
@@ -283,11 +278,6 @@ fn show_add_service(
                     );
                 });
             }
-
-            if let Some(error) = &dialog.error {
-                ui.add_space(6.0);
-                ui.label(RichText::new(error).color(palette.red));
-            }
         });
 
         let can_submit = ready
@@ -296,21 +286,35 @@ fn show_add_service(
             && !dialog.transport.is_empty()
             && !dialog.entry.trim().is_empty()
             && (definitions.is_some() || definition_error.is_some());
-        widgets::dialog_footer(ui, |ui| {
+        let submit_hint = if !ready {
+            "The gateway must be synced before adding a service."
+        } else if dialog.pending {
+            "Waiting for the gateway to add the service."
+        } else if dialog.protocol.is_empty() || dialog.transport.is_empty() {
+            "Choose a protocol and transport."
+        } else if dialog.entry.trim().is_empty() {
+            "Enter the transport entry, for example COM4 or /dev/ttyUSB0."
+        } else {
+            "Waiting for the parameter definitions."
+        };
+        widgets::dialog_footer(ui, theme, dialog.error.as_deref(), |ui| {
             if ui.button("Cancel").clicked() {
                 cancel = true;
             }
-            if ui
-                .add_enabled(
-                    can_submit,
-                    egui::Button::new(if dialog.pending {
-                        "Adding…"
-                    } else {
-                        "Add service"
-                    }),
-                )
-                .clicked()
-            {
+            let response = ui.add_enabled(
+                can_submit,
+                egui::Button::new(if dialog.pending {
+                    "Adding…"
+                } else {
+                    "Add service"
+                }),
+            );
+            let response = if can_submit {
+                response
+            } else {
+                response.on_disabled_hover_text(submit_hint)
+            };
+            if response.clicked() {
                 submit = true;
             }
             if dialog.pending {
@@ -371,12 +375,8 @@ fn show_edit_alias(
                 .size(13.5)
                 .color(palette.muted),
             );
-            if let Some(error) = &dialog.error {
-                ui.add_space(6.0);
-                ui.label(RichText::new(error).color(palette.red));
-            }
         });
-        widgets::dialog_footer(ui, |ui| {
+        widgets::dialog_footer(ui, theme, dialog.error.as_deref(), |ui| {
             if ui.button("Cancel").clicked() {
                 cancel = true;
             }
@@ -476,7 +476,7 @@ fn show_confirm_remove(
                     .color(palette.muted),
             );
         });
-        widgets::dialog_footer(ui, |ui| {
+        widgets::dialog_footer(ui, theme, None, |ui| {
             if ui.button("Cancel").clicked() {
                 cancel = true;
             }
@@ -538,7 +538,7 @@ fn show_confirm_restart(app: &mut App, ctx: &Context, keep_open: &mut bool) {
                 .color(palette.muted),
             );
         });
-        widgets::dialog_footer(ui, |ui| {
+        widgets::dialog_footer(ui, theme, None, |ui| {
             if ui.button("Cancel").clicked() {
                 cancel = true;
             }
@@ -604,6 +604,11 @@ fn show_service_status(app: &mut App, ctx: &Context, reference: ServiceRef, keep
                             )),
                     );
                     ui.end_row();
+                    if let Some(detail) = &service.status.detail {
+                        ui.label(RichText::new("Detail").size(13.5).color(palette.muted));
+                        ui.label(RichText::new(detail).monospace());
+                        ui.end_row();
+                    }
                 });
             ui.add_space(10.0);
             match &service.status.error {
@@ -619,7 +624,7 @@ fn show_service_status(app: &mut App, ctx: &Context, reference: ServiceRef, keep
                 }
             }
         });
-        widgets::dialog_footer(ui, |ui| {
+        widgets::dialog_footer(ui, theme, None, |ui| {
             if ui.button("Close").clicked() {
                 close = true;
             }
@@ -742,16 +747,12 @@ fn show_service_params(
                     );
                 });
             }
-            if let Some(error) = &dialog.error {
-                ui.add_space(6.0);
-                ui.label(RichText::new(error).color(palette.red));
-            }
         });
         let dirty = dialog
             .editor
             .as_ref()
             .is_some_and(|editor| editor.is_dirty());
-        widgets::dialog_footer(ui, |ui| {
+        widgets::dialog_footer(ui, theme, dialog.error.as_deref(), |ui| {
             if ui.button("Cancel").clicked() {
                 close = true;
             }
@@ -803,7 +804,6 @@ fn show_service_params(
 
 fn show_config_dirty(app: &mut App, ctx: &Context, keep_open: &mut bool) {
     let theme = app.theme;
-    let palette = app.palette();
     let ready = app.gateway.phase() == Phase::Ready;
     let saving = app.config_ui.saving;
     let mut cancel = false;
@@ -821,12 +821,8 @@ fn show_config_dirty(app: &mut App, ctx: &Context, keep_open: &mut bool) {
             ui.label(
                 "The configuration draft contains changes that have not been written to the gateway.",
             );
-            if let Some(error) = &app.config_ui.error {
-                ui.add_space(6.0);
-                ui.label(RichText::new(error).color(palette.red));
-            }
         });
-        widgets::dialog_footer(ui, |ui| {
+        widgets::dialog_footer(ui, theme, app.config_ui.error.as_deref(), |ui| {
             if ui.button("Cancel").clicked() {
                 cancel = true;
             }
@@ -927,7 +923,7 @@ fn show_message(app: &mut App, ctx: &Context, dialog: &mut MessageDialog, keep_o
                 if let Some(encoding) = next_encoding {
                     app.messages.text_encoding = encoding;
                 }
-                widgets::dialog_footer(ui, |ui| {
+                widgets::dialog_footer(ui, theme, None, |ui| {
                     if ui.button("Close").clicked() {
                         close = true;
                     }
@@ -962,15 +958,13 @@ fn show_message(app: &mut App, ctx: &Context, dialog: &mut MessageDialog, keep_o
                             ui.add(egui::Spinner::new().size(14.0));
                             ui.label("Loading message…");
                         });
-                    } else if let Some(error) = &dialog.error {
-                        ui.label(RichText::new(error).color(app.palette().red));
-                    } else {
+                    } else if dialog.error.is_none() {
                         ui.label(
                             "It may have been dropped or removed after a reconnect. Close this dialog and refresh the message list.",
                         );
                     }
                 });
-                widgets::dialog_footer(ui, |ui| {
+                widgets::dialog_footer(ui, theme, dialog.error.as_deref(), |ui| {
                     if ui.button("Close").clicked() {
                         close = true;
                     }
@@ -998,5 +992,64 @@ fn show_message(app: &mut App, ctx: &Context, dialog: &mut MessageDialog, keep_o
             app.search_for_payload(message.payload.as_slice().to_vec());
         }
         *keep_open = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect, vec2};
+
+    fn base_input() -> RawInput {
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+            ..Default::default()
+        }
+    }
+
+    fn input_at(pos: Pos2, pressed: bool) -> RawInput {
+        let mut input = base_input();
+        input.events.push(Event::PointerMoved(pos));
+        input.events.push(Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        });
+        input
+    }
+
+    #[test]
+    fn modal_does_not_close_on_the_click_that_opened_it() {
+        let ctx = egui::Context::default();
+        let mut clicked = false;
+        let mut keep_open = false;
+
+        let mut rect = None;
+        let mut output = ctx.run_ui(base_input(), |ui| {
+            rect = Some(ui.button("Open").rect);
+        });
+        output.textures_delta.clear();
+        let pos = rect.expect("button rect").center();
+
+        let mut output = ctx.run_ui(input_at(pos, true), |ui| {
+            let _ = ui.button("Open");
+        });
+        output.textures_delta.clear();
+
+        let mut output = ctx.run_ui(input_at(pos, false), |ui| {
+            let ctx = ui.ctx().clone();
+            if ui.button("Open").clicked() {
+                clicked = true;
+                keep_open = modal(&ctx, UiTheme::Dark, "test-modal", 320.0, |ui| {
+                    ui.label("Modal");
+                    false
+                });
+            }
+        });
+        output.textures_delta.clear();
+
+        assert!(clicked, "the opening button did not register a click");
+        assert!(keep_open, "the modal closed on the click that opened it");
     }
 }

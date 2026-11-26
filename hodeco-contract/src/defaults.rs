@@ -99,7 +99,7 @@ impl Default for LogConfig {
             max_age: HumanDuration::from_std(Duration::from_secs(24 * 60 * 60)),
             backups: 5,
             backup_days: 14,
-            archive: Archive::None,
+            archive: Archive::Zip,
         }
     }
 }
@@ -197,6 +197,7 @@ mod tests {
     #[test]
     fn default_paths_match_the_platform() {
         let config = Config::default();
+        assert_eq!(config.log.archive, Archive::Zip);
 
         #[cfg(all(feature = "server-defaults", windows))]
         {

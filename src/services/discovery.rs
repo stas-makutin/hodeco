@@ -4,7 +4,8 @@ use super::serial::{
     PortDescriptor, PortEnumerator, PortOpener, SerialSettings, SystemPortEnumerator,
     SystemPortOpener,
 };
-use super::zwave::probe_version;
+use super::zigbee::{EzspVersion, probe_version as probe_zigbee};
+use super::zwave::probe_version as probe_zwave;
 use futures_util::StreamExt;
 use hodeco_contract::domain::{DiscoveryEntry, DiscoveryInfo, DiscoveryState, ParamValues};
 use parking_lot::Mutex;
@@ -22,6 +23,10 @@ use uuid::Uuid;
 pub const DISCOVERY_MAX_COUNT: usize = 10;
 pub const DISCOVERY_MAX_ACTIVE: usize = 3;
 pub const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// EZSP reset and version negotiation are slower than a Z-Wave version probe.
+/// Keep this independent of the Z-Wave budget so discovery does not report a
+/// working ZigBee coordinator as unavailable.
+pub const ZIGBEE_DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone)]
@@ -58,7 +63,7 @@ impl SerialDiscoveryBackend {
 impl DiscoveryBackend for SerialDiscoveryBackend {
     fn discover(
         &self,
-        _protocol: String,
+        protocol: String,
         _transport: String,
         params: ParamValues,
         cancel: CancellationToken,
@@ -79,11 +84,15 @@ impl DiscoveryBackend for SerialDiscoveryBackend {
             settings.write_timeout = None;
 
             let mut entries = Vec::with_capacity(ports.len());
-            let mut probes = futures_util::stream::iter(
-                ports
-                    .into_iter()
-                    .map(|port| probe_port(opener.as_ref(), port, &cancel, settings.clone())),
-            )
+            let mut probes = futures_util::stream::iter(ports.into_iter().map(|port| {
+                probe_port(
+                    protocol.clone(),
+                    opener.as_ref(),
+                    port,
+                    &cancel,
+                    settings.clone(),
+                )
+            }))
             .buffered(4);
 
             while let Some(entry) = probes.next().await {
@@ -98,16 +107,22 @@ impl DiscoveryBackend for SerialDiscoveryBackend {
 }
 
 async fn probe_port(
+    protocol: String,
     opener: &dyn PortOpener,
     port: PortDescriptor,
     cancel: &CancellationToken,
     settings: SerialSettings,
 ) -> DiscoveryEntry {
+    let timeout = if protocol == catalog::PROTOCOL_ZIGBEE {
+        ZIGBEE_DISCOVERY_PROBE_TIMEOUT
+    } else {
+        DISCOVERY_PROBE_TIMEOUT
+    };
     let result = tokio::select! {
         _ = cancel.cancelled() => Err(io::Error::new(io::ErrorKind::Interrupted, "discovery cancelled")),
         result = tokio::time::timeout(
-            DISCOVERY_PROBE_TIMEOUT,
-            probe_port_version(opener, &port.name, settings),
+            timeout,
+            probe_port_version(&protocol, opener, &port.name, settings, timeout),
         ) => {
             match result {
                 Ok(result) => result,
@@ -116,20 +131,50 @@ async fn probe_port(
         }
     };
 
-    match result {
-        Ok(Some(version)) => DiscoveryEntry {
+    match (protocol.as_str(), result) {
+        (catalog::PROTOCOL_ZIGBEE, Ok(Some(ProbeVersion::ZigBee(version)))) => DiscoveryEntry {
+            entry: port.name,
+            available: true,
+            description: describe_zigbee(port.product, version),
+            error: None,
+        },
+        (catalog::PROTOCOL_ZIGBEE, Ok(None)) => DiscoveryEntry {
+            entry: port.name,
+            available: false,
+            description: describe_zigbee(
+                port.product,
+                EzspVersion {
+                    protocol: 0,
+                    stack_version: 0,
+                },
+            ),
+            error: Some("no EZSP version response".to_string()),
+        },
+        (catalog::PROTOCOL_ZIGBEE, Err(error)) => DiscoveryEntry {
+            entry: port.name,
+            available: false,
+            description: describe(port.product, ""),
+            error: Some(error.to_string()),
+        },
+        (_, Ok(Some(ProbeVersion::ZWave(version)))) => DiscoveryEntry {
             entry: port.name,
             available: true,
             description: describe(port.product, &version),
             error: None,
         },
-        Ok(None) => DiscoveryEntry {
+        (_, Ok(Some(ProbeVersion::ZigBee(_)))) => DiscoveryEntry {
+            entry: port.name,
+            available: false,
+            description: describe(port.product, ""),
+            error: Some("unexpected probe result".to_string()),
+        },
+        (_, Ok(None)) => DiscoveryEntry {
             entry: port.name,
             available: false,
             description: describe(port.product, ""),
             error: Some("no Z-Wave version response".to_string()),
         },
-        Err(error) => DiscoveryEntry {
+        (_, Err(error)) => DiscoveryEntry {
             entry: port.name,
             available: false,
             description: describe(port.product, ""),
@@ -138,13 +183,39 @@ async fn probe_port(
     }
 }
 
+enum ProbeVersion {
+    ZWave(String),
+    ZigBee(EzspVersion),
+}
+
 async fn probe_port_version(
+    protocol: &str,
     opener: &dyn PortOpener,
     entry: &str,
     settings: SerialSettings,
-) -> io::Result<Option<String>> {
+    timeout: Duration,
+) -> io::Result<Option<ProbeVersion>> {
     let mut port = opener.open(entry.to_string(), settings).await?;
-    probe_version(&mut port, DISCOVERY_PROBE_TIMEOUT).await
+    match protocol {
+        catalog::PROTOCOL_ZIGBEE => Ok(probe_zigbee(&mut port, timeout)
+            .await?
+            .map(ProbeVersion::ZigBee)),
+        _ => Ok(probe_zwave(&mut port, timeout)
+            .await?
+            .map(ProbeVersion::ZWave)),
+    }
+}
+
+fn describe_zigbee(product: Option<String>, version: EzspVersion) -> Option<String> {
+    let version = if version.protocol == 0 {
+        String::new()
+    } else {
+        format!(
+            "EZSP v{} · stack 0x{:04x}",
+            version.protocol, version.stack_version
+        )
+    };
+    describe(product, &version)
 }
 
 fn describe(product: Option<String>, version: &str) -> Option<String> {
@@ -566,6 +637,111 @@ mod tests {
             manufacturer: None,
             serial_number: None,
         }
+    }
+
+    async fn read_raw_frame(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut out = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            stream.read_exact(&mut byte).await.unwrap();
+            out.push(byte[0]);
+            if byte[0] == super::super::zigbee::ASH_FLAG {
+                return out;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn probes_zigbee_serial_ports() {
+        use super::super::zigbee::{encode_ash_control, encode_ash_data};
+
+        let (device, mut host) = tokio::io::duplex(1024);
+        let responder = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _reset = read_raw_frame(&mut host).await;
+            host.write_all(&encode_ash_control(0xc1, &[0x02, 0x0b]))
+                .await
+                .unwrap();
+            let _request = read_raw_frame(&mut host).await;
+            host.write_all(&encode_ash_data(
+                0x01,
+                &[0x00, 0x80, 0x00, 0x04, 0x02, 0x10, 0x54],
+            ))
+            .await
+            .unwrap();
+            let _ack = read_raw_frame(&mut host).await;
+        });
+
+        let opener = MockPortOpener::new(vec![Ok(Box::new(device) as Port)]);
+        let backend = SerialDiscoveryBackend::new(
+            opener,
+            Arc::new(MockEnumerator(vec![port("COM5", Some("USB Stick"))])),
+        );
+        let entries = backend
+            .discover(
+                "zigbee".to_string(),
+                "serial".to_string(),
+                ParamValues::from([("baudRate".to_string(), json!(57_600))]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].available);
+        assert_eq!(entries[0].entry, "COM5");
+        assert_eq!(
+            entries[0].description.as_deref(),
+            Some("USB Stick [EZSP v4 · stack 0x5410]")
+        );
+        assert!(entries[0].error.is_none());
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probes_zigbee_after_a_slow_reset() {
+        use super::super::zigbee::{encode_ash_control, encode_ash_data};
+
+        let (device, mut host) = tokio::io::duplex(1024);
+        let responder = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _reset = read_raw_frame(&mut host).await;
+            // A real EZSP coordinator can take about a second to reset and
+            // negotiate the link; the probe must not use the Z-Wave budget.
+            tokio::time::sleep(Duration::from_millis(1_000)).await;
+            host.write_all(&encode_ash_control(0xc1, &[0x02, 0x0b]))
+                .await
+                .unwrap();
+            let _request = read_raw_frame(&mut host).await;
+            host.write_all(&encode_ash_data(
+                0x01,
+                &[0x00, 0x80, 0x00, 0x04, 0x02, 0x10, 0x54],
+            ))
+            .await
+            .unwrap();
+            let _ack = read_raw_frame(&mut host).await;
+        });
+
+        let opener = MockPortOpener::new(vec![Ok(Box::new(device) as Port)]);
+        let backend = SerialDiscoveryBackend::new(
+            opener,
+            Arc::new(MockEnumerator(vec![port("COM5", Some("USB Stick"))])),
+        );
+        let entries = backend
+            .discover(
+                "zigbee".to_string(),
+                "serial".to_string(),
+                ParamValues::from([("baudRate".to_string(), json!(57_600))]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].available, "{entries:#?}");
+        assert!(entries[0].error.is_none());
+        responder.await.unwrap();
     }
 
     #[tokio::test]

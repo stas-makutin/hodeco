@@ -1,7 +1,7 @@
 use super::ServiceError;
 use super::catalog::{
-    SERIAL_PARAM_BAUD_RATE, SERIAL_PARAM_DATA_BITS, SERIAL_PARAM_PARITY, SERIAL_PARAM_READ_TIMEOUT,
-    SERIAL_PARAM_STOP_BITS, SERIAL_PARAM_WRITE_TIMEOUT,
+    SERIAL_PARAM_BAUD_RATE, SERIAL_PARAM_DATA_BITS, SERIAL_PARAM_FLOW_CONTROL, SERIAL_PARAM_PARITY,
+    SERIAL_PARAM_READ_TIMEOUT, SERIAL_PARAM_STOP_BITS, SERIAL_PARAM_WRITE_TIMEOUT,
 };
 use hodeco_contract::domain::{ParamError, ParamValues, param_duration, param_str, param_u64};
 use serde_json::json;
@@ -25,6 +25,7 @@ pub struct SerialSettings {
     pub data_bits: DataBits,
     pub parity: Parity,
     pub stop_bits: StopBits,
+    pub flow_control: FlowControl,
     pub read_timeout: Option<Duration>,
     pub write_timeout: Option<Duration>,
 }
@@ -36,6 +37,7 @@ impl Default for SerialSettings {
             data_bits: DataBits::Eight,
             parity: Parity::None,
             stop_bits: StopBits::One,
+            flow_control: FlowControl::None,
             read_timeout: None,
             write_timeout: None,
         }
@@ -78,11 +80,19 @@ impl SerialSettings {
             value => return Err(invalid_param(SERIAL_PARAM_STOP_BITS, json!(value))),
         };
 
+        let flow_control = match param_str(params, SERIAL_PARAM_FLOW_CONTROL).unwrap_or("none") {
+            "none" => FlowControl::None,
+            "software" => FlowControl::Software,
+            "hardware" => FlowControl::Hardware,
+            value => return Err(invalid_param(SERIAL_PARAM_FLOW_CONTROL, json!(value))),
+        };
+
         Ok(Self {
             baud_rate,
             data_bits,
             parity,
             stop_bits,
+            flow_control,
             read_timeout: param_duration(params, SERIAL_PARAM_READ_TIMEOUT)
                 .filter(|timeout| !timeout.is_zero()),
             write_timeout: param_duration(params, SERIAL_PARAM_WRITE_TIMEOUT)
@@ -173,7 +183,7 @@ pub fn open_serial(
         .data_bits(settings.data_bits)
         .parity(settings.parity)
         .stop_bits(settings.stop_bits)
-        .flow_control(FlowControl::None);
+        .flow_control(settings.flow_control);
 
     if let Some(timeout) = settings.read_timeout {
         builder = builder.timeout(timeout);
@@ -193,6 +203,7 @@ mod tests {
         assert_eq!(settings.data_bits, DataBits::Eight);
         assert_eq!(settings.parity, Parity::None);
         assert_eq!(settings.stop_bits, StopBits::One);
+        assert_eq!(settings.flow_control, FlowControl::None);
         assert!(settings.read_timeout.is_none());
         assert!(settings.write_timeout.is_none());
     }
@@ -204,6 +215,7 @@ mod tests {
             ("dataBits".to_string(), json!("7")),
             ("parity".to_string(), json!("even")),
             ("stopBits".to_string(), json!("2")),
+            ("flowControl".to_string(), json!("software")),
             ("readTimeout".to_string(), json!("250 ms")),
         ]);
         let settings = SerialSettings::from_params(&params).unwrap();
@@ -211,12 +223,16 @@ mod tests {
         assert_eq!(settings.data_bits, DataBits::Seven);
         assert_eq!(settings.parity, Parity::Even);
         assert_eq!(settings.stop_bits, StopBits::Two);
+        assert_eq!(settings.flow_control, FlowControl::Software);
         assert_eq!(settings.read_timeout, Some(Duration::from_millis(250)));
     }
 
     #[test]
     fn rejects_invalid_settings() {
         let params = ParamValues::from([("dataBits".to_string(), json!("9"))]);
+        assert!(SerialSettings::from_params(&params).is_err());
+
+        let params = ParamValues::from([("flowControl".to_string(), json!("magic"))]);
         assert!(SerialSettings::from_params(&params).is_err());
     }
 }

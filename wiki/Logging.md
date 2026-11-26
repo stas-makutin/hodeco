@@ -8,12 +8,23 @@ hodeco writes two different things, for two different questions:
 | `messages.log` | What did the devices say? The persisted frame history that powers the message views. |
 
 They have separate retention and rotation settings because they grow at very
-different rates.
+different rates. If you are troubleshooting, start with the table below.
+
+## Which log should I look at?
+
+| Symptom | Start with |
+| --- | --- |
+| The process will not start | `hodeco.log`, then stdout/stderr or the Event Log if the log file was never opened. |
+| The HTTP server is not listening | `hodeco.log` for the bind address and bind errors. |
+| A controller will not connect | `hodeco.log` for the serial open error, then check the port and permissions. |
+| Frames are missing or decode oddly | The Messages view first, then `messages.log` for persistence issues. |
+| A task did not run or failed | The Runs view or `tasks.getRun`; `hodeco.log` may show spawn or configuration errors. |
+| History disappeared after a restart | [Persistence](Persistence) — message history and task history have different rules. |
 
 ## Operational log
 
 Operational logs go to the configured rotating file. The `log` section controls
-size and age limits, backup retention, and optional ZIP archives:
+size and age limits, backup retention, and ZIP archiving:
 
 ```yaml
 log:
@@ -25,12 +36,13 @@ log:
   maxAge: 1 d
   backups: 5
   backupDays: 14
-  archive: none       # none or zip
+  archive: zip        # zip (default) or none
 ```
 
 - `maxSize: 0` or `maxAge: 0 s` disables that rotation trigger.
 - Rotation is enabled only when retention is configured as well.
-- `archive: zip` compresses rotated files.
+- `archive: zip` compresses rotated files and is the default; set `archive: none`
+  to keep plain rotated files.
 
 Log records are queued to a dedicated writer thread, so file I/O, rotation, and
 archiving never block Tokio request or serial tasks. The queue is bounded: if
@@ -71,16 +83,29 @@ messageLog:
   startup failure.
 
 The message file is the one to keep if you want history after an upgrade or a
-move. Deleting it starts the gateway with an empty history.
+move. Deleting it starts the gateway with an empty history. See
+[Persistence](Persistence) for compaction, retention, and crash behavior.
 
 ## Service logs
 
 When running as a Windows service, operational logs go to the configured log
 file and the Event Log is used for startup/configuration failures and log-writer
-errors. When running under systemd, initialization and fatal messages go to
+errors.
+
+When running under systemd, initialization and fatal messages go to
 stdout/stderr, which systemd forwards to the journal; operational events still go
 to the application log file.
+
+```sh
+journalctl -u hodeco
+```
 
 The systemd unit uses `LogsDirectory=hodeco` and `StateDirectory=hodeco`, so
 `/var/log/hodeco` and `/var/lib/hodeco` are created with the service user's
 ownership when the service starts.
+
+## Related pages
+
+- [Configuration](Configuration) — the full `log` and `messageLog` sections.
+- [Persistence](Persistence) — message and task history on disk.
+- [Releases](Releases) — package layout and service management.

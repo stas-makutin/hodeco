@@ -14,7 +14,7 @@ use windows::{
     Win32::Foundation::{
         ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, ERROR_FILE_NOT_FOUND,
         ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS,
-        ERROR_SERVICE_NOT_ACTIVE, HANDLE, NO_ERROR, WIN32_ERROR,
+        ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR, HANDLE, NO_ERROR, WIN32_ERROR,
     },
     Win32::System::EventLog::{
         DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
@@ -110,7 +110,7 @@ extern "system" fn win32_service_main(_: u32, _: *mut PWSTR) {
 
     report_status(SERVICE_START_PENDING);
     report_status(SERVICE_RUNNING);
-    service_main::service_main(
+    let success = service_main::service_main(
         service_log,
         STOP_TOKEN.get_or_init(CancellationToken::new).clone(),
     );
@@ -120,7 +120,7 @@ extern "system" fn win32_service_main(_: u32, _: *mut PWSTR) {
         let _ = unsafe { DeregisterEventSource(HANDLE(event_log)) };
     }
 
-    report_status(SERVICE_STOPPED);
+    report_stopped(success);
 }
 
 /// Writes a log entry to the Windows Event Log for the service's event source.
@@ -168,6 +168,28 @@ fn report_status(current_state: SERVICE_STATUS_CURRENT_STATE) {
         dwControlsAccepted: SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN,
         dwWin32ExitCode: NO_ERROR.0,
         dwServiceSpecificExitCode: 0,
+        dwCheckPoint: 0,
+        dwWaitHint: 0,
+    };
+    let _ = unsafe { SetServiceStatus(SERVICE_STATUS_HANDLE(handle), &status) };
+}
+
+fn report_stopped(success: bool) {
+    let handle = SERVICE_HANDLE.load(Ordering::Acquire);
+    if handle.is_null() {
+        return;
+    }
+
+    let status = SERVICE_STATUS {
+        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+        dwCurrentState: SERVICE_STOPPED,
+        dwControlsAccepted: SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN,
+        dwWin32ExitCode: if success {
+            NO_ERROR.0
+        } else {
+            ERROR_SERVICE_SPECIFIC_ERROR.0
+        },
+        dwServiceSpecificExitCode: u32::from(!success),
         dwCheckPoint: 0,
         dwWaitHint: 0,
     };

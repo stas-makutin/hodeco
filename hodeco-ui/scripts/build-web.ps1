@@ -34,6 +34,7 @@ Copy-Item -LiteralPath (Join-Path $root "index.html") -Destination (Join-Path $d
 $codecData = Join-Path $root "..\hodeco-codec\data"
 Copy-Item -LiteralPath (Join-Path $codecData "zwave.json") -Destination (Join-Path $dist "zwave.json")
 Copy-Item -LiteralPath (Join-Path $codecData "entities.json") -Destination (Join-Path $dist "entities.json")
+Copy-Item -LiteralPath (Join-Path $codecData "zigbee.json") -Destination (Join-Path $dist "zigbee.json")
 
 if (-not $NoOptimize) {
     $wasmOptCommand = $null

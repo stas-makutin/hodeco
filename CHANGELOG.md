@@ -4,6 +4,115 @@ All notable changes to hodeco are recorded here. The project follows semantic
 versioning for the application release. The JSON-RPC protocol version is listed
 separately because it can stay compatible across releases.
 
+## 0.3.0 — 2026-11-25
+
+Phase 3 adds ZigBee support over Ember EZSP serial coordinators, with the same
+raw-relay model as Z-Wave, and improves the Z-Wave builder and filter. There are
+no configuration or message-log format breaks in this release.
+
+### Added
+
+- **ZigBee (Ember EZSP) services.** `protocol: zigbee` over `transport: serial`.
+  The gateway owns ASH framing, acknowledgements, retries, reset, reconnect, and
+  EZSP version negotiation; clients send and receive canonical EZSP frames:
+  `seq | frameControlLow | frameControlHigh=0x01 | frameId (LE) | parameters`.
+  Discovery negotiates EZSP and reports the stack version. The HUSBZB-1 ZigBee
+  side defaults to 57600 8N1.
+- **Serial flow control.** `flowControl` accepts `none`, `software`, or
+  `hardware` and defaults to `none`.
+- **ZigBee link tuning.** `ashAckTimeout` (default 1.6 s) and `ashMaxRetries`
+  (default 5) control ASH acknowledgement timing and retry count; the gateway
+  reopens the link when the retry count is exhausted.
+- **ASH link diagnostics.** ASH ACK/NAK/RST/RSTACK/ERROR frames are stored as raw
+  wire messages in the message history. A missing acknowledgement is visible as
+  an outgoing EZSP request that never reaches the acknowledged state, with no
+  corresponding link ACK. ASH link frames never trigger tasks.
+- **ZigBee message decoding and builder.** EZSP request, response, and callback
+  layouts, nested ZCL cluster commands and attributes, and raw ASH link-frame
+  decoding. Curated clusters include On/Off, Level, Color Control, Groups,
+  Scenes, Identify, and the common measurement clusters. The builder covers
+  coordinator commands such as `networkInit`, `formNetwork`, `permitJoining`,
+  `leaveNetwork`, `sendUnicast`, `sendBroadcast`, and `sendMulticast`, with typed
+  little-endian fields. Send commands can compose a ZCL payload with cluster and
+  command pickers, general ZCL commands, direction-aware fields, manufacturer
+  codes, typed payload fields, and known-device NWK/endpoint selection. Fielded
+  requests can be restored from decoded frames; raw EZSP parameters and raw ZCL
+  bytes remain available as fallbacks. Unknown commands and clusters fall back
+  to raw bytes.
+- **ZigBee payload conditions.** Match the EZSP command, network address, group,
+  cluster, endpoint, other fixed EZSP fields, raw EZSP parameters, ZCL frame
+  control/direction, general or cluster ZCL commands, typed ZCL fields, and raw
+  ZCL payloads. A Request/Response switch selects the EZSP field layout. Fields
+  that the selected command does not carry are disabled and cleared, so an
+  address is not left attached to `permitJoining` or another non-addressed
+  command. Group ID matching covers `sendMulticast` and group-addressed
+  `incomingMessageHandler` frames.
+- **ZigBee entity labels and codec data.** `entities.json` accepts 16-bit NWK
+  addresses, optional EUI-64, endpoint, and profile metadata. The parsed view
+  labels known sender/destination addresses, and the builder and filter offer
+  known-device pickers. Legacy `device_id` and `service_id` keys remain accepted
+  as aliases. `zigbee.json` provides runtime-editable EZSP commands, general ZCL
+  commands, ZCL frame-control metadata, and ZCL cluster definitions, loaded like
+  `zwave.json`.
+- **Service status detail.** `ServiceStatus.detail` optionally carries
+  protocol-specific information such as `EZSP v4 · stack 0x5410`.
+- **Z-Wave builder and filter improvements.** TX option checkboxes come from the
+  serial command's `txOptions` values, and broadcast TX options are fixed.
+  Command class and command pickers list catalog values only; the **Match in
+  filter** checkbox controls whether the selected value participates. New
+  Z-Wave frame conditions start at Basic Set, so the common case needs no extra
+  selection. Command-class payloads can optionally be matched with typed
+  fixed-width fields; only checked fields participate, and raw command data
+  remains the default or an extra tail when typed fields are enabled. The node
+  field offers known nodes from `entities.json`, and typed command fields use
+  enum, flag, boolean, and numeric editors instead of free-form text.
+- **Z-Wave catalog corrections.** Display names such as Switch Binary, Switch
+  Multilevel, Scene Activation, Start Level Change, and Meter Supported Get now
+  use normal spacing. Classes without named command definitions remain usable:
+  the builder accepts raw command bytes with the class byte added automatically,
+  and the filter accepts a numeric command ID with raw parameters.
+- **Demo fixtures.** ZigBee service, discovery, EZSP, ASH, and ZCL messages,
+  including `permitJoining`, `sendUnicast`, On/Off, Level, Color Control, and
+  attribute reports. The entity catalog maps several ZigBee NWK addresses,
+  endpoints, profiles, and EUI-64 values; discovery also includes unconfigured
+  serial ports that can be added.
+- **Linux packaging.** The `.deb` and `.rpm` packages now install a systemd unit,
+  a sysusers definition, a default `config.yaml`, and maintainer scripts. They
+  create or repair the service account, add serial groups when present, prepare
+  the runtime directories, and start or stop the unit on install, upgrade, and
+  removal.
+- **ARMv6 release target.** `arm-unknown-linux-musleabihf` covers Raspberry Pi 1,
+  Zero, Zero W, and 32-bit Raspberry Pi OS.
+- **Task labels.** Tasks accept optional free-form `labels`. The Tasks UI shows a
+  Labels column and a searchable label filter; selecting several labels matches
+  tasks with any of them. Labels are organizational only and do not affect
+  execution. Tools that create tasks through `tasks.add` can label them with
+  `automated` or their own name.
+
+### Changed
+
+- **ZigBee discovery timing.** Discovery now allows the full EZSP reset and
+  version-negotiation handshake instead of reusing the shorter Z-Wave probe
+  budget, so HUSBZB-1 and similar coordinators are detected reliably.
+- **ZIP log archives by default.** Rotated operational logs use ZIP compression
+  by default. Set `log.archive: none` to keep rotated files as plain files.
+- **Package-managed systemd unit.** When the service is installed by a package,
+  `hodeco install` and `hodeco uninstall` leave it alone and point to the package
+  manager instead of creating or removing a manual unit.
+
+### UI
+
+- The UI endpoint option is now `--gateway-url` and `?gateway_url=`. The previous
+  `--server` and `?server=` forms remain accepted as legacy aliases.
+- Failed dialog actions show a truncated error beside the buttons in the fixed
+  footer, so a long scrollable body cannot hide it.
+
+### Protocol
+
+- Protocol version stays `1.0`. The new fields and capabilities are additive;
+  the core configuration shape is unchanged. `tasks.yaml` gains an optional
+  `labels` field; older binaries reject it because unknown fields are rejected.
+
 ## 0.2.0 — 2026-11-21
 
 Phase 2 adds a protocol-agnostic automation engine, reusable schedules and
@@ -286,6 +395,6 @@ commands, per-task run history, and the Tasks area of the UI.
 - Protocol version stays `1.0`. The new methods are additive at the transport
   level; the configuration shape change is an application/configuration break.
 
-## 0.1.0
+## 0.1.0 — 2026-11-15
 
 Initial public release.

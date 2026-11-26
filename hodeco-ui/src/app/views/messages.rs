@@ -2,7 +2,8 @@
 
 use super::super::{
     App, ConditionEditor, FilterDialogMode, FilterDraft, MessageFiltersDialog, MessageView,
-    PayloadConditionDraft, RawConditionDraft, RawLeafDraft, SearchDirection,
+    PayloadConditionDraft, RawConditionDraft, RawLeafDraft, SearchDirection, ZigbeeConditionDraft,
+    ZigbeeFieldMatch, parse_hex_u16, zcl_field_spans,
 };
 use crate::model;
 use crate::theme::UiTheme;
@@ -15,6 +16,7 @@ use hodeco_codec::entities;
 use hodeco_codec::filter::{self, FrameKind, Includes};
 use hodeco_codec::hex;
 use hodeco_codec::parsed::{DecodeResult, FieldKind};
+use hodeco_codec::zigbee;
 use hodeco_contract::domain::{Message, MessageDirection, MessageState, ServiceInfo, ServiceRef};
 
 pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
@@ -817,7 +819,7 @@ pub(crate) fn show_filters_dialog(
                 ui.separator();
                 payload_conditions_list(app, ui, &mut draft, &mut dialog.editor);
             });
-            widgets::dialog_footer(ui, |ui| {
+            widgets::dialog_footer(ui, theme, draft.error.as_deref(), |ui| {
                 if ui.button("Cancel").clicked() {
                     cancel = true;
                 }
@@ -925,7 +927,14 @@ pub(crate) fn payload_conditions_list(
         if ui.button("Add Z-Wave frame...").clicked() {
             *editor = Some(ConditionEditor {
                 index: None,
-                draft: PayloadConditionDraft::Frame(filter::FilterSpec::default()),
+                draft: PayloadConditionDraft::Frame(default_frame_condition()),
+                error: None,
+            });
+        }
+        if ui.button("Add ZigBee frame...").clicked() {
+            *editor = Some(ConditionEditor {
+                index: None,
+                draft: PayloadConditionDraft::Zigbee(ZigbeeConditionDraft::default()),
                 error: None,
             });
         }
@@ -949,9 +958,6 @@ pub(crate) fn payload_conditions_list(
         .size(13.5)
         .color(if over { palette.red } else { palette.muted }),
     );
-    if let Some(error) = &draft.error {
-        ui.label(RichText::new(error).size(13.5).color(palette.red));
-    }
 }
 
 pub(crate) fn payload_condition_modal(
@@ -964,9 +970,9 @@ pub(crate) fn payload_condition_modal(
     let Some(mut current) = editor.take() else {
         return;
     };
-    let palette = app.palette();
     let editor_title = match &current.draft {
         PayloadConditionDraft::Frame(_) => "Z-Wave frame condition",
+        PayloadConditionDraft::Zigbee(_) => "ZigBee frame condition",
         PayloadConditionDraft::Raw(_) => "Raw bytes condition",
     };
     let mut save = false;
@@ -976,17 +982,16 @@ pub(crate) fn payload_condition_modal(
         .show(ctx, |ui| {
             widgets::dialog_width(ui, 860.0);
             widgets::dialog_header(ui, theme, editor_title, None);
-            widgets::dialog_body(ui, 540.0, |ui| {
-                match &mut current.draft {
-                    PayloadConditionDraft::Frame(spec) => frame_condition_editor(app, ui, spec),
-                    PayloadConditionDraft::Raw(raw) => raw_condition_editor(ui, raw, theme),
+            widgets::dialog_body(ui, 540.0, |ui| match &mut current.draft {
+                PayloadConditionDraft::Frame(spec) => {
+                    frame_condition_editor(app, ui, spec, &draft.services)
                 }
-                if let Some(error) = &current.error {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(error).size(13.5).color(palette.red));
+                PayloadConditionDraft::Zigbee(spec) => {
+                    zigbee_condition_editor(app, ui, spec, &draft.services, theme)
                 }
+                PayloadConditionDraft::Raw(raw) => raw_condition_editor(ui, raw, theme),
             });
-            widgets::dialog_footer(ui, |ui| {
+            widgets::dialog_footer(ui, theme, current.error.as_deref(), |ui| {
                 if ui.button("Cancel").clicked() {
                     close = true;
                 }
@@ -1167,11 +1172,28 @@ fn match_checkbox(ui: &mut Ui, include: &mut bool, enabled: bool) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // Keep the checkbox clear of the dialog scrollbar.
         ui.add_space(14.0);
-        ui.add_enabled(enabled, egui::Checkbox::new(include, "Match in filter"));
+        ui.add_enabled(enabled, egui::Checkbox::new(include, "Match in filter"))
+            .on_hover_text(
+                "Include this field in the condition. Unchecked keeps the selected value \
+                 but does not match it.",
+            );
     });
 }
 
-fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec) {
+fn default_frame_condition() -> filter::FilterSpec {
+    filter::FilterSpec {
+        command_class: Some(hodeco_codec::builder::CC_BASIC),
+        command: Some(hodeco_codec::builder::BASIC_SET),
+        ..filter::FilterSpec::default()
+    }
+}
+
+fn frame_condition_editor(
+    app: &App,
+    ui: &mut Ui,
+    spec: &mut filter::FilterSpec,
+    services: &[ServiceRef],
+) {
     let palette = app.palette();
     let definitions = definitions::current();
     ui.label(RichText::new("Frame type").strong());
@@ -1204,6 +1226,7 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
     }
 
     if spec.frame.uses_node() {
+        let known = zwave_known_nodes(app, services);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Node(s)").strong());
             if spec.frame == FrameKind::Broadcast {
@@ -1211,8 +1234,28 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
                 spec.includes.node = true;
                 match_checkbox(ui, &mut spec.includes.node, false);
             } else {
+                let multi = matches!(spec.frame, FrameKind::SendData | FrameKind::SendDataMulti);
                 let mut text = spec.nodes_text.clone();
-                if widgets::numeric_input(ui, &mut text, "e.g. 2, 7", 150.0, true) {
+                let mut changed = widgets::numeric_input(ui, &mut text, "e.g. 2, 7", 150.0, true);
+                let current = text.trim().parse::<u8>().ok();
+                if let Some(node) = known_node_picker(ui, &known, current, multi) {
+                    if multi {
+                        let mut nodes = model::parse_node_list(&text).unwrap_or_default();
+                        if !nodes.contains(&node) {
+                            nodes.push(node);
+                            nodes.sort_unstable();
+                        }
+                        text = nodes
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                    } else {
+                        text = node.to_string();
+                    }
+                    changed = true;
+                }
+                if changed {
                     spec.nodes_text = text;
                     spec.nodes = model::parse_node_list(&spec.nodes_text).unwrap_or_default();
                     spec.includes.node = !spec.nodes.is_empty();
@@ -1246,14 +1289,14 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
             let class_items: Vec<(u8, String)> = definitions
                 .command_classes
                 .iter()
-                .map(|class| (class.id, format!("{} (0x{:02x})", class.name, class.id)))
+                .map(|class| (class.id, command_class_label(class)))
                 .collect();
             let selected_class = spec
                 .command_class
                 .and_then(|id| definitions.command_class(id));
             let selected_text = match selected_class {
-                Some(class) => format!("{} (0x{:02x})", class.name, class.id),
-                None => "Any command class".to_string(),
+                Some(class) => command_class_label(class),
+                None => "Select a command class".to_string(),
             };
             let mut class_choice = spec.command_class;
             widgets::searchable_combo(
@@ -1263,7 +1306,7 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
                 320.0,
                 &mut class_choice,
                 widgets::ComboOptions {
-                    any_label: Some("Any command class"),
+                    any_label: None,
                     emphasize: &[],
                 },
                 &class_items,
@@ -1271,6 +1314,7 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
             if class_choice != spec.command_class {
                 spec.command_class = class_choice;
                 spec.command = None;
+                spec.command_fields.clear();
                 spec.includes.command_class = class_choice.is_some();
                 spec.includes.command = false;
             }
@@ -1300,28 +1344,38 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
                         .collect()
                 })
                 .unwrap_or_default();
-            let selected_text = match class.and_then(|class| {
-                spec.command
-                    .and_then(|id| class.commands.iter().find(|command| command.id == id))
-            }) {
-                Some(command) => format!("{} (0x{:02x})", command.name, command.id),
-                None => "Any command".to_string(),
-            };
             let mut command_choice = spec.command;
-            widgets::searchable_combo(
-                ui,
-                "condition-command",
-                selected_text,
-                320.0,
-                &mut command_choice,
-                widgets::ComboOptions {
-                    any_label: Some("Any command"),
-                    emphasize: &[],
-                },
-                &command_items,
-            );
+            if command_items.is_empty() {
+                let mut text = command_choice
+                    .map(|command| command.to_string())
+                    .unwrap_or_default();
+                if widgets::numeric_input(ui, &mut text, "command ID, e.g. 1", 140.0, false) {
+                    command_choice = text.trim().parse::<u8>().ok();
+                }
+            } else {
+                let selected_text = match class.and_then(|class| {
+                    spec.command
+                        .and_then(|id| class.commands.iter().find(|command| command.id == id))
+                }) {
+                    Some(command) => format!("{} (0x{:02x})", command.name, command.id),
+                    None => "Select a command".to_string(),
+                };
+                widgets::searchable_combo(
+                    ui,
+                    "condition-command",
+                    selected_text,
+                    320.0,
+                    &mut command_choice,
+                    widgets::ComboOptions {
+                        any_label: None,
+                        emphasize: &[],
+                    },
+                    &command_items,
+                );
+            }
             if command_choice != spec.command {
                 spec.command = command_choice;
+                spec.command_fields.clear();
                 if command_choice.is_some() {
                     spec.includes.command = true;
                     spec.includes.command_class = true;
@@ -1331,14 +1385,86 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
             }
             match_checkbox(ui, &mut spec.includes.command, spec.command.is_some());
         });
+        if class.is_some_and(|class| class.commands.is_empty()) {
+            ui.label(
+                RichText::new(
+                    "No named commands are defined for this class. Enter the command ID \
+                     and put the parameters in Command data.",
+                )
+                .size(13.5)
+                .color(palette.muted),
+            );
+        }
 
+        let mut command_field_error = None;
+        let command_field_spans = match spec.command_field_spans() {
+            Ok(spans) => spans,
+            Err(error) => {
+                command_field_error = Some(error.to_string());
+                Vec::new()
+            }
+        };
+        if !command_field_spans.is_empty() {
+            ui.add_space(6.0);
+            let typed_enabled = spec.command_fields.values().any(|field| field.enabled);
+            egui::CollapsingHeader::new(RichText::new("Command fields (optional)").strong())
+                .default_open(typed_enabled)
+                .show(ui, |ui| {
+                    egui::Grid::new(("condition-command-fields", spec.command_class, spec.command))
+                        .num_columns(3)
+                        .spacing([10.0, 5.0])
+                        .show(ui, |ui| {
+                            for span in &command_field_spans {
+                                let entry = spec
+                                    .command_fields
+                                    .entry(span.field.name.clone())
+                                    .or_insert_with(|| default_command_field_match(&span.field));
+                                ui.checkbox(&mut entry.enabled, "");
+                                ui.label(format!(
+                                    "{}{}",
+                                    span.field.label,
+                                    zcl_match_suffix(&span.field)
+                                ));
+                                command_field_widget(ui, &span.field, &mut entry.value);
+                                ui.end_row();
+                            }
+                        });
+                    ui.label(
+                        RichText::new(
+                            "Fixed-width fields are matched here; use extra command data \
+                             for variable-length or vendor bytes.",
+                        )
+                        .size(13.5)
+                        .color(palette.muted),
+                    );
+                });
+        }
+        if let Some(error) = command_field_error {
+            ui.label(RichText::new(error).size(13.5).color(palette.red));
+        }
+
+        let typed_enabled = spec.command_fields.values().any(|field| field.enabled);
+        if typed_enabled {
+            spec.includes.command_data = true;
+        }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Command data").strong());
+            ui.label(
+                RichText::new(if typed_enabled {
+                    "Extra command data"
+                } else {
+                    "Command data"
+                })
+                .strong(),
+            );
             let mut data_text = spec.command_data_hex.clone();
             if widgets::hex_input(
                 ui,
                 &mut data_text,
-                "bytes after the command, e.g. 63",
+                if typed_enabled {
+                    "bytes appended after typed command fields"
+                } else {
+                    "bytes after the command, e.g. 63"
+                },
                 false,
                 1,
                 300.0,
@@ -1351,7 +1477,7 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
             match_checkbox(
                 ui,
                 &mut spec.includes.command_data,
-                !spec.command_data_hex.trim().is_empty(),
+                !spec.command_data_hex.trim().is_empty() || typed_enabled,
             );
         });
         if !spec.command_data_hex.trim().is_empty()
@@ -1363,28 +1489,68 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
                     .color(palette.red),
             );
         }
+        if typed_enabled || !spec.command_data_hex.trim().is_empty() {
+            match spec.command_payload() {
+                Ok(payload) => {
+                    ui.label(
+                        RichText::new(format!("Command payload: {}", hex::spaced_hex(&payload)))
+                            .monospace()
+                            .size(13.0)
+                            .color(palette.muted),
+                    );
+                }
+                Err(error) => {
+                    ui.label(
+                        RichText::new(error.to_string())
+                            .size(13.5)
+                            .color(palette.red),
+                    );
+                }
+            }
+        }
     }
 
     if spec.frame.uses_tx_options() {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("TX options").strong());
-            let mut ack = spec.tx_options & hodeco_codec::builder::TX_OPTION_ACK != 0;
-            let mut no_route = spec.tx_options & hodeco_codec::builder::TX_OPTION_NO_ROUTE != 0;
-            if ui.checkbox(&mut ack, "ACK").changed()
-                || ui.checkbox(&mut no_route, "NO_ROUTE").changed()
-            {
-                let mut value = 0;
-                if ack {
-                    value |= hodeco_codec::builder::TX_OPTION_ACK;
+        if spec.frame == FrameKind::Broadcast {
+            spec.tx_options = hodeco_codec::builder::BROADCAST_TX_OPTIONS;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("TX options").strong());
+                ui.label(
+                    RichText::new(format!(
+                        "0x{:02x} (fixed)",
+                        hodeco_codec::builder::BROADCAST_TX_OPTIONS
+                    ))
+                    .monospace(),
+                );
+                match_checkbox(ui, &mut spec.includes.tx_options, true);
+            });
+        } else {
+            let options = zwave_tx_option_values(&definitions, spec.frame);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("TX options").strong());
+                let mut value = spec.tx_options;
+                let mut changed = false;
+                for (bit, name) in &options {
+                    let mut enabled = value & bit != 0;
+                    if ui.checkbox(&mut enabled, name).changed() {
+                        if enabled {
+                            value |= bit;
+                        } else {
+                            value &= !bit;
+                        }
+                        changed = true;
+                    }
                 }
-                if no_route {
-                    value |= hodeco_codec::builder::TX_OPTION_NO_ROUTE;
+                if changed {
+                    spec.tx_options = value;
                 }
-                spec.tx_options = value;
-            }
-            match_checkbox(ui, &mut spec.includes.tx_options, true);
-        });
+                if options.is_empty() {
+                    ui.add(DragValue::new(&mut spec.tx_options).range(0..=u8::MAX));
+                }
+                match_checkbox(ui, &mut spec.includes.tx_options, true);
+            });
+        }
     }
 
     if spec.frame.uses_callback_id() {
@@ -1399,7 +1565,15 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("RX status").strong());
-            ui.add(DragValue::new(&mut spec.rx_status).range(0..=u8::MAX));
+            if let Some(field) =
+                zwave_frame_field(&definitions, spec.frame, definitions::FieldRole::RxStatus)
+                && field.kind == definitions::FieldType::Flags
+                && !field.values.is_empty()
+            {
+                zwave_flags_widget(ui, field, &mut spec.rx_status);
+            } else {
+                ui.add(DragValue::new(&mut spec.rx_status).range(0..=u8::MAX));
+            }
             match_checkbox(ui, &mut spec.includes.rx_status, true);
         });
     }
@@ -1407,7 +1581,32 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("TX status").strong());
-            ui.add(DragValue::new(&mut spec.tx_status).range(0..=u8::MAX));
+            if let Some(field) =
+                zwave_frame_field(&definitions, spec.frame, definitions::FieldRole::TxStatus)
+                && field.kind == definitions::FieldType::Enum
+                && !field.values.is_empty()
+            {
+                let selected = field
+                    .values
+                    .iter()
+                    .find(|item| item.value == spec.tx_status)
+                    .map(|item| format!("{} (0x{:02x})", item.name, item.value))
+                    .unwrap_or_else(|| format!("0x{:02x}", spec.tx_status));
+                ComboBox::from_id_salt("condition-tx-status")
+                    .selected_text(selected)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for item in &field.values {
+                            ui.selectable_value(
+                                &mut spec.tx_status,
+                                item.value,
+                                format!("{} (0x{:02x})", item.name, item.value),
+                            );
+                        }
+                    });
+            } else {
+                ui.add(DragValue::new(&mut spec.tx_status).range(0..=u8::MAX));
+            }
             match_checkbox(ui, &mut spec.includes.tx_status, true);
         });
     }
@@ -1416,6 +1615,62 @@ fn frame_condition_editor(app: &App, ui: &mut Ui, spec: &mut filter::FilterSpec)
     ui.separator();
     frame_structural(ui, spec, palette);
     frame_preview(ui, app.theme, spec);
+}
+
+fn zwave_tx_option_values(
+    definitions: &definitions::ZWaveDefinitions,
+    frame: FrameKind,
+) -> Vec<(u8, String)> {
+    frame
+        .serial_command()
+        .and_then(|id| definitions.serial_command(id))
+        .and_then(|command| {
+            command
+                .fields
+                .iter()
+                .flat_map(definitions::LayoutField::fields)
+                .find(|field| field.kind == definitions::FieldType::TxOptions)
+        })
+        .map(|field| {
+            field
+                .values
+                .iter()
+                .map(|value| (value.value, value.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn zwave_frame_field(
+    definitions: &definitions::ZWaveDefinitions,
+    frame: FrameKind,
+    role: definitions::FieldRole,
+) -> Option<&definitions::FieldDef> {
+    let command = definitions.serial_command(frame.serial_command()?)?;
+    let fields = if frame == FrameKind::SendDataCallback {
+        command.callback.as_ref()?.fields.as_slice()
+    } else {
+        command.fields.as_slice()
+    };
+    fields
+        .iter()
+        .flat_map(definitions::LayoutField::fields)
+        .find(|field| field.role == role)
+}
+
+fn zwave_flags_widget(ui: &mut Ui, field: &definitions::FieldDef, value: &mut u8) {
+    ui.horizontal_wrapped(|ui| {
+        for item in &field.values {
+            let mut enabled = *value & item.value != 0;
+            if ui.checkbox(&mut enabled, &item.name).changed() {
+                if enabled {
+                    *value |= item.value;
+                } else {
+                    *value &= !item.value;
+                }
+            }
+        }
+    });
 }
 
 fn frame_structural(ui: &mut Ui, spec: &mut filter::FilterSpec, palette: crate::theme::Palette) {
@@ -1507,6 +1762,875 @@ fn frame_preview(ui: &mut Ui, theme: UiTheme, spec: &filter::FilterSpec) {
         .size(13.5)
         .color(palette.muted),
     );
+}
+
+fn zigbee_condition_editor(
+    app: &App,
+    ui: &mut Ui,
+    spec: &mut ZigbeeConditionDraft,
+    services: &[ServiceRef],
+    theme: UiTheme,
+) {
+    let palette = crate::theme::palette(theme);
+    ui.label(
+        RichText::new(
+            "Match the EZSP envelope, the ZCL frame, and typed ZCL fields. \
+             Blank fields are wildcards; raw bytes remain available.",
+        )
+        .size(13.5)
+        .color(palette.muted),
+    );
+    ui.add_space(6.0);
+    let definitions = zigbee::current();
+    let zigbee_services = zigbee_filter_services(app, services);
+    let entity_keys: Vec<String> = zigbee_services
+        .iter()
+        .flat_map(|service| model::entity_service_keys(&app.services, service))
+        .collect();
+    let devices = zigbee_known_devices(&entity_keys);
+
+    let items: Vec<(u16, String)> = definitions
+        .commands
+        .iter()
+        .map(|command| {
+            (
+                command.id,
+                format!("{} (0x{:04x})", command.name, command.id),
+            )
+        })
+        .collect();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("EZSP command").strong());
+        let previous = spec.command;
+        let mut choice = spec.command;
+        widgets::searchable_combo(
+            ui,
+            "zigbee-condition-command",
+            spec.command
+                .and_then(|id| definitions.command(id))
+                .map(|command| format!("{} (0x{:04x})", command.name, command.id))
+                .unwrap_or_else(|| "Any command".to_string()),
+            460.0,
+            &mut choice,
+            widgets::ComboOptions {
+                any_label: Some("Any command"),
+                emphasize: &[],
+            },
+            &items,
+        );
+        if choice != previous {
+            spec.command = choice;
+            spec.ezsp_fields.clear();
+            spec.ezsp_response = false;
+            // Clear fields that no longer have a fixed location in the frame.
+            if !spec.supports_network() {
+                spec.network.clear();
+            }
+            if !spec.supports_group() {
+                spec.group.clear();
+            }
+            if !spec.supports_cluster() {
+                spec.cluster.clear();
+            }
+            if !spec.supports_endpoint() {
+                spec.endpoint.clear();
+            }
+            if !spec.supports_zcl() {
+                spec.zcl_general = false;
+                spec.zcl_command = None;
+                spec.zcl_fields.clear();
+                spec.zcl_payload.clear();
+            }
+        }
+    });
+    if let Some(command) = spec.command.and_then(|id| definitions.command(id))
+        && let Some(description) = &command.description
+    {
+        ui.label(RichText::new(description).size(13.0).color(palette.muted));
+    }
+    let has_network = spec.supports_network();
+    let has_group = spec.supports_group();
+    let has_cluster = spec.supports_cluster();
+    let has_endpoint = spec.supports_endpoint();
+    let has_zcl = spec.supports_zcl();
+    if !has_network {
+        spec.network.clear();
+    }
+    if !has_group {
+        spec.group.clear();
+    }
+    if !has_cluster {
+        spec.cluster.clear();
+    }
+    if !has_endpoint {
+        spec.endpoint.clear();
+    }
+    if !has_zcl {
+        spec.zcl_general = false;
+        spec.zcl_command = None;
+        spec.zcl_fields.clear();
+        spec.zcl_payload.clear();
+    }
+
+    ui.add_space(4.0);
+    let network_label = spec
+        .command
+        .and_then(|id| {
+            definitions.field_layout_by_filter_slot(id, definitions::FilterSlot::Network)
+        })
+        .map(|(_, field)| field.label.clone())
+        .unwrap_or_else(|| "Network address".to_string());
+    let group_label = spec
+        .command
+        .and_then(|id| definitions.field_layout_by_filter_slot(id, definitions::FilterSlot::Group))
+        .map(|(_, field)| field.label.clone())
+        .unwrap_or_else(|| "Group ID".to_string());
+    let group_description = spec
+        .command
+        .and_then(|id| definitions.field_layout_by_filter_slot(id, definitions::FilterSlot::Group))
+        .and_then(|(_, field)| field.description.clone());
+    let endpoint_label = spec
+        .command
+        .and_then(|id| {
+            definitions.field_layout_by_filter_slot(id, definitions::FilterSlot::Endpoint)
+        })
+        .map(|(_, field)| field.label.clone())
+        .unwrap_or_else(|| "Endpoint".to_string());
+    let cluster_label = spec
+        .command
+        .and_then(|id| {
+            definitions.field_layout_by_filter_slot(id, definitions::FilterSlot::Cluster)
+        })
+        .map(|(_, field)| field.label.clone())
+        .unwrap_or_else(|| "Cluster ID".to_string());
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(has_network, |ui| {
+            ui.label(network_label);
+            widgets::hex_input(ui, &mut spec.network, "e.g. 1234", true, 2, 160.0);
+            let mut chosen = None;
+            ComboBox::from_id_salt("zigbee-condition-device")
+                .selected_text("Known device")
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    if devices.is_empty() {
+                        ui.label(
+                            RichText::new("No devices in the entity catalog")
+                                .size(13.5)
+                                .color(palette.muted),
+                        );
+                        return;
+                    }
+                    for (nwk, endpoint, label) in &devices {
+                        if ui
+                            .selectable_label(false, RichText::new(label).monospace())
+                            .clicked()
+                        {
+                            chosen = Some((*nwk, *endpoint));
+                        }
+                    }
+                });
+            if let Some((nwk, endpoint)) = chosen {
+                spec.network = format!("{nwk:04x}");
+                if has_endpoint && let Some(endpoint) = endpoint {
+                    spec.endpoint = format!("{endpoint:02x}");
+                }
+            }
+        });
+    });
+    if has_network {
+        let entity_catalog = entities::current();
+        if let Some(nwk) = parse_hex_u16(&spec.network)
+            && let Some(device) = entity_catalog.network_device(&entity_keys, nwk)
+        {
+            ui.label(
+                RichText::new(device.display())
+                    .monospace()
+                    .size(13.0)
+                    .color(palette.muted),
+            );
+        }
+    }
+    ui.add_enabled_ui(has_group, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(group_label);
+            widgets::hex_input(ui, &mut spec.group, "e.g. 0001", true, 2, 160.0);
+            if let Some(description) = &group_description {
+                ui.label(RichText::new(description).size(13.0).color(palette.muted));
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(has_endpoint, |ui| {
+            ui.label(endpoint_label);
+            widgets::hex_input(ui, &mut spec.endpoint, "e.g. 01", true, 1, 120.0);
+        });
+        ui.add_space(12.0);
+        ui.add_enabled_ui(has_cluster, |ui| {
+            ui.label(cluster_label);
+            widgets::hex_input(ui, &mut spec.cluster, "e.g. 0006", true, 2, 160.0);
+            let mut chosen_cluster = None;
+            ComboBox::from_id_salt("zigbee-condition-cluster")
+                .selected_text("Known cluster")
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for cluster in &definitions.clusters {
+                        if ui
+                            .selectable_label(
+                                parse_hex_u16(&spec.cluster) == Some(cluster.id),
+                                format!("{} (0x{:04x})", cluster.name, cluster.id),
+                            )
+                            .clicked()
+                        {
+                            chosen_cluster = Some(cluster.id);
+                        }
+                    }
+                });
+            if let Some(cluster_id) = chosen_cluster {
+                spec.cluster = format!("{cluster_id:04x}");
+                if !spec.zcl_general {
+                    spec.zcl_command = None;
+                    spec.zcl_fields.clear();
+                }
+            }
+            if let Some(cluster) = parse_hex_u16(&spec.cluster)
+                && let Some(cluster) = definitions.cluster(cluster)
+            {
+                ui.label(RichText::new(&cluster.name).size(13.0).color(palette.muted));
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label("EZSP parameters");
+        widgets::hex_input(
+            ui,
+            &mut spec.params,
+            "optional bytes after the EZSP command ID",
+            true,
+            0,
+            f32::INFINITY,
+        );
+    });
+
+    let can_choose_response = spec
+        .command
+        .and_then(|id| definitions.command(id))
+        .is_some_and(|command| {
+            !command.incoming_only
+                && !command.fields.is_empty()
+                && !command.response_fields.is_empty()
+        });
+    if !can_choose_response {
+        spec.ezsp_response = false;
+    }
+    let mut extra_fields = spec.extra_field_candidates();
+    if can_choose_response || !extra_fields.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Other EZSP fields").strong());
+        if can_choose_response
+            && ui
+                .checkbox(&mut spec.ezsp_response, "Response fields")
+                .changed()
+        {
+            spec.ezsp_fields.clear();
+            extra_fields = spec.extra_field_candidates();
+        }
+        if !extra_fields.is_empty() {
+            egui::Grid::new((
+                "zigbee-condition-ezsp-fields",
+                spec.command,
+                spec.ezsp_response,
+            ))
+            .num_columns(3)
+            .spacing([10.0, 5.0])
+            .show(ui, |ui| {
+                for field in extra_fields {
+                    let entry = spec
+                        .ezsp_fields
+                        .entry(field.name.clone())
+                        .or_insert_with(|| default_zcl_match(&field));
+                    ui.checkbox(&mut entry.enabled, "");
+                    ui.label(format!("{}{}", field.label, zcl_match_suffix(&field)));
+                    ui.add(
+                        TextEdit::singleline(&mut entry.value)
+                            .hint_text(zcl_match_hint(&field))
+                            .desired_width(220.0),
+                    );
+                    ui.end_row();
+                }
+            });
+        }
+    }
+
+    if has_zcl {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new("ZCL frame").strong());
+        let mut direction_changed = false;
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut spec.zcl_general, "General command")
+                .changed()
+            {
+                spec.zcl_command = None;
+                spec.zcl_fields.clear();
+            }
+            direction_changed = ui
+                .checkbox(&mut spec.zcl_direction_to_client, "Server → client")
+                .changed();
+            ui.checkbox(
+                &mut spec.zcl_disable_default_response,
+                "Disable default response",
+            );
+            ui.label("Manufacturer");
+            widgets::hex_input(ui, &mut spec.zcl_manufacturer, "optional", false, 2, 100.0);
+        });
+        if direction_changed {
+            spec.zcl_fields.clear();
+        }
+
+        if spec.zcl_general {
+            if spec.zcl_command.is_some_and(|id| {
+                !definitions.general_commands.iter().any(|command| {
+                    command.id == id && command.direction.matches(spec.zcl_direction_to_client)
+                })
+            }) {
+                spec.zcl_command = None;
+                spec.zcl_fields.clear();
+            }
+            let general: Vec<(u8, String)> = definitions
+                .general_commands
+                .iter()
+                .filter(|command| command.direction.matches(spec.zcl_direction_to_client))
+                .map(|command| {
+                    (
+                        command.id,
+                        format!("{} (0x{:02x})", command.name, command.id),
+                    )
+                })
+                .collect();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("ZCL command").strong());
+                let mut choice = spec.zcl_command;
+                widgets::searchable_combo(
+                    ui,
+                    "zigbee-condition-general-command",
+                    spec.zcl_command
+                        .and_then(|id| definitions.general_command(id))
+                        .map(|command| format!("{} (0x{:02x})", command.name, command.id))
+                        .unwrap_or_else(|| "Any general command".to_string()),
+                    420.0,
+                    &mut choice,
+                    widgets::ComboOptions {
+                        any_label: Some("Any general command"),
+                        emphasize: &[],
+                    },
+                    &general,
+                );
+                spec.zcl_command = choice;
+            });
+            if let Some(command) = spec
+                .zcl_command
+                .and_then(|id| definitions.general_command(id))
+                && let Some(description) = &command.description
+            {
+                ui.label(RichText::new(description).size(13.0).color(palette.muted));
+            }
+        } else if let Some(cluster_id) = parse_hex_u16(&spec.cluster)
+            && let Some(cluster) = definitions.cluster(cluster_id)
+        {
+            if spec
+                .zcl_command
+                .is_some_and(|id| !cluster.commands.iter().any(|command| command.id == id))
+            {
+                spec.zcl_command = None;
+                spec.zcl_fields.clear();
+            }
+            let commands: Vec<(u8, String)> = cluster
+                .commands
+                .iter()
+                .map(|command| {
+                    (
+                        command.id,
+                        format!("{} (0x{:02x})", command.name, command.id),
+                    )
+                })
+                .collect();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("ZCL command").strong());
+                let previous = spec.zcl_command;
+                let mut choice = spec.zcl_command;
+                widgets::searchable_combo(
+                    ui,
+                    "zigbee-condition-zcl-command",
+                    spec.zcl_command
+                        .and_then(|id| {
+                            cluster
+                                .commands
+                                .iter()
+                                .find(|command| command.id == id)
+                                .map(|command| format!("{} (0x{:02x})", command.name, command.id))
+                        })
+                        .unwrap_or_else(|| "Any cluster command".to_string()),
+                    420.0,
+                    &mut choice,
+                    widgets::ComboOptions {
+                        any_label: Some("Any cluster command"),
+                        emphasize: &[],
+                    },
+                    &commands,
+                );
+                if choice != previous {
+                    spec.zcl_command = choice;
+                    spec.zcl_fields.clear();
+                    if let Some(command_id) = choice
+                        && let Some(command) =
+                            cluster.commands.iter().find(|item| item.id == command_id)
+                    {
+                        let layout = if spec.zcl_direction_to_client {
+                            &command.response_fields
+                        } else {
+                            &command.fields
+                        };
+                        for field in zcl_field_spans(layout)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(field, _, _)| field)
+                        {
+                            spec.zcl_fields
+                                .insert(field.name.clone(), default_zcl_match(&field));
+                        }
+                    }
+                }
+            });
+            if let Some(command_id) = spec.zcl_command
+                && let Some(command) = cluster.commands.iter().find(|item| item.id == command_id)
+            {
+                if let Some(description) = &command.description {
+                    ui.label(RichText::new(description).size(13.0).color(palette.muted));
+                }
+                let layout = if spec.zcl_direction_to_client {
+                    &command.response_fields
+                } else {
+                    &command.fields
+                };
+                if let Some(spans) = zcl_field_spans(layout) {
+                    ui.add_space(4.0);
+                    egui::Grid::new("zigbee-condition-zcl-fields")
+                        .num_columns(3)
+                        .spacing([10.0, 5.0])
+                        .show(ui, |ui| {
+                            for (field, _, _) in spans {
+                                let entry = spec
+                                    .zcl_fields
+                                    .entry(field.name.clone())
+                                    .or_insert_with(|| default_zcl_match(&field));
+                                ui.checkbox(&mut entry.enabled, "");
+                                ui.label(format!("{}{}", field.label, zcl_match_suffix(&field)));
+                                ui.add(
+                                    TextEdit::singleline(&mut entry.value)
+                                        .hint_text(zcl_match_hint(&field))
+                                        .desired_width(220.0),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "This command has variable-length fields; use the raw ZCL payload.",
+                        )
+                        .size(13.5)
+                        .color(palette.muted),
+                    );
+                }
+            }
+        } else if !spec.cluster.trim().is_empty() {
+            ui.label(
+                RichText::new("Select a known cluster ID to list its ZCL commands.")
+                    .size(13.5)
+                    .color(palette.muted),
+            );
+        }
+
+        let typed_enabled = spec.zcl_fields.values().any(|field| field.enabled);
+        ui.horizontal(|ui| {
+            ui.label(if typed_enabled {
+                "Extra ZCL payload"
+            } else if spec.zcl_command.is_some() {
+                "ZCL command payload"
+            } else {
+                "Raw ZCL frame"
+            });
+            widgets::hex_input(
+                ui,
+                &mut spec.zcl_payload,
+                if typed_enabled {
+                    "bytes appended after the typed payload"
+                } else if spec.zcl_command.is_some() {
+                    "bytes after the ZCL command ID"
+                } else {
+                    "bytes from the ZCL frame-control byte"
+                },
+                true,
+                0,
+                f32::INFINITY,
+            );
+        });
+    }
+
+    if let Err(error) = spec.to_expr() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(error).size(13.5).color(palette.red));
+    }
+}
+
+pub(crate) fn service_is_zwave(app: &App, reference: &ServiceRef) -> bool {
+    if let Some(service) = model::find_service(&app.services, reference) {
+        return service.protocol == "zwave";
+    }
+    matches!(reference, ServiceRef::Key { protocol, .. } if protocol == "zwave")
+}
+
+pub(crate) fn zwave_known_nodes(app: &App, selected: &[ServiceRef]) -> Vec<(u8, String)> {
+    let mut services: Vec<ServiceRef> = selected
+        .iter()
+        .filter(|reference| service_is_zwave(app, reference))
+        .cloned()
+        .collect();
+    if services.is_empty() {
+        services = app
+            .services
+            .iter()
+            .filter(|service| service.protocol == "zwave")
+            .map(model::service_ref)
+            .collect();
+    }
+    let keys: Vec<String> = services
+        .iter()
+        .flat_map(|reference| model::entity_service_keys(&app.services, reference))
+        .collect();
+    let mut nodes: Vec<(u8, String)> = entities::current()
+        .service_devices(&keys)
+        .into_iter()
+        .filter_map(|(service_device, device)| {
+            service_device
+                .service_id
+                .as_node_id()
+                .map(|node| (node, format!("{node:>3}  {}", device.display())))
+        })
+        .collect();
+    nodes.sort_by_key(|(node, _)| *node);
+    nodes.dedup_by_key(|(node, _)| *node);
+    nodes
+}
+
+fn known_node_picker(
+    ui: &mut Ui,
+    known: &[(u8, String)],
+    current: Option<u8>,
+    multi: bool,
+) -> Option<u8> {
+    let selected_text = if multi {
+        "Add known node".to_string()
+    } else {
+        current
+            .and_then(|node| {
+                known
+                    .iter()
+                    .find(|(known, _)| *known == node)
+                    .map(|(_, label)| label.clone())
+            })
+            .unwrap_or_else(|| "Known node".to_string())
+    };
+    let mut choice = None;
+    ComboBox::from_id_salt("condition-known-node")
+        .selected_text(selected_text)
+        .width(260.0)
+        .show_ui(ui, |ui| {
+            if known.is_empty() {
+                ui.label(
+                    RichText::new("No known Z-Wave nodes").color(ui.visuals().weak_text_color()),
+                );
+                return;
+            }
+            for (node, label) in known {
+                if ui.selectable_label(current == Some(*node), label).clicked() {
+                    choice = Some(*node);
+                }
+            }
+        });
+    choice
+}
+
+pub(crate) fn zigbee_filter_services(app: &App, selected: &[ServiceRef]) -> Vec<ServiceRef> {
+    let mut services: Vec<ServiceRef> = selected
+        .iter()
+        .filter(|reference| service_is_zigbee(app, reference))
+        .cloned()
+        .collect();
+    if services.is_empty() {
+        services = app
+            .services
+            .iter()
+            .filter(|service| service.protocol == "zigbee")
+            .map(model::service_ref)
+            .collect();
+    }
+    services
+}
+
+fn service_is_zigbee(app: &App, reference: &ServiceRef) -> bool {
+    if let Some(service) = model::find_service(&app.services, reference) {
+        return service.protocol == "zigbee";
+    }
+    matches!(reference, ServiceRef::Key { protocol, .. } if protocol == "zigbee")
+}
+
+pub(crate) fn zigbee_known_devices(keys: &[String]) -> Vec<(u16, Option<u8>, String)> {
+    let catalog = entities::current();
+    let mut devices: Vec<(u16, Option<u8>, String)> = catalog
+        .service_devices(keys)
+        .into_iter()
+        .filter_map(|(service_device, device)| {
+            let nwk = service_device.network_address()?;
+            Some((
+                nwk,
+                service_device.endpoint,
+                format!("0x{nwk:04x}  {}", device.display()),
+            ))
+        })
+        .collect();
+    devices.sort_by_key(|(nwk, endpoint, _)| (*nwk, *endpoint));
+    devices.dedup_by_key(|(nwk, endpoint, _)| (*nwk, *endpoint));
+    devices
+}
+
+fn command_class_label(class: &definitions::CommandClassDef) -> String {
+    if class.commands.is_empty() {
+        format!("{} (0x{:02x}) · raw only", class.name, class.id)
+    } else {
+        format!("{} (0x{:02x})", class.name, class.id)
+    }
+}
+
+fn default_command_field_match(field: &definitions::FieldDef) -> filter::CommandFieldMatch {
+    let value = if let Some(default) = &field.default_value {
+        default.clone()
+    } else {
+        match field.kind {
+            definitions::FieldType::Enum => field
+                .values
+                .first()
+                .map(|value| value.value.to_string())
+                .unwrap_or_else(|| "0".to_string()),
+            definitions::FieldType::Bool => "false".to_string(),
+            definitions::FieldType::Hex
+            | definitions::FieldType::CommandClassData
+            | definitions::FieldType::Text
+            | definitions::FieldType::NodeList => String::new(),
+            definitions::FieldType::Flags | definitions::FieldType::TxOptions => "0".to_string(),
+            definitions::FieldType::Node => field
+                .min
+                .unwrap_or(1)
+                .clamp(0, i64::from(u8::MAX))
+                .to_string(),
+            _ => "0".to_string(),
+        }
+    };
+    filter::CommandFieldMatch {
+        enabled: false,
+        value,
+    }
+}
+
+fn command_field_widget(ui: &mut Ui, field: &definitions::FieldDef, text: &mut String) {
+    match field.kind {
+        definitions::FieldType::Bool => {
+            let mut value = command_field_bool(text);
+            if ui.checkbox(&mut value, "On").changed() {
+                *text = if value { "true" } else { "false" }.to_string();
+            }
+        }
+        definitions::FieldType::Enum => {
+            if field.values.is_empty() {
+                widgets::numeric_input(ui, text, "0–255", 120.0, false);
+            } else {
+                let mut value = command_field_u8(field, text);
+                let selected = field
+                    .values
+                    .iter()
+                    .find(|item| item.value == value)
+                    .map(|item| format!("{} (0x{:02x})", item.name, item.value))
+                    .unwrap_or_else(|| format!("0x{value:02x}"));
+                ComboBox::from_id_salt(("condition-command-enum", field.name.as_str()))
+                    .selected_text(selected)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for item in &field.values {
+                            ui.selectable_value(
+                                &mut value,
+                                item.value,
+                                format!("{} (0x{:02x})", item.name, item.value),
+                            );
+                        }
+                    });
+                *text = value.to_string();
+            }
+        }
+        definitions::FieldType::Flags | definitions::FieldType::TxOptions => {
+            if field.values.is_empty() {
+                widgets::numeric_input(ui, text, "0–255", 120.0, false);
+            } else {
+                let mut value = command_field_u8(field, text);
+                ui.horizontal_wrapped(|ui| {
+                    for item in &field.values {
+                        let mut enabled = value & item.value != 0;
+                        if ui.checkbox(&mut enabled, &item.name).changed() {
+                            if enabled {
+                                value |= item.value;
+                            } else {
+                                value &= !item.value;
+                            }
+                        }
+                    }
+                });
+                *text = value.to_string();
+            }
+        }
+        definitions::FieldType::Hex | definitions::FieldType::CommandClassData => {
+            let width = field
+                .length
+                .or_else(|| field.kind.fixed_width())
+                .unwrap_or(0);
+            widgets::hex_input(
+                ui,
+                text,
+                &command_field_hex_hint(width),
+                width == 0 || width > 4,
+                2,
+                f32::INFINITY,
+            );
+        }
+        definitions::FieldType::Node => {
+            widgets::numeric_input(ui, text, "1–232, or 255 broadcast", 140.0, false);
+        }
+        definitions::FieldType::NodeList => {
+            widgets::numeric_input(ui, text, "e.g. 2, 3, 5", 220.0, true);
+        }
+        definitions::FieldType::Uint8
+        | definitions::FieldType::Uint16
+        | definitions::FieldType::Uint32
+        | definitions::FieldType::Duration
+        | definitions::FieldType::CallbackId => {
+            if field.format == definitions::FieldFormat::Hex {
+                let width = field.kind.fixed_width().unwrap_or(1);
+                widgets::hex_input(ui, text, &command_field_hex_hint(width), false, 1, 120.0);
+            } else {
+                widgets::numeric_input(ui, text, &command_field_range_hint(field), 120.0, false);
+            }
+        }
+        definitions::FieldType::Int => {
+            widgets::signed_numeric_input(ui, text, &command_field_range_hint(field), 140.0);
+        }
+        definitions::FieldType::Uint => {
+            widgets::numeric_input(ui, text, &command_field_range_hint(field), 140.0, false);
+        }
+        definitions::FieldType::Text => {
+            ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
+        }
+    }
+}
+
+fn command_field_bool(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "1" | "on" | "true" | "yes"
+    )
+}
+
+fn command_field_u8(field: &definitions::FieldDef, text: &str) -> u8 {
+    let text = text.trim();
+    text.parse::<u8>()
+        .ok()
+        .or_else(|| {
+            field
+                .values
+                .iter()
+                .find(|value| value.name.eq_ignore_ascii_case(text))
+                .map(|value| value.value)
+        })
+        .unwrap_or_else(|| field.values.first().map(|value| value.value).unwrap_or(0))
+}
+
+fn command_field_hex_hint(width: usize) -> String {
+    match width {
+        1 => "1 hex byte".to_string(),
+        2 => "2 hex bytes".to_string(),
+        4 => "4 hex bytes".to_string(),
+        _ => "hex bytes".to_string(),
+    }
+}
+
+fn command_field_range_hint(field: &definitions::FieldDef) -> String {
+    match (field.min, field.max) {
+        (Some(min), Some(max)) => format!("{min}–{max}"),
+        (Some(min), None) => format!("min {min}"),
+        (None, Some(max)) => format!("max {max}"),
+        (None, None) => "number".to_string(),
+    }
+}
+
+fn default_zcl_match(field: &definitions::FieldDef) -> ZigbeeFieldMatch {
+    if let Some(default) = &field.default_value {
+        return ZigbeeFieldMatch {
+            enabled: false,
+            value: default.clone(),
+        };
+    }
+    let value = match field.kind {
+        definitions::FieldType::Bool
+        | definitions::FieldType::Enum
+        | definitions::FieldType::Flags
+        | definitions::FieldType::Uint8
+        | definitions::FieldType::Uint16
+        | definitions::FieldType::Uint32
+        | definitions::FieldType::Int
+        | definitions::FieldType::Uint => "0".to_string(),
+        _ => String::new(),
+    };
+    ZigbeeFieldMatch {
+        enabled: false,
+        value,
+    }
+}
+
+fn zcl_match_suffix(field: &definitions::FieldDef) -> &'static str {
+    match field.kind {
+        definitions::FieldType::Hex => " (hex)",
+        definitions::FieldType::Text => " (text)",
+        _ if field.format == definitions::FieldFormat::Hex => " (hex)",
+        _ => "",
+    }
+}
+
+fn zcl_match_hint(field: &definitions::FieldDef) -> String {
+    if !field.values.is_empty() {
+        return field
+            .values
+            .iter()
+            .map(|value| value.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    if let Some(description) = &field.description {
+        return description.clone();
+    }
+    match field.kind {
+        definitions::FieldType::Bool => "true or false".to_string(),
+        definitions::FieldType::Hex => "hex bytes".to_string(),
+        definitions::FieldType::Text => "text".to_string(),
+        _ => "value or 0x hex".to_string(),
+    }
 }
 
 fn raw_condition_editor(ui: &mut Ui, raw: &mut RawConditionDraft, theme: UiTheme) {
@@ -1759,7 +2883,18 @@ pub(crate) fn render_message(
                             )
                             .on_hover_text(format!("{kind} field"));
                             let mut value = field.value.clone();
-                            if field.kind == FieldKind::Node
+                            if protocol == Some("zigbee") && field.kind == FieldKind::Node {
+                                let nwk = field
+                                    .value
+                                    .strip_prefix("0x")
+                                    .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+                                    .or_else(|| field.value.parse::<u16>().ok());
+                                if let Some(nwk) = nwk
+                                    && let Some(device) = entities.network_device(&entity_keys, nwk)
+                                {
+                                    value = format!("{} — {}", field.value, device.display());
+                                }
+                            } else if field.kind == FieldKind::Node
                                 && let Ok(node) = field.value.parse::<u8>()
                                 && let Some(device) = entities.node_label(&entity_keys, node)
                             {
@@ -2093,6 +3228,45 @@ mod tests {
             9,
             "stale visible start is clamped"
         );
+    }
+
+    #[test]
+    fn new_frame_conditions_keep_the_basic_set_start() {
+        let spec = default_frame_condition();
+        assert_eq!(spec.command_class, Some(hodeco_codec::builder::CC_BASIC));
+        assert_eq!(spec.command, Some(hodeco_codec::builder::BASIC_SET));
+        assert!(!spec.includes.command_class);
+        assert!(!spec.includes.command);
+    }
+
+    #[test]
+    fn command_field_defaults_use_enum_values_not_labels() {
+        let definitions = definitions::current();
+        let command = definitions.command(0x25, 0x01).expect("Switch Binary Set");
+        let field = command
+            .fields
+            .iter()
+            .filter_map(definitions::LayoutField::field)
+            .find(|field| field.name == "target")
+            .expect("target field");
+        let default = default_command_field_match(field);
+        assert_eq!(default.value, "0");
+        assert!(!default.enabled);
+        assert_eq!(command_field_u8(field, "On"), 0xFF);
+        assert_eq!(command_field_u8(field, "0"), 0);
+    }
+
+    #[test]
+    fn zwave_filter_tx_options_come_from_definitions() {
+        let definitions = definitions::current();
+        let options = zwave_tx_option_values(&definitions, FrameKind::SendData);
+        assert_eq!(options.len(), 5);
+        assert!(
+            options
+                .iter()
+                .any(|(value, name)| *value == 1 && name == "ACK")
+        );
+        assert!(options.iter().any(|(value, _)| *value == 0x20));
     }
 
     #[test]

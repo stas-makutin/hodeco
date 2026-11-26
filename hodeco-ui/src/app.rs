@@ -17,7 +17,11 @@ use crate::ui::widgets::{self, Toast, Tone};
 use chrono::{DateTime, NaiveDate, Utc};
 use eframe::Frame;
 use egui::{Align, Context, Layout, Margin, RichText, Ui};
+use hodeco_codec::definitions::{
+    Endian, FieldDef, FieldFormat, FieldRole, FieldType, FilterSlot, LayoutField,
+};
 use hodeco_codec::filter;
+use hodeco_codec::zigbee;
 use hodeco_contract::api::notifications::Notification;
 use hodeco_contract::api::payloads::{
     CommandsAddResult, CommandsListResult, CommandsUpdateResult, ConfigUpdateResult,
@@ -40,7 +44,7 @@ use hodeco_contract::domain::{
 use hodeco_contract::utils::{Base64Bytes, HumanDuration};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -218,9 +222,751 @@ impl RawConditionDraft {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ZigbeeFieldMatch {
+    pub enabled: bool,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ZigbeeConditionDraft {
+    pub command: Option<u16>,
+    pub network: String,
+    pub group: String,
+    pub cluster: String,
+    pub endpoint: String,
+    pub params: String,
+    pub zcl_general: bool,
+    pub zcl_command: Option<u8>,
+    pub zcl_direction_to_client: bool,
+    pub zcl_disable_default_response: bool,
+    pub zcl_manufacturer: String,
+    pub zcl_payload: String,
+    pub zcl_fields: BTreeMap<String, ZigbeeFieldMatch>,
+    pub ezsp_fields: BTreeMap<String, ZigbeeFieldMatch>,
+    pub ezsp_response: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ZigbeeFieldOffset {
+    offset: usize,
+    width: usize,
+    endian: Endian,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ZigbeeOffsets {
+    network: Option<ZigbeeFieldOffset>,
+    group: Option<ZigbeeFieldOffset>,
+    cluster: Option<ZigbeeFieldOffset>,
+    endpoint: Option<ZigbeeFieldOffset>,
+    zcl: Option<usize>,
+}
+
+impl ZigbeeConditionDraft {
+    fn offsets(&self) -> ZigbeeOffsets {
+        let Some(command) = self.command else {
+            return ZigbeeOffsets::default();
+        };
+        let definitions = zigbee::current();
+        let slot_field = |slot| {
+            definitions
+                .field_layout_by_filter_slot(command, slot)
+                .and_then(|(offset, field)| {
+                    let width = field.length.or_else(|| field.kind.fixed_width())?;
+                    Some(ZigbeeFieldOffset {
+                        offset,
+                        width,
+                        endian: field.endian,
+                    })
+                })
+        };
+        ZigbeeOffsets {
+            network: slot_field(FilterSlot::Network),
+            group: slot_field(FilterSlot::Group),
+            cluster: slot_field(FilterSlot::Cluster),
+            endpoint: slot_field(FilterSlot::Endpoint),
+            zcl: definitions
+                .field_layout_by_filter_slot(command, FilterSlot::Payload)
+                .map(|(offset, _)| offset),
+        }
+    }
+
+    pub(crate) fn extra_field_candidates(&self) -> Vec<FieldDef> {
+        let Some(command_id) = self.command else {
+            return Vec::new();
+        };
+        let definitions = zigbee::current();
+        let Some(command) = definitions.command(command_id) else {
+            return Vec::new();
+        };
+        let layout = if command.incoming_only || command.fields.is_empty() || self.ezsp_response {
+            &command.response_fields
+        } else {
+            &command.fields
+        };
+        let mut fields = Vec::new();
+        for field in layout.iter().filter_map(LayoutField::field) {
+            if field.derived
+                || field.remaining
+                || field.length_from.is_some()
+                || field.count_from.is_some()
+                || field.filter_slot.is_some()
+                || field.role == FieldRole::Length
+                || definitions.field_offset(command_id, &field.name).is_none()
+            {
+                continue;
+            }
+            if fields
+                .iter()
+                .any(|existing: &FieldDef| existing.name == field.name)
+            {
+                continue;
+            }
+            fields.push(field.clone());
+        }
+        fields
+    }
+
+    fn extra_field_def(&self, name: &str) -> Option<FieldDef> {
+        self.extra_field_candidates()
+            .into_iter()
+            .find(|field| field.name == name)
+    }
+
+    pub(crate) fn supports_network(&self) -> bool {
+        self.offsets().network.is_some()
+    }
+
+    pub(crate) fn supports_group(&self) -> bool {
+        self.offsets().group.is_some()
+    }
+
+    pub(crate) fn supports_cluster(&self) -> bool {
+        self.offsets().cluster.is_some()
+    }
+
+    pub(crate) fn supports_endpoint(&self) -> bool {
+        self.offsets().endpoint.is_some()
+    }
+
+    pub(crate) fn supports_zcl(&self) -> bool {
+        self.offsets().zcl.is_some()
+    }
+
+    pub fn summary(&self) -> String {
+        let command = self
+            .command
+            .and_then(|id| {
+                zigbee::current()
+                    .command(id)
+                    .map(|command| command.name.clone())
+            })
+            .unwrap_or_else(|| "any command".to_string());
+        let mut parts = vec![format!("ZigBee: {command}")];
+        if let Some(network) = parse_hex_u16(&self.network) {
+            parts.push(format!("node 0x{network:04x}"));
+        }
+        if let Some(group) = parse_hex_u16(&self.group) {
+            parts.push(format!("group 0x{group:04x}"));
+        }
+        if let Some(cluster) = parse_hex_u16(&self.cluster) {
+            parts.push(format!("cluster 0x{cluster:04x}"));
+        }
+        if let Some(endpoint) = parse_hex_u8(&self.endpoint) {
+            parts.push(format!("endpoint {endpoint}"));
+        }
+        if !self.params.trim().is_empty() {
+            parts.push("EZSP parameters".to_string());
+        }
+        if self.zcl_general {
+            let command = self
+                .zcl_command
+                .and_then(zigbee::zcl_general_command_name)
+                .map(|name| format!(" · {name}"))
+                .unwrap_or_default();
+            parts.push(format!("ZCL general{command}"));
+        } else if let Some(command) = self.zcl_command {
+            let definitions = zigbee::current();
+            let label = parse_hex_u16(&self.cluster)
+                .and_then(|id| definitions.cluster(id))
+                .and_then(|cluster| {
+                    cluster
+                        .commands
+                        .iter()
+                        .find(|item| item.id == command)
+                        .map(|item| format!("{} · {}", cluster.name, item.name))
+                })
+                .unwrap_or_else(|| format!("ZCL command 0x{command:02x}"));
+            parts.push(label);
+        }
+        let enabled_fields = self
+            .zcl_fields
+            .values()
+            .filter(|field| field.enabled)
+            .count();
+        if enabled_fields > 0 {
+            parts.push(format!("{enabled_fields} ZCL field(s)"));
+        }
+        let enabled_ezsp_fields = self
+            .ezsp_fields
+            .values()
+            .filter(|field| field.enabled)
+            .count();
+        if enabled_ezsp_fields > 0 {
+            parts.push(format!("{enabled_ezsp_fields} EZSP field(s)"));
+        }
+        if !self.zcl_payload.trim().is_empty() {
+            parts.push("ZCL payload".to_string());
+        }
+        parts.join(" · ")
+    }
+
+    pub fn to_expr(&self) -> Result<PayloadExpr, String> {
+        let offsets = self.offsets();
+        let mut leaves = Vec::new();
+        if let Some(command) = self.command {
+            leaves.push(PayloadExpr::leaf(
+                PayloadOffset::At(3),
+                command.to_le_bytes().to_vec(),
+            ));
+        }
+        if !self.network.trim().is_empty() {
+            let Some(field) = offsets.network else {
+                return Err("network address is not available for this command".to_string());
+            };
+            let value = parse_hex_value(&self.network, field.width)
+                .ok_or_else(|| "network address must be a 16-bit hex value".to_string())?;
+            leaves.push(semantic_leaf(field, value, "network address")?);
+        }
+        if !self.group.trim().is_empty() {
+            let Some(field) = offsets.group else {
+                return Err("group ID is not available for this command".to_string());
+            };
+            let value = parse_hex_value(&self.group, field.width)
+                .ok_or_else(|| "group ID must be a 16-bit hex value".to_string())?;
+            leaves.push(semantic_leaf(field, value, "group ID")?);
+        }
+        if !self.cluster.trim().is_empty() {
+            let Some(field) = offsets.cluster else {
+                return Err("cluster ID is not available for this command".to_string());
+            };
+            let value = parse_hex_value(&self.cluster, field.width)
+                .ok_or_else(|| "cluster must be a 16-bit hex value".to_string())?;
+            leaves.push(semantic_leaf(field, value, "cluster ID")?);
+        }
+        if !self.endpoint.trim().is_empty() {
+            let Some(field) = offsets.endpoint else {
+                return Err("endpoint is not available for this command".to_string());
+            };
+            let value = parse_hex_value(&self.endpoint, field.width)
+                .ok_or_else(|| "endpoint must be an 8-bit value".to_string())?;
+            leaves.push(semantic_leaf(field, value, "endpoint")?);
+        }
+        if !self.params.trim().is_empty() {
+            let bytes = hodeco_codec::parse_hex(&self.params)
+                .map_err(|error| format!("invalid parameters: {error}"))?;
+            if !bytes.is_empty() {
+                leaves.push(PayloadExpr::leaf(
+                    PayloadOffset::At(zigbee::EZSP_HEADER_LEN as u32),
+                    bytes,
+                ));
+            }
+        }
+        for (name, field_match) in &self.ezsp_fields {
+            if !field_match.enabled {
+                continue;
+            }
+            let Some(command) = self.command else {
+                return Err("EZSP field matching requires a command".to_string());
+            };
+            let field = self
+                .extra_field_def(name)
+                .ok_or_else(|| format!("unknown EZSP field '{name}'"))?;
+            let offset = zigbee::field_offset(command, name)
+                .ok_or_else(|| format!("{} has no fixed frame offset", field.label))?;
+            let bytes = encode_field_match_value(&field, &field_match.value)?;
+            if let Some(width) = field.length.or_else(|| field.kind.fixed_width())
+                && bytes.len() != width
+            {
+                return Err(format!(
+                    "{} must be {width} byte(s), got {}",
+                    field.label,
+                    bytes.len()
+                ));
+            }
+            leaves.push(PayloadExpr::leaf(PayloadOffset::At(offset as u32), bytes));
+        }
+        leaves.extend(self.zcl_leaves(offsets.zcl)?);
+        if leaves.is_empty() {
+            return Err("select at least one field to match".to_string());
+        }
+        Ok(PayloadExpr::and(leaves))
+    }
+
+    fn zcl_leaves(&self, zcl_offset: Option<usize>) -> Result<Vec<PayloadExpr>, String> {
+        let typed = self.zcl_fields.values().any(|field| field.enabled);
+        let raw = self.zcl_payload.trim();
+        let has_command = self.zcl_general || self.zcl_command.is_some();
+        if !typed && !has_command && raw.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(zcl_offset) = zcl_offset else {
+            return Err("this EZSP command has no fixed ZCL message-contents field".to_string());
+        };
+        if !has_command {
+            if typed {
+                return Err("select a ZCL command before matching typed fields".to_string());
+            }
+            let bytes = hodeco_codec::parse_hex(raw)
+                .map_err(|error| format!("invalid ZCL payload: {error}"))?;
+            return Ok(vec![PayloadExpr::leaf(
+                PayloadOffset::At(zcl_offset as u32),
+                bytes,
+            )]);
+        }
+        if self.zcl_general && self.zcl_command.is_none() {
+            return Err("select a general ZCL command".to_string());
+        }
+        let definitions = zigbee::current();
+        let zcl_frame = &definitions.zcl_frame;
+        let manufacturer = self.zcl_manufacturer_value()?;
+        let mut frame_control = if self.zcl_general {
+            zcl_frame.general_frame_type
+        } else {
+            zcl_frame.cluster_frame_type
+        };
+        if self.zcl_direction_to_client {
+            frame_control |= zcl_frame.direction_to_client_bit;
+        }
+        if self.zcl_disable_default_response {
+            frame_control |= zcl_frame.disable_default_response_bit;
+        }
+        if manufacturer.is_some() {
+            frame_control |= zcl_frame.manufacturer_specific_bit;
+        }
+        let mut leaves = vec![PayloadExpr::masked_leaf(
+            PayloadOffset::At(zcl_offset as u32),
+            vec![frame_control],
+            vec![zcl_frame.frame_control_mask],
+        )];
+        let mut cursor = zcl_offset + 1;
+        if let Some(manufacturer) = manufacturer {
+            let bytes = zcl_frame
+                .manufacturer_code_endian
+                .encode_unsigned(u64::from(manufacturer), zcl_frame.manufacturer_code_length);
+            leaves.push(PayloadExpr::leaf(PayloadOffset::At(cursor as u32), bytes));
+            cursor += zcl_frame.manufacturer_code_length;
+        }
+        cursor += 1; // ZCL sequence is intentionally wildcard.
+        let command_id = self
+            .zcl_command
+            .ok_or_else(|| "select a ZCL command".to_string())?;
+        if self.zcl_general {
+            let command = definitions
+                .general_command(command_id)
+                .ok_or_else(|| format!("general ZCL command 0x{command_id:02x} is not defined"))?;
+            if !command.direction.matches(self.zcl_direction_to_client) {
+                return Err(
+                    "the selected general ZCL command does not support this direction".to_string(),
+                );
+            }
+        }
+        leaves.push(PayloadExpr::leaf(
+            PayloadOffset::At(cursor as u32),
+            vec![command_id],
+        ));
+        cursor += 1;
+        let mut payload_end = cursor;
+        if typed {
+            if self.zcl_general {
+                return Err(
+                    "general ZCL commands use the raw payload field, not typed fields".to_string(),
+                );
+            }
+            let cluster_id = parse_hex_u16(&self.cluster)
+                .ok_or_else(|| "cluster must be set for typed ZCL fields".to_string())?;
+            let command = definitions
+                .cluster(cluster_id)
+                .and_then(|cluster| {
+                    cluster
+                        .commands
+                        .iter()
+                        .find(|command| command.id == command_id)
+                        .cloned()
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "ZCL command 0x{command_id:02x} is not defined for cluster 0x{cluster_id:04x}"
+                    )
+                })?;
+            let layout = if self.zcl_direction_to_client {
+                &command.response_fields
+            } else {
+                &command.fields
+            };
+            let spans = zcl_field_spans(layout).ok_or_else(|| {
+                "this ZCL command has variable-length fields; use the raw ZCL payload".to_string()
+            })?;
+            for (name, field_match) in &self.zcl_fields {
+                if !field_match.enabled {
+                    continue;
+                }
+                let (field, offset, width) = spans
+                    .iter()
+                    .find(|(field, _, _)| field.name == *name)
+                    .ok_or_else(|| format!("unknown ZCL field '{name}'"))?;
+                let bytes = encode_field_match_value(field, &field_match.value)?;
+                if bytes.len() != *width {
+                    return Err(format!(
+                        "{} must be {} byte(s), got {}",
+                        field.label,
+                        width,
+                        bytes.len()
+                    ));
+                }
+                leaves.push(PayloadExpr::leaf(
+                    PayloadOffset::At((cursor + offset) as u32),
+                    bytes,
+                ));
+                payload_end = payload_end.max(cursor + offset + width);
+            }
+        }
+        if !raw.is_empty() {
+            let bytes = hodeco_codec::parse_hex(raw)
+                .map_err(|error| format!("invalid ZCL payload: {error}"))?;
+            leaves.push(PayloadExpr::leaf(
+                PayloadOffset::At(payload_end as u32),
+                bytes,
+            ));
+        }
+        Ok(leaves)
+    }
+
+    fn zcl_manufacturer_value(&self) -> Result<Option<u16>, String> {
+        let text = self.zcl_manufacturer.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let value = parse_match_number(text)
+            .filter(|value| *value <= u64::from(u16::MAX))
+            .ok_or_else(|| "ZCL manufacturer code must be 0-65535 or 0x0000-0xffff".to_string())?;
+        Ok(Some(value as u16))
+    }
+
+    pub fn leaf_count(&self) -> usize {
+        usize::from(self.command.is_some())
+            + usize::from(!self.network.trim().is_empty())
+            + usize::from(!self.group.trim().is_empty())
+            + usize::from(!self.cluster.trim().is_empty())
+            + usize::from(!self.endpoint.trim().is_empty())
+            + usize::from(!self.params.trim().is_empty())
+            + self
+                .ezsp_fields
+                .values()
+                .filter(|field| field.enabled)
+                .count()
+            + self.zcl_leaf_count()
+    }
+
+    fn zcl_leaf_count(&self) -> usize {
+        let typed = self
+            .zcl_fields
+            .values()
+            .filter(|field| field.enabled)
+            .count();
+        let raw = self.zcl_payload.trim();
+        let has_command = self.zcl_general || self.zcl_command.is_some();
+        if typed == 0 && !has_command && raw.is_empty() {
+            return 0;
+        }
+        if !has_command {
+            return usize::from(!raw.is_empty());
+        }
+        usize::from(true) // frame control
+            + usize::from(!self.zcl_manufacturer.trim().is_empty())
+            + usize::from(self.zcl_command.is_some())
+            + typed
+            + usize::from(!raw.is_empty())
+    }
+
+    pub fn byte_count(&self) -> usize {
+        let offsets = self.offsets();
+        let mut bytes = 0;
+        if self.command.is_some() {
+            bytes += 2;
+        }
+        if !self.network.trim().is_empty() {
+            bytes += offsets.network.map(|field| field.width).unwrap_or(0);
+        }
+        if !self.group.trim().is_empty() {
+            bytes += offsets.group.map(|field| field.width).unwrap_or(0);
+        }
+        if !self.cluster.trim().is_empty() {
+            bytes += offsets.cluster.map(|field| field.width).unwrap_or(0);
+        }
+        if !self.endpoint.trim().is_empty() {
+            bytes += offsets.endpoint.map(|field| field.width).unwrap_or(0);
+        }
+        bytes += hodeco_codec::parse_hex(&self.params)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        for (name, field_match) in &self.ezsp_fields {
+            if field_match.enabled
+                && let Some(field) = self.extra_field_def(name)
+            {
+                bytes += encode_field_match_value(&field, &field_match.value)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0);
+            }
+        }
+        bytes + self.zcl_byte_count()
+    }
+
+    fn zcl_byte_count(&self) -> usize {
+        let typed = self
+            .zcl_fields
+            .values()
+            .filter(|field| field.enabled)
+            .count();
+        let raw = self.zcl_payload.trim();
+        let has_command = self.zcl_general || self.zcl_command.is_some();
+        if typed == 0 && !has_command && raw.is_empty() {
+            return 0;
+        }
+        if !has_command {
+            return hodeco_codec::parse_hex(raw)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0);
+        }
+        1 + usize::from(!self.zcl_manufacturer.trim().is_empty()) * 2
+            + usize::from(self.zcl_command.is_some())
+            + typed
+            + hodeco_codec::parse_hex(raw)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0)
+    }
+
+    pub fn max_leaf_bytes(&self) -> usize {
+        let offsets = self.offsets();
+        let mut max = usize::from(self.command.is_some()) * 2;
+        max = max.max(
+            usize::from(!self.network.trim().is_empty())
+                * offsets.network.map(|field| field.width).unwrap_or(0),
+        );
+        max = max.max(
+            usize::from(!self.group.trim().is_empty())
+                * offsets.group.map(|field| field.width).unwrap_or(0),
+        );
+        max = max.max(
+            usize::from(!self.cluster.trim().is_empty())
+                * offsets.cluster.map(|field| field.width).unwrap_or(0),
+        );
+        max = max.max(
+            usize::from(!self.endpoint.trim().is_empty())
+                * offsets.endpoint.map(|field| field.width).unwrap_or(0),
+        );
+        max = max.max(
+            hodeco_codec::parse_hex(&self.params)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0),
+        );
+        for (name, field_match) in &self.ezsp_fields {
+            if field_match.enabled
+                && let Some(field) = self.extra_field_def(name)
+            {
+                max = max.max(
+                    encode_field_match_value(&field, &field_match.value)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or(0),
+                );
+            }
+        }
+        max.max(
+            hodeco_codec::parse_hex(self.zcl_payload.trim())
+                .map(|bytes| bytes.len())
+                .unwrap_or(0),
+        )
+        .max(2)
+    }
+}
+
+fn parse_match_number(text: &str) -> Option<u64> {
+    let text = text.trim();
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u64::from_str_radix(&hex.replace(' ', ""), 16).ok()
+    } else {
+        text.replace([' ', ','], "").parse::<u64>().ok()
+    }
+}
+
+fn parse_field_number(field: &FieldDef, text: &str) -> Option<u64> {
+    if field.format == FieldFormat::Hex {
+        let text = text
+            .trim()
+            .trim_start_matches("0x")
+            .replace([' ', ':', '-', '_'], "");
+        if text.is_empty() {
+            return None;
+        }
+        u64::from_str_radix(&text, 16).ok()
+    } else {
+        parse_match_number(text)
+    }
+}
+
+pub(crate) fn zcl_field_spans(layout: &[LayoutField]) -> Option<Vec<(FieldDef, usize, usize)>> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for item in layout {
+        let LayoutField::Field(field) = item else {
+            return None;
+        };
+        if field.derived {
+            continue;
+        }
+        if field.remaining || field.length_from.is_some() || field.count_from.is_some() {
+            break;
+        }
+        let width = field.length.or_else(|| field.kind.fixed_width())?;
+        spans.push((field.as_ref().clone(), cursor, width));
+        cursor += width;
+    }
+    Some(spans)
+}
+
+fn encode_field_match_value(field: &FieldDef, text: &str) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(format!("{} is empty", field.label));
+    }
+    let named_value = || {
+        field
+            .values
+            .iter()
+            .find(|value| value.name.eq_ignore_ascii_case(text))
+            .map(|value| u64::from(value.value))
+    };
+    match field.kind {
+        FieldType::Bool => Ok(vec![u8::from(matches!(
+            text.to_ascii_lowercase().as_str(),
+            "1" | "on" | "true" | "yes"
+        ))]),
+        FieldType::Enum | FieldType::Flags | FieldType::Uint8 => {
+            let value = named_value()
+                .or_else(|| parse_field_number(field, text))
+                .filter(|value| *value <= u64::from(u8::MAX))
+                .ok_or_else(|| format!("{} is not a valid 8-bit value", field.label))?;
+            Ok(vec![value as u8])
+        }
+        FieldType::Duration | FieldType::TxOptions | FieldType::CallbackId | FieldType::Node => {
+            let value = named_value()
+                .or_else(|| parse_field_number(field, text))
+                .filter(|value| *value <= u64::from(u8::MAX))
+                .ok_or_else(|| format!("{} is not a valid 8-bit value", field.label))?;
+            Ok(vec![value as u8])
+        }
+        FieldType::NodeList => Err(format!("{} cannot be matched as one field", field.label)),
+        FieldType::Uint16 => {
+            let value = named_value()
+                .or_else(|| parse_field_number(field, text))
+                .filter(|value| *value <= u64::from(u16::MAX))
+                .ok_or_else(|| format!("{} is not a valid 16-bit value", field.label))?;
+            Ok(field.endian.encode_unsigned(value, 2))
+        }
+        FieldType::Uint32 => {
+            let value = named_value()
+                .or_else(|| parse_field_number(field, text))
+                .filter(|value| *value <= u64::from(u32::MAX))
+                .ok_or_else(|| format!("{} is not a valid 32-bit value", field.label))?;
+            Ok(field.endian.encode_unsigned(value, 4))
+        }
+        FieldType::Int => {
+            let value = text
+                .parse::<i64>()
+                .map_err(|_| format!("{} is not a signed integer", field.label))?;
+            let width = field
+                .length
+                .or_else(|| field.kind.fixed_width())
+                .ok_or_else(|| format!("{} has no fixed width", field.label))?;
+            if !matches!(width, 1 | 2 | 4) {
+                return Err(format!("{} has an unsupported width", field.label));
+            }
+            Ok(field.endian.encode_signed(value, width))
+        }
+        FieldType::Uint => {
+            let value = parse_field_number(field, text)
+                .ok_or_else(|| format!("{} is not an unsigned integer", field.label))?;
+            let width = field
+                .length
+                .ok_or_else(|| format!("{} has no fixed width", field.label))?;
+            Ok(field.endian.encode_unsigned(value, width))
+        }
+        FieldType::Hex | FieldType::CommandClassData => hodeco_codec::parse_hex(text)
+            .map_err(|error| format!("invalid {}: {error}", field.label)),
+        FieldType::Text => Ok(text.as_bytes().to_vec()),
+    }
+}
+
+pub(crate) fn parse_hex_u16(text: &str) -> Option<u16> {
+    let text = text
+        .trim()
+        .trim_start_matches("0x")
+        .replace([' ', ':', '-'], "");
+    if text.is_empty() {
+        return None;
+    }
+    u16::from_str_radix(&text, 16).ok()
+}
+
+fn parse_hex_value(text: &str, width: usize) -> Option<u64> {
+    let text = text
+        .trim()
+        .trim_start_matches("0x")
+        .replace([' ', ':', '-'], "");
+    if text.is_empty() {
+        return None;
+    }
+    let value = u64::from_str_radix(&text, 16).ok()?;
+    if width > 0 && width < 8 && value >= (1u64 << (width * 8)) {
+        return None;
+    }
+    Some(value)
+}
+
+fn semantic_leaf(field: ZigbeeFieldOffset, value: u64, label: &str) -> Result<PayloadExpr, String> {
+    if field.width == 0 || field.width > 8 {
+        return Err(format!("{label} has an unsupported width"));
+    }
+    let max = if field.width >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (field.width * 8)) - 1
+    };
+    if value > max {
+        return Err(format!("{label} does not fit in {} byte(s)", field.width));
+    }
+    Ok(PayloadExpr::leaf(
+        PayloadOffset::At(field.offset as u32),
+        field.endian.encode_unsigned(value, field.width),
+    ))
+}
+
+pub(crate) fn parse_hex_u8(text: &str) -> Option<u8> {
+    let text = text
+        .trim()
+        .trim_start_matches("0x")
+        .replace([' ', ':', '-'], "");
+    if text.is_empty() {
+        return None;
+    }
+    u8::from_str_radix(&text, 16).ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PayloadConditionDraft {
     Frame(filter::FilterSpec),
+    Zigbee(ZigbeeConditionDraft),
     Raw(RawConditionDraft),
 }
 
@@ -228,6 +974,7 @@ impl PayloadConditionDraft {
     pub fn summary(&self) -> String {
         match self {
             Self::Frame(spec) => spec.summary(),
+            Self::Zigbee(spec) => spec.summary(),
             Self::Raw(raw) => {
                 if raw.leaves.is_empty() {
                     "Raw bytes: no leaves".to_string()
@@ -245,6 +992,7 @@ impl PayloadConditionDraft {
     pub fn to_expr(&self) -> Result<PayloadExpr, String> {
         let expression = match self {
             Self::Frame(spec) => model::to_payload_expr(spec).map_err(|error| error.to_string())?,
+            Self::Zigbee(spec) => spec.to_expr()?,
             Self::Raw(raw) => {
                 if raw.leaves.is_empty() {
                     return Err("a raw condition needs at least one leaf".to_string());
@@ -273,6 +1021,7 @@ impl PayloadConditionDraft {
                         .sum()
                 })
                 .unwrap_or(0),
+            Self::Zigbee(spec) => spec.leaf_count(),
             Self::Raw(raw) => raw.leaves.len(),
         }
     }
@@ -289,6 +1038,7 @@ impl PayloadConditionDraft {
                         .sum()
                 })
                 .unwrap_or(0),
+            Self::Zigbee(spec) => spec.byte_count(),
             Self::Raw(raw) => raw.leaves.iter().map(RawLeafDraft::byte_count).sum(),
         }
     }
@@ -306,6 +1056,7 @@ impl PayloadConditionDraft {
                         .unwrap_or(0)
                 })
                 .unwrap_or(0),
+            Self::Zigbee(spec) => spec.max_leaf_bytes(),
             Self::Raw(raw) => raw
                 .leaves
                 .iter()
@@ -4848,17 +5599,252 @@ mod tests {
                 ..RawLeafDraft::default()
             }],
         };
+        let zigbee = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_PERMIT_JOINING),
+            params: "b4".to_string(),
+            ..ZigbeeConditionDraft::default()
+        };
         let draft = FilterDraft {
             payload_conditions: vec![
                 PayloadConditionDraft::Frame(frame),
                 PayloadConditionDraft::Raw(raw),
+                PayloadConditionDraft::Zigbee(zigbee),
             ],
             ..FilterDraft::default()
         };
         let expression = draft.payload_expr().unwrap().expect("expression");
         assert!(expression.matches(&[0x01, 0x13, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
         assert!(expression.matches(&[9, 1, 2]));
-        assert_eq!(draft.leaf_count(), 2);
+        assert!(expression.matches(&[0, 0, 1, 0x22, 0, 0xb4]));
+        assert_eq!(draft.leaf_count(), 4);
+    }
+
+    #[test]
+    fn zigbee_condition_capabilities_follow_the_command() {
+        let mut draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_INCOMING_MESSAGE_HANDLER),
+            ..ZigbeeConditionDraft::default()
+        };
+        assert!(draft.supports_network());
+        assert!(draft.supports_group());
+        assert!(draft.supports_cluster());
+        assert!(draft.supports_endpoint());
+        assert!(draft.supports_zcl());
+
+        draft.command = Some(zigbee::EZSP_PERMIT_JOINING);
+        assert!(!draft.supports_network());
+        assert!(!draft.supports_group());
+        assert!(!draft.supports_cluster());
+        assert!(!draft.supports_endpoint());
+        assert!(!draft.supports_zcl());
+
+        draft.command = Some(zigbee::EZSP_SEND_BROADCAST);
+        assert!(draft.supports_network());
+        assert!(draft.supports_cluster());
+        assert!(draft.supports_endpoint());
+        assert!(draft.supports_zcl());
+
+        draft.command = Some(zigbee::EZSP_SEND_MULTICAST);
+        assert!(!draft.supports_network());
+        assert!(draft.supports_cluster());
+        assert!(draft.supports_endpoint());
+        assert!(draft.supports_zcl());
+    }
+
+    #[test]
+    fn zigbee_condition_matches_extra_ezsp_fields() {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "duration".to_string(),
+            ZigbeeFieldMatch {
+                enabled: true,
+                value: "180".to_string(),
+            },
+        );
+        let draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_PERMIT_JOINING),
+            ezsp_fields: fields,
+            ..ZigbeeConditionDraft::default()
+        };
+        let expression = draft.to_expr().unwrap();
+        assert!(expression.matches(&zigbee::build_request(
+            0,
+            zigbee::EZSP_PERMIT_JOINING,
+            &[180]
+        )));
+    }
+
+    #[test]
+    fn zigbee_extra_fields_follow_command_layout() {
+        let draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_SEND_UNICAST),
+            ..ZigbeeConditionDraft::default()
+        };
+        let names: Vec<String> = draft
+            .extra_field_candidates()
+            .into_iter()
+            .map(|field| field.name)
+            .collect();
+        assert!(names.contains(&"profileId".to_string()));
+        assert!(names.contains(&"apsOptions".to_string()));
+        assert!(!names.contains(&"clusterId".to_string()));
+        assert!(!names.contains(&"messageContents".to_string()));
+        assert!(!names.contains(&"status".to_string()));
+
+        let response_draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_SEND_UNICAST),
+            ezsp_response: true,
+            ..ZigbeeConditionDraft::default()
+        };
+        let names: Vec<String> = response_draft
+            .extra_field_candidates()
+            .into_iter()
+            .map(|field| field.name)
+            .collect();
+        assert!(names.contains(&"status".to_string()));
+        assert!(names.contains(&"sequence".to_string()));
+        assert!(!names.contains(&"profileId".to_string()));
+
+        let response_draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_NETWORK_STATE),
+            ..ZigbeeConditionDraft::default()
+        };
+        let names: Vec<String> = response_draft
+            .extra_field_candidates()
+            .into_iter()
+            .map(|field| field.name)
+            .collect();
+        assert_eq!(names, vec!["status".to_string()]);
+    }
+
+    #[test]
+    fn zigbee_condition_matches_multicast_group() {
+        let draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_SEND_MULTICAST),
+            group: "0001".to_string(),
+            cluster: "0006".to_string(),
+            ..ZigbeeConditionDraft::default()
+        };
+        let expression = draft.to_expr().unwrap();
+        let zcl = [0x01, 0x01, 0x01];
+        let mut params = vec![
+            0x04,
+            0x01,
+            0x06,
+            0x00,
+            0x01,
+            0x01,
+            0x00,
+            0x00,
+            0x01,
+            0x00,
+            0x01,
+            0x01,
+            0x01,
+            0x01,
+            zcl.len() as u8,
+        ];
+        params.extend(zcl);
+        let frame = zigbee::build_request(4, zigbee::EZSP_SEND_MULTICAST, &params);
+        assert!(expression.matches(&frame));
+    }
+
+    #[test]
+    fn zigbee_condition_matches_typed_zcl_fields() {
+        let mut zcl_fields = BTreeMap::new();
+        zcl_fields.insert(
+            "level".to_string(),
+            ZigbeeFieldMatch {
+                enabled: true,
+                value: "128".to_string(),
+            },
+        );
+        zcl_fields.insert(
+            "transitionTime".to_string(),
+            ZigbeeFieldMatch {
+                enabled: true,
+                value: "2".to_string(),
+            },
+        );
+        let draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_SEND_UNICAST),
+            network: "1234".to_string(),
+            cluster: "0008".to_string(),
+            endpoint: "01".to_string(),
+            zcl_command: Some(0x00),
+            zcl_fields,
+            ..ZigbeeConditionDraft::default()
+        };
+        let expression = draft.to_expr().unwrap();
+        let zcl = [0x01, 0x00, 0x00, 0x80, 0x02, 0x00];
+        let mut params = vec![
+            0x00,
+            0x34,
+            0x12,
+            0x04,
+            0x01,
+            0x08,
+            0x00,
+            0x01,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x01,
+            zcl.len() as u8,
+        ];
+        params.extend(zcl);
+        let frame = zigbee::build_request(7, zigbee::EZSP_SEND_UNICAST, &params);
+        assert!(expression.matches(&frame));
+
+        let mut wrong = frame.clone();
+        wrong[24] = 100;
+        assert!(!expression.matches(&wrong));
+    }
+
+    #[test]
+    fn zigbee_condition_matches_general_zcl_command() {
+        let draft = ZigbeeConditionDraft {
+            command: Some(zigbee::EZSP_SEND_UNICAST),
+            network: "1234".to_string(),
+            cluster: "0006".to_string(),
+            endpoint: "01".to_string(),
+            zcl_general: true,
+            zcl_command: Some(0x0a),
+            zcl_direction_to_client: true,
+            zcl_payload: "00 01 00".to_string(),
+            ..ZigbeeConditionDraft::default()
+        };
+        let expression = draft.to_expr().unwrap();
+        let zcl = [0x08, 0x00, 0x0a, 0x00, 0x01, 0x00];
+        let mut params = vec![
+            0x00,
+            0x34,
+            0x12,
+            0x04,
+            0x01,
+            0x06,
+            0x00,
+            0x01,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x01,
+            zcl.len() as u8,
+        ];
+        params.extend(zcl);
+        let frame = zigbee::build_request(7, zigbee::EZSP_SEND_UNICAST, &params);
+        assert!(expression.matches(&frame));
+        let wrong = ZigbeeConditionDraft {
+            zcl_direction_to_client: false,
+            ..draft
+        };
+        assert!(wrong.to_expr().is_err());
     }
 
     #[test]
@@ -4916,5 +5902,325 @@ mod tests {
             no_match_message(false, SearchDirection::Next),
             "No match in the filtered messages."
         );
+    }
+
+    struct DemoUi {
+        ctx: egui::Context,
+        app: App,
+        frame: Frame,
+    }
+
+    impl DemoUi {
+        fn new() -> Self {
+            let ctx = egui::Context::default();
+            let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+            let app = App::new(
+                &creation,
+                Startup {
+                    endpoint: String::new(),
+                    demo: true,
+                },
+            );
+            Self {
+                ctx,
+                app,
+                frame: eframe::Frame::_new_kittest(),
+            }
+        }
+
+        fn run(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            use eframe::App as _;
+
+            self.app.logic(&self.ctx, &mut self.frame);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut output = self
+                .ctx
+                .run_ui(input, |ui| self.app.ui(ui, &mut self.frame));
+            output.textures_delta.clear();
+            output
+        }
+
+        fn click(&mut self, pos: egui::Pos2) {
+            let _ = self.run(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            let _ = self.run(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+        }
+
+        fn wait_until_ready(&mut self) {
+            for _ in 0..200 {
+                let _ = self.run(Vec::new());
+                if self.app.gateway.phase() == Phase::Ready
+                    && !self.app.protocols.is_empty()
+                    && !self.app.transports.is_empty()
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!(
+                "demo gateway did not become ready: phase={:?}, protocols={}, transports={}",
+                self.app.gateway.phase(),
+                self.app.protocols.len(),
+                self.app.transports.len()
+            );
+        }
+
+        fn wait_for_params(&mut self, key: &(String, String)) {
+            for _ in 0..50 {
+                let _ = self.run(Vec::new());
+                if self.app.protocol_params.contains_key(key)
+                    || self.app.protocol_params_errors.contains_key(key)
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                self.app.protocol_params.contains_key(key),
+                "parameter definitions did not load: {:?}",
+                self.app.protocol_params_errors.get(key)
+            );
+        }
+
+        fn click_dialog_submit(&mut self) {
+            let output = self.run(Vec::new());
+            let mut buttons = text_rects(&output, "Add service");
+            buttons.sort_by(|a, b| a.center().y.total_cmp(&b.center().y));
+            let submit = buttons.last().expect("dialog submit button");
+            self.click(submit.center());
+        }
+
+        /// Runs frames until `text` keeps the same position between two frames.
+        fn stable_text_rect(&mut self, text: &str) -> egui::Rect {
+            let mut previous = None;
+            for _ in 0..40 {
+                let output = self.run(Vec::new());
+                let rect = text_rect(&output, text);
+                if previous.is_some_and(|previous: egui::Rect| {
+                    (previous.center() - rect.center()).length() < 0.1
+                }) {
+                    return rect;
+                }
+                previous = Some(rect);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            previous.expect("text was never painted")
+        }
+
+        /// Submits the open Add service dialog, waiting for its parameter
+        /// definitions first, and asserts that the service appears.
+        fn submit_add_service(&mut self, entry: &str) {
+            let Some(Dialog::AddService(dialog)) = &mut self.app.dialog else {
+                panic!("the Add service dialog is not open");
+            };
+            assert_eq!(dialog.entry, entry);
+            let key = (dialog.protocol.clone(), dialog.transport.clone());
+
+            self.wait_for_params(&key);
+            self.click_dialog_submit();
+
+            for _ in 0..50 {
+                let _ = self.run(Vec::new());
+                if self
+                    .app
+                    .services
+                    .iter()
+                    .any(|service| service.entry == entry)
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("the service was not added; dialog = {:?}", self.app.dialog);
+        }
+    }
+
+    fn text_rects(output: &egui::FullOutput, text: &str) -> Vec<egui::Rect> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == text => {
+                    Some(clipped.shape.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_rect(output: &egui::FullOutput, text: &str) -> egui::Rect {
+        text_rects(output, text)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("no text shape {text:?}"))
+    }
+
+    #[test]
+    fn zigbee_filter_falls_back_to_all_zigbee_services() {
+        let mut demo = DemoUi::new();
+        demo.wait_until_ready();
+
+        let services = views::messages::zigbee_filter_services(&demo.app, &[]);
+        assert!(!services.is_empty(), "no ZigBee service found");
+        let keys: Vec<String> = services
+            .iter()
+            .flat_map(|service| model::entity_service_keys(&demo.app.services, service))
+            .collect();
+        let devices = views::messages::zigbee_known_devices(&keys);
+        assert!(
+            devices.iter().any(|(nwk, _, _)| *nwk == 0x1234),
+            "known devices were empty: {devices:?}"
+        );
+    }
+
+    #[test]
+    fn zwave_filter_known_nodes_fall_back_to_all_zwave_services() {
+        let mut demo = DemoUi::new();
+        demo.wait_until_ready();
+
+        let nodes = views::messages::zwave_known_nodes(&demo.app, &[]);
+        assert!(
+            nodes.iter().any(|(node, _)| *node == 3),
+            "known nodes were empty: {nodes:?}"
+        );
+    }
+
+    #[test]
+    fn demo_services_add_service_opens_the_dialog() {
+        let mut demo = DemoUi::new();
+        demo.wait_until_ready();
+
+        let output = demo.run(Vec::new());
+        demo.click(text_rect(&output, "Add service").center());
+
+        assert!(
+            matches!(demo.app.dialog, Some(Dialog::AddService(_))),
+            "the Add service dialog did not open"
+        );
+
+        let _ = demo.run(vec![egui::Event::PointerMoved(egui::pos2(4.0, 4.0))]);
+        assert!(
+            matches!(demo.app.dialog, Some(Dialog::AddService(_))),
+            "the Add service dialog closed immediately"
+        );
+    }
+
+    #[test]
+    fn demo_services_add_service_dialog_adds_a_service() {
+        let mut demo = DemoUi::new();
+        demo.wait_until_ready();
+
+        let output = demo.run(Vec::new());
+        demo.click(text_rect(&output, "Add service").center());
+        let Some(Dialog::AddService(dialog)) = &mut demo.app.dialog else {
+            panic!("the Add service dialog did not open");
+        };
+        dialog.entry = "COM6".to_string();
+        demo.submit_add_service("COM6");
+    }
+
+    #[test]
+    fn demo_add_service_failure_is_visible_in_the_footer() {
+        let mut demo = DemoUi::new();
+        demo.wait_until_ready();
+
+        let output = demo.run(Vec::new());
+        demo.click(text_rect(&output, "Add service").center());
+        let Some(Dialog::AddService(dialog)) = &mut demo.app.dialog else {
+            panic!("the Add service dialog did not open");
+        };
+        // COM4 is already configured in the demo fixtures.
+        dialog.entry = "COM4".to_string();
+        let key = (dialog.protocol.clone(), dialog.transport.clone());
+
+        demo.wait_for_params(&key);
+        let cancel_before = demo.stable_text_rect("Cancel");
+        demo.click_dialog_submit();
+
+        let mut previous = None;
+        for _ in 0..80 {
+            let output = demo.run(Vec::new());
+            let Some(Dialog::AddService(dialog)) = &demo.app.dialog else {
+                panic!("the Add service dialog closed after a failed add");
+            };
+            let Some(error) = &dialog.error else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            let cancel = text_rect(&output, "Cancel");
+            let stable = previous.is_some_and(|previous: egui::Rect| {
+                (previous.center() - cancel.center()).length() < 0.1
+            });
+            previous = Some(cancel);
+            if !stable {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            let footer_error = text_rects(&output, error).into_iter().find(|rect| {
+                rect.top() < cancel.bottom()
+                    && rect.bottom() > cancel.top()
+                    && rect.right() <= cancel.left() + 1.0
+            });
+            assert!(
+                footer_error.is_some(),
+                "the add error was not painted beside the footer actions: {error:?}"
+            );
+            assert!(
+                (cancel_before.center() - cancel.center()).length() < 1.0,
+                "the footer actions moved when the error appeared: before={cancel_before:?} after={cancel:?}"
+            );
+            return;
+        }
+        panic!("the add error did not arrive");
+    }
+
+    #[test]
+    fn demo_discovery_add_service_adds_the_discovered_entry() {
+        use hodeco_contract::domain::DiscoveryEntry;
+
+        let mut demo = DemoUi::new();
+        demo.wait_until_ready();
+        demo.app.services_tab = ServicesTab::Discovery;
+        demo.app.discovery.protocol = "zigbee".to_string();
+        demo.app.discovery.transport = "serial".to_string();
+        demo.app.discovery.current = Some(DiscoveryInfo {
+            id: Uuid::new_v4(),
+            protocol: "zigbee".to_string(),
+            transport: "serial".to_string(),
+            state: DiscoveryState::Finished,
+            entries: vec![DiscoveryEntry {
+                entry: "COM8".to_string(),
+                available: true,
+                description: Some("Nortec HUSBZB-1 ZigBee Hub".to_string()),
+                error: None,
+            }],
+        });
+
+        let output = demo.run(Vec::new());
+        demo.click(text_rect(&output, "Add service").center());
+        let Some(Dialog::AddService(dialog)) = &demo.app.dialog else {
+            panic!("the Add service dialog did not open");
+        };
+        assert_eq!(dialog.entry, "COM8");
+        demo.submit_add_service("COM8");
     }
 }

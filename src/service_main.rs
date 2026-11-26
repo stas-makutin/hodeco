@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
+/// Runs the gateway from process startup through shutdown. Returns `false` when
+/// configuration loading, runtime setup, or the gateway itself failed.
+pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) -> bool {
     let command_line = CommandLine::from_env();
     let loaded = match load_config(&command_line, logger) {
         Some(config) => config,
-        None => return,
+        None => return false,
     };
     let config = loaded.bundle.config.clone();
     let services_count = loaded.bundle.services.services.len();
@@ -19,14 +21,14 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
 
     if let Err(error) = config::prepare_working_directory(&config) {
         logger(ServiceLogLevel::Error, &format!("{error}"));
-        return;
+        return false;
     }
 
     let warnings = match config::prepare_runtime_directories(&config) {
         Ok(warnings) => warnings,
         Err(error) => {
             logger(ServiceLogLevel::Error, &format!("{error}"));
-            return;
+            return false;
         }
     };
 
@@ -35,7 +37,7 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
             ServiceLogLevel::Error,
             &format!("Failed to initialize logging: {error}"),
         );
-        return;
+        return false;
     }
 
     for warning in warnings {
@@ -68,23 +70,28 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) {
                 &format!("Failed to initialize service runtime: {error}"),
             );
             logging::shutdown();
-            return;
+            return false;
         }
     };
 
     let shutdown = cancel_token.clone();
-    match runtime.block_on(async move {
+    let success = match runtime.block_on(async move {
         install_signal_handlers(cancel_token);
         app::run(loaded.bundle, config_path, shutdown).await
     }) {
-        Ok(()) => info!("service stopped"),
+        Ok(()) => {
+            info!("service stopped");
+            true
+        }
         Err(error) => {
             error!(error = %error, "service failed");
             logger(ServiceLogLevel::Error, &format!("Service failed: {error}"));
+            false
         }
-    }
+    };
 
     logging::shutdown();
+    success
 }
 
 /// Installs console and SIGTERM handling on the service runtime. This keeps

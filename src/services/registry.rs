@@ -1,7 +1,8 @@
-use super::ServiceError;
 use super::catalog;
 use super::serial::{PortOpener, SystemPortOpener};
-use super::zwave::{StatusEvent, ZWaveHandle};
+use super::zigbee::ZigBeeHandle;
+use super::zwave::ZWaveHandle;
+use super::{ServiceError, StatusEvent};
 use crate::messages::MessageRecorder;
 use hodeco_contract::domain::{
     Message, ParamValues, ServiceInfo, ServiceKey, ServiceRef, ServiceStatus,
@@ -16,13 +17,42 @@ use tracing::warn;
 
 const STATUS_EVENT_CHANNEL_CAPACITY: usize = 1024;
 
+#[derive(Clone)]
+enum ProtocolHandle {
+    ZWave(Arc<ZWaveHandle>),
+    ZigBee(Arc<ZigBeeHandle>),
+}
+
+impl ProtocolHandle {
+    fn status(&self) -> ServiceStatus {
+        match self {
+            Self::ZWave(handle) => handle.status(),
+            Self::ZigBee(handle) => handle.status(),
+        }
+    }
+
+    fn send(&self, payload: Vec<u8>, ttl: Option<Duration>) -> Result<Message, ServiceError> {
+        match self {
+            Self::ZWave(handle) => handle.send(payload, ttl),
+            Self::ZigBee(handle) => handle.send(payload, ttl),
+        }
+    }
+
+    async fn shutdown(&self) {
+        match self {
+            Self::ZWave(handle) => handle.stop().await,
+            Self::ZigBee(handle) => handle.stop().await,
+        }
+    }
+}
+
 struct ServiceEntry {
     alias: Option<String>,
     /// Explicit service overrides as stored in the configuration.
     overrides: ParamValues,
     /// Effective values after applying protocol/transport defaults.
     params: ParamValues,
-    handle: Arc<ZWaveHandle>,
+    handle: ProtocolHandle,
 }
 
 #[derive(Default)]
@@ -125,7 +155,7 @@ impl ServiceRegistry {
             return Err(ServiceError::AliasConflict);
         }
 
-        let handle = Arc::new(self.start_handle(&key, &parsed)?);
+        let handle = self.start_handle(&key, &parsed)?;
         let info = ServiceInfo {
             alias: alias.clone(),
             protocol: key.protocol.clone(),
@@ -163,7 +193,7 @@ impl ServiceRegistry {
             inner.order.retain(|candidate| candidate != &key);
             entry
         };
-        entry.handle.stop().await;
+        entry.handle.shutdown().await;
         Ok(())
     }
 
@@ -229,10 +259,10 @@ impl ServiceRegistry {
             )
         };
 
-        old_handle.stop().await;
+        old_handle.shutdown().await;
 
         let handle = match self.start_handle(&key, &effective) {
-            Ok(handle) => Arc::new(handle),
+            Ok(handle) => handle,
             Err(error) => {
                 match self.start_handle(&key, &old_effective) {
                     Ok(handle) => {
@@ -246,7 +276,7 @@ impl ServiceRegistry {
                                 alias,
                                 overrides: old_overrides,
                                 params: old_effective,
-                                handle: Arc::new(handle),
+                                handle,
                             },
                         );
                     }
@@ -330,20 +360,35 @@ impl ServiceRegistry {
         &self,
         key: &ServiceKey,
         params: &ParamValues,
-    ) -> Result<ZWaveHandle, ServiceError> {
-        ZWaveHandle::start_with_status_events(
-            key.clone(),
-            params.clone(),
-            self.recorder.clone(),
-            self.opener.clone(),
-            &self.cancel,
-            Some(self.status_events.clone()),
-        )
+    ) -> Result<ProtocolHandle, ServiceError> {
+        match key.protocol.as_str() {
+            catalog::PROTOCOL_ZWAVE => Ok(ProtocolHandle::ZWave(Arc::new(
+                ZWaveHandle::start_with_status_events(
+                    key.clone(),
+                    params.clone(),
+                    self.recorder.clone(),
+                    self.opener.clone(),
+                    &self.cancel,
+                    Some(self.status_events.clone()),
+                )?,
+            ))),
+            catalog::PROTOCOL_ZIGBEE => Ok(ProtocolHandle::ZigBee(Arc::new(
+                ZigBeeHandle::start_with_status_events(
+                    key.clone(),
+                    params.clone(),
+                    self.recorder.clone(),
+                    self.opener.clone(),
+                    &self.cancel,
+                    Some(self.status_events.clone()),
+                )?,
+            ))),
+            other => Err(ServiceError::UnknownProtocol(other.to_string())),
+        }
     }
 
     pub async fn shutdown(&self) {
         self.cancel.cancel();
-        let handles: Vec<Arc<ZWaveHandle>> = {
+        let handles: Vec<ProtocolHandle> = {
             let mut inner = self.inner.lock();
             inner.aliases.clear();
             inner.order.clear();
@@ -354,7 +399,7 @@ impl ServiceRegistry {
                 .collect()
         };
         for handle in handles {
-            handle.stop().await;
+            handle.shutdown().await;
         }
     }
 }
@@ -698,5 +743,31 @@ mod tests {
             transport: "serial".to_string(),
             entry: entry.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn adds_zigbee_services_with_defaults() {
+        let (registry, cancel) = registry(MockPortOpener::new(Vec::new()));
+        let info = registry
+            .add(
+                ServiceKey {
+                    protocol: "zigbee".to_string(),
+                    transport: "serial".to_string(),
+                    entry: "COM5".to_string(),
+                },
+                &ParamValues::new(),
+                Some("ZB".to_string()),
+            )
+            .unwrap();
+        assert_eq!(info.protocol, "zigbee");
+        assert_eq!(info.alias.as_deref(), Some("ZB"));
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(
+            registry.resolve(&alias_ref("ZB")).unwrap().protocol,
+            "zigbee"
+        );
+
+        registry.shutdown().await;
+        cancel.cancel();
     }
 }

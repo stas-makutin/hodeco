@@ -60,9 +60,21 @@ pub struct ServiceEntities {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceDevice {
+    #[serde(alias = "device_id")]
     pub device_id: String,
+    #[serde(alias = "service_id")]
     pub service_id: ServiceId,
+    /// Stable ZigBee EUI-64 identity. Optional for Z-Wave.
+    #[serde(default)]
+    pub eui64: Option<String>,
+    /// ZigBee application endpoint on the mapped node.
+    #[serde(default)]
+    pub endpoint: Option<u8>,
+    /// ZigBee application profile, when the mapping is endpoint-specific.
+    #[serde(default)]
+    pub profile: Option<u16>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -82,6 +94,30 @@ impl ServiceId {
             Self::Number(value) => u8::try_from(*value).ok(),
             Self::Text(_) => None,
         }
+    }
+
+    /// Parses a 16-bit network address from either a JSON number or a string
+    /// such as `0x1234` or `1234`.
+    pub fn as_u16_address(&self) -> Option<u16> {
+        match self {
+            Self::Number(value) => u16::try_from(*value).ok(),
+            Self::Text(text) => parse_u16(text),
+        }
+    }
+}
+
+fn parse_u16(text: &str) -> Option<u16> {
+    let text = text.trim();
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        text.parse::<u16>().ok()
+    }
+}
+
+impl ServiceDevice {
+    pub fn network_address(&self) -> Option<u16> {
+        self.service_id.as_u16_address()
     }
 }
 
@@ -126,6 +162,27 @@ impl EntityCatalog {
 
     pub fn node_label(&self, service_keys: &[String], node: u8) -> Option<&Device> {
         self.service_device(service_keys, &ServiceId::Number(u64::from(node)))
+    }
+
+    /// Resolves a ZigBee NWK address through either numeric or textual
+    /// `serviceId` mappings.
+    pub fn network_device(&self, service_keys: &[String], address: u16) -> Option<&Device> {
+        for key in service_keys {
+            let Some(service) = self.services.get(key) else {
+                continue;
+            };
+            let Some(entry) = service
+                .devices
+                .iter()
+                .find(|entry| entry.network_address() == Some(address))
+            else {
+                continue;
+            };
+            if let Some(device) = self.device(&entry.device_id) {
+                return Some(device);
+            }
+        }
+        None
     }
 
     /// Returns the service mappings with their resolved catalog devices.
@@ -222,6 +279,53 @@ mod tests {
     }
 
     #[test]
+    fn resolves_zigbee_nwk_and_endpoint_metadata() {
+        let catalog = bundled();
+        let keys = vec![alias_service_key("ZB")];
+        let device = catalog.network_device(&keys, 0x1234).expect("NWK 0x1234");
+        assert_eq!(device.label, "Office lamp");
+        assert_eq!(
+            catalog
+                .network_device(&keys, 0x1237)
+                .expect("NWK 0x1237")
+                .label,
+            "Kitchen light"
+        );
+
+        let entry = catalog
+            .services
+            .get("alias:ZB")
+            .and_then(|service| {
+                service
+                    .devices
+                    .iter()
+                    .find(|entry| entry.network_address() == Some(0x1234))
+            })
+            .expect("mapped NWK entry");
+        assert_eq!(entry.endpoint, Some(1));
+    }
+
+    #[test]
+    fn accepts_legacy_snake_case_service_fields() {
+        let catalog: EntityCatalog = serde_json::from_str(
+            r#"{
+                "version": 1,
+                "devices": [{ "id": "a", "label": "A" }],
+                "services": {
+                    "alias:X": {
+                        "devices": [{ "device_id": "a", "service_id": 7 }]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let device = catalog
+            .service_device(&[alias_service_key("X")], &ServiceId::Number(7))
+            .expect("legacy mapping");
+        assert_eq!(device.label, "A");
+    }
+
+    #[test]
     fn composite_key_wins_over_alias() {
         let catalog: EntityCatalog = serde_json::from_str(
             r#"{
@@ -231,8 +335,8 @@ mod tests {
                     { "id": "b", "label": "Alias" }
                 ],
                 "services": {
-                    "key:p/t/e": { "devices": [{ "device_id": "a", "service_id": 1 }] },
-                    "alias:X": { "devices": [{ "device_id": "b", "service_id": 1 }] }
+                    "key:p/t/e": { "devices": [{ "deviceId": "a", "serviceId": 1 }] },
+                    "alias:X": { "devices": [{ "deviceId": "b", "serviceId": 1 }] }
                 }
             }"#,
         )
@@ -261,7 +365,7 @@ mod tests {
                 "devices": [{ "id": "a", "label": "A", "vendor": "Example" }],
                 "services": {
                     "alias:X": {
-                        "devices": [{ "device_id": "a", "service_id": "addr-1", "note": "x" }]
+                        "devices": [{ "deviceId": "a", "serviceId": "addr-1", "note": "x" }]
                     }
                 }
             }"#,

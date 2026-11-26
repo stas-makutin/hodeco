@@ -167,6 +167,7 @@
           "name": "rxStatus",
           "label": "RX status",
           "kind": "flags",
+          "role": "rxStatus",
           "rawSuffix": true,
           "description": "Receive status flags.",
           "required": true,
@@ -835,6 +836,7 @@
             "name": "txStatus",
             "label": "TX status",
             "kind": "enum",
+            "role": "txStatus",
             "rawSuffix": true,
             "description": "Result of the transmission.",
             "required": true,
@@ -951,6 +953,7 @@
             "name": "txStatus",
             "label": "TX status",
             "kind": "enum",
+            "role": "txStatus",
             "rawSuffix": true,
             "description": "Result of the transmission.",
             "required": true,
@@ -3492,6 +3495,7 @@
           "name": "rxStatus",
           "label": "RX status",
           "kind": "flags",
+          "role": "rxStatus",
           "rawSuffix": true,
           "required": true,
           "values": [
@@ -3957,6 +3961,7 @@
           "name": "rxStatus",
           "label": "RX status",
           "kind": "flags",
+          "role": "rxStatus",
           "rawSuffix": true,
           "required": true,
           "values": [
@@ -4351,7 +4356,7 @@
     },
     {
       "id": 37,
-      "name": "SwitchBinary",
+      "name": "Switch Binary",
       "description": "Binary switch command class.",
       "commands": [
         {
@@ -4409,7 +4414,7 @@
     },
     {
       "id": 38,
-      "name": "SwitchMultilevel",
+      "name": "Switch Multilevel",
       "description": "Dimmer switch command class.",
       "commands": [
         {
@@ -4467,7 +4472,7 @@
         },
         {
           "id": 4,
-          "name": "StartLevelChange",
+          "name": "Start Level Change",
           "description": "This command is displayed as raw command data.",
           "fields": [
             {
@@ -4519,7 +4524,7 @@
         },
         {
           "id": 5,
-          "name": "StopLevelChange",
+          "name": "Stop Level Change",
           "description": "This command is displayed as raw command data.",
           "fields": []
         }
@@ -4732,7 +4737,7 @@
     },
     {
       "id": 43,
-      "name": "SceneActivation",
+      "name": "Scene Activation",
       "description": "Activate a scene configured on the device.",
       "commands": [
         {
@@ -5278,12 +5283,12 @@
         },
         {
           "id": 3,
-          "name": "SupportedGet",
+          "name": "Supported Get",
           "fields": []
         },
         {
           "id": 4,
-          "name": "SupportedReport",
+          "name": "Supported Report",
           "description": "This command is displayed as raw command data.",
           "fields": [
             {

@@ -151,7 +151,7 @@ pub struct CommandDef {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum LayoutField {
-    Field(FieldDef),
+    Field(Box<FieldDef>),
     Group(PackedGroupDef),
 }
 
@@ -163,10 +163,10 @@ impl LayoutField {
         }
     }
 
-    pub fn fields(&self) -> Box<dyn Iterator<Item = &FieldDef> + '_> {
+    pub fn fields(&self) -> std::slice::Iter<'_, FieldDef> {
         match self {
-            Self::Field(field) => Box::new(std::iter::once(field)),
-            Self::Group(group) => Box::new(group.fields.iter()),
+            Self::Field(field) => std::slice::from_ref(field.as_ref()).iter(),
+            Self::Group(group) => group.fields.iter(),
         }
     }
 }
@@ -190,6 +190,10 @@ pub struct FieldDef {
     pub kind: FieldType,
     #[serde(default)]
     pub description: Option<String>,
+    /// Initial builder value, parsed according to the field kind. Useful for
+    /// protocol defaults such as the ZigBee HA profile.
+    #[serde(default, rename = "default")]
+    pub default_value: Option<String>,
     #[serde(default = "default_true")]
     pub required: bool,
     #[serde(default)]
@@ -211,9 +215,14 @@ pub struct FieldDef {
     /// Text used when no enum value or flag matches.
     #[serde(default)]
     pub unknown: Option<String>,
-    /// Semantic role for address extraction and field colouring.
+    /// Semantic role for address extraction, field colouring, and protocol UI
+    /// capabilities.
     #[serde(default)]
     pub role: FieldRole,
+    /// Optional payload-filter slot. The ZigBee filter uses this instead of
+    /// deriving categories from field names.
+    #[serde(default)]
+    pub filter_slot: Option<FilterSlot>,
     /// How a decoded value is rendered. `default` renders the natural value.
     #[serde(default)]
     pub format: FieldFormat,
@@ -232,6 +241,64 @@ pub struct FieldDef {
     /// The field is derived from another field and is not a builder input.
     #[serde(default)]
     pub derived: bool,
+    /// Multi-byte integer byte order. Z-Wave defaults to big-endian; EZSP and
+    /// ZCL use little-endian.
+    #[serde(default)]
+    pub endian: Endian,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Endian {
+    #[default]
+    Big,
+    Little,
+}
+
+impl Endian {
+    pub fn read_unsigned(self, bytes: &[u8]) -> u64 {
+        match self {
+            Self::Big => bytes
+                .iter()
+                .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
+            Self::Little => bytes
+                .iter()
+                .rev()
+                .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
+        }
+    }
+
+    pub fn read_signed(self, bytes: &[u8]) -> i64 {
+        match bytes.len() {
+            0 => 0,
+            1 => i64::from(bytes[0] as i8),
+            2 => {
+                let value = self.read_unsigned(bytes) as u16;
+                i64::from(value as i16)
+            }
+            4 => {
+                let value = self.read_unsigned(bytes) as u32;
+                i64::from(value as i32)
+            }
+            _ => self.read_unsigned(bytes) as i64,
+        }
+    }
+
+    pub fn encode_unsigned(self, value: u64, width: usize) -> Vec<u8> {
+        let mut bytes = value.to_be_bytes().to_vec();
+        match self {
+            Self::Big => bytes.split_off(8 - width.min(8)),
+            Self::Little => {
+                let mut bytes = bytes.split_off(8 - width.min(8));
+                bytes.reverse();
+                bytes
+            }
+        }
+    }
+
+    pub fn encode_signed(self, value: i64, width: usize) -> Vec<u8> {
+        self.encode_unsigned(value as u64, width)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -257,6 +324,16 @@ pub enum FieldType {
     Uint,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterSlot {
+    Network,
+    Group,
+    Cluster,
+    Endpoint,
+    Payload,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FieldRole {
@@ -265,8 +342,18 @@ pub enum FieldRole {
     Length,
     Target,
     Targets,
+    Broadcast,
     Source,
     CommandClass,
+    Cluster,
+    Profile,
+    Group,
+    SourceEndpoint,
+    DestinationEndpoint,
+    Payload,
+    DestinationType,
+    RxStatus,
+    TxStatus,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -287,6 +374,10 @@ pub enum FieldFormat {
 pub struct EnumValue {
     pub value: u8,
     pub name: String,
+    /// This enum value enables the known-device picker for a destination
+    /// type field.
+    #[serde(default)]
+    pub direct: bool,
     /// Wire length in bytes for enum values that select a field width.
     #[serde(default)]
     pub length: Option<usize>,
@@ -703,6 +794,103 @@ mod tests {
     }
 
     #[test]
+    fn z_wave_display_names_are_human_readable() {
+        let definitions = bundled();
+        assert_eq!(
+            definitions.command_class(0x25).unwrap().name,
+            "Switch Binary"
+        );
+        assert_eq!(
+            definitions.command_class(0x26).unwrap().name,
+            "Switch Multilevel"
+        );
+        assert_eq!(
+            definitions.command_class(0x2B).unwrap().name,
+            "Scene Activation"
+        );
+        assert_eq!(
+            definitions.command(0x26, 0x04).unwrap().name,
+            "Start Level Change"
+        );
+        assert_eq!(
+            definitions.command(0x26, 0x05).unwrap().name,
+            "Stop Level Change"
+        );
+        assert_eq!(
+            definitions.command(0x32, 0x03).unwrap().name,
+            "Supported Get"
+        );
+        assert_eq!(
+            definitions.command(0x32, 0x04).unwrap().name,
+            "Supported Report"
+        );
+    }
+
+    #[test]
+    fn command_field_values_and_defaults_are_consistent() {
+        let definitions = bundled();
+        for command in &definitions.serial_commands {
+            check_field_values(&command.name, &command.fields);
+            check_field_values(
+                &format!("{} response", command.name),
+                &command.response_fields,
+            );
+            if let Some(callback) = &command.callback {
+                check_field_values(&format!("{} callback", command.name), &callback.fields);
+            }
+        }
+        for class in &definitions.command_classes {
+            for command in &class.commands {
+                check_field_values(&format!("{} {}", class.name, command.name), &command.fields);
+            }
+        }
+    }
+
+    fn check_field_values(context: &str, layout: &[LayoutField]) {
+        for field in layout.iter().flat_map(LayoutField::fields) {
+            if field.values.is_empty() {
+                continue;
+            }
+            let mut values = BTreeSet::new();
+            let mut names = BTreeSet::new();
+            for value in &field.values {
+                assert!(
+                    values.insert(value.value),
+                    "{context}: field {} has duplicate value 0x{:02x}",
+                    field.name,
+                    value.value
+                );
+                assert!(
+                    !value.name.trim().is_empty(),
+                    "{context}: field {} has an empty value name",
+                    field.name
+                );
+                assert!(
+                    names.insert(value.name.as_str()),
+                    "{context}: field {} has duplicate value name '{}'",
+                    field.name,
+                    value.name
+                );
+            }
+            if let Some(default) = &field.default_value {
+                let default = default.trim();
+                let number = default
+                    .strip_prefix("0x")
+                    .and_then(|text| u8::from_str_radix(text, 16).ok())
+                    .or_else(|| default.parse::<u8>().ok());
+                assert!(
+                    field.values.iter().any(|value| value.name == default)
+                        || number.is_some_and(|number| {
+                            field.values.iter().any(|value| value.value == number)
+                        }),
+                    "{context}: field {} default '{default}' is not one of its values",
+                    field.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn field_descriptors_reference_earlier_numeric_fields() {
         let definitions = bundled();
         for command in &definitions.serial_commands {
@@ -730,7 +918,7 @@ mod tests {
         for (index, item) in layout.iter().enumerate() {
             match item {
                 LayoutField::Field(field) => {
-                    fields.push(field);
+                    fields.push(field.as_ref());
                     if field.remaining {
                         assert_eq!(
                             index,

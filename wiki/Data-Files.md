@@ -1,36 +1,181 @@
-# Codec data files
+# Codec Data Files
 
-Two JSON files drive the UI's Z-Wave decoder and its device labels:
+Most people never edit these files. hodeco ships with definitions for the common
+Z-Wave and ZigBee commands, and unknown commands still decode as raw bytes with
+their IDs. You only need this page when you want to extend the builder, improve a
+decoded field, or give devices friendly names.
+
+Three JSON files drive the UI's protocol decoders and device labels:
 
 | File | Purpose |
 | --- | --- |
-| `hodeco-codec/data/zwave.json` | Serial API commands, command classes, field layouts, enums, and summary templates. |
-| `hodeco-codec/data/entities.json` | Human labels and locations for devices, mapped from protocol-native service and node IDs. |
+| `hodeco-codec/data/zwave.json` | Z-Wave Serial API commands, command classes, field layouts, enums, and summary templates. |
+| `hodeco-codec/data/zigbee.json` | ZigBee EZSP commands, frame layouts, ZCL clusters, attributes, and summary templates. |
+| `hodeco-codec/data/entities.json` | Human labels and locations for devices, mapped from protocol-native service and node/NWK IDs. |
 
-Both files are compiled into `hodeco-codec` as fallbacks and can also be
+All three files are compiled into `hodeco-codec` as fallbacks and can also be
 overridden at runtime.
+
+## Which file do I need?
+
+| If you want to… | Edit | Read |
+| --- | --- | --- |
+| Give a device a readable name or room | `entities.json` | [`entities.json`](#entitiesjson) |
+| Add a description or picker priority to a command | `zwave.json` or `zigbee.json` | The command key tables in each section |
+| Add typed fields to a Z-Wave command | `zwave.json` | [Fields](#fields) and [Packed groups](#packed-groups) |
+| Add typed fields to an EZSP command | `zigbee.json` | The EZSP field notes and the shared field schema |
+| Label a ZigBee device across NWK-address changes | `entities.json` | [Service mappings](#service-mappings) |
+| Understand why a frame is shown as raw bytes | Either protocol file | [Fallback behavior](#fallback-behavior) |
+
+The bundled definitions are deliberately tolerant: a missing layout is not an
+error, it just means more of the frame stays raw. You do not have to describe
+every command before using the builder.
+
+## How this page is organized
+
+1. [Runtime loading](#runtime-loading) — where the files are read from and when.
+2. [`zigbee.json`](#zigbeejson) — EZSP commands, ZCL frames, clusters, roles.
+3. [`zwave.json`](#zwavejson) — Serial API, command classes, fields, packed
+   groups, summaries.
+4. [`entities.json`](#entitiesjson) — device labels and service mappings.
+5. [Editing safely](#editing-safely) — the checks worth doing before you deploy
+   a change.
 
 ## Runtime loading
 
-Native builds look for `zwave.json` and `entities.json`:
+Native builds look for `zwave.json`, `zigbee.json`, and `entities.json`:
 
 1. beside the executable;
 2. in the current working directory;
 3. in the checked-in codec data directory during development.
 
-Web builds fetch both files from the page root, so a release `site/` can ship
-edited copies.
+Web builds fetch all three files from the page root, so a release `site/` can
+ship edited copies.
 
 Each file is handled independently. A missing file keeps the embedded copy. An
 invalid file logs a warning and keeps the embedded copy for that file. Editing an
 external file takes effect when the UI is restarted or the page is reloaded.
 
----
+## Before you edit
+
+- Keep the top-level `version` key. Protocol files must also keep a matching
+  `protocol` (and, for ZigBee, `stack`); the UI rejects an external file whose
+  protocol does not match.
+- Keep IDs unique in their scope. The Z-Wave scope rules are in the
+  [`zwave.json`](#zwavejson) section.
+- JSON has no comments. Validate the file before deploying it; an invalid file
+  silently falls back to the embedded copy and only logs a warning.
+- Prefer a small, targeted override next to the executable or in `site/` over
+  editing the bundled file in a release directory.
+- If you change a definition that the UI previews, reload the page. Native UIs
+  need a restart.
+
+## `zigbee.json`
+
+The bundled file describes the Ember EZSP serial stack and the ZCL application
+layer used by the ZigBee builder and decoder.
+
+```json
+{
+  "version": 1,
+  "protocol": "zigbee",
+  "stack": "ezsp",
+  "commands": [],
+  "generalCommands": [],
+  "zclFrame": {},
+  "clusters": []
+}
+```
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `version` | integer | Catalog version. |
+| `protocol` | string | Must be `zigbee`. |
+| `stack` | string | Must be `ezsp`. |
+| `commands` | array | EZSP commands, request/response field layouts, summaries, and builder metadata. |
+| `generalCommands` | array | General ZCL commands, their direction, and descriptions. |
+| `zclFrame` | object | ZCL frame-control bits, manufacturer-code width, and endianness. |
+| `clusters` | array | ZCL cluster names, commands, attributes, and attribute data types. |
+
+EZSP fields use the same `fields`/`responseFields`, `LayoutField`, and `FieldDef`
+shape as `zwave.json`. Multi-byte EZSP and ZCL fields set `"endian": "little"`.
+The gateway strips ASH framing; the decoder recognizes raw ASH link frames
+(ACK/NAK/RST/RSTACK/ERROR) by their trailing flag, CRC, control type, and length
+before falling back to EZSP.
+
+Common EZSP command keys:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `description` | string, optional | One-line explanation shown below the command in the builder and filter editors. |
+| `priority` | integer | Operation-picker sort order; lower values appear first. |
+| `defaultOperation` | boolean | Selected when the send-message dialog opens for ZigBee. |
+| `emphasize` | boolean | Highlight the command in the Operation picker. |
+| `incomingOnly` | boolean | Decoded but not offered as an outgoing builder operation. |
+| `noRequestParameters` | boolean | The command has no request parameters. |
+| `fields`, `responseFields` | array | Request and response layouts. |
+| `requestSummary`, `responseSummary` | string, optional | Summary templates rendered from decoded fields. |
+
+General ZCL commands:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `id` | integer | ZCL general-command ID, `0`–`255`. |
+| `name` | string | Display name used by the decoder, builder, and filter. |
+| `description` | string, optional | Guidance shown when the command is selected. |
+| `direction` | string | `clientToServer`, `serverToClient`, or `both`. The UIs only offer commands that match the selected direction. |
+
+`zclFrame` controls how both UIs build and decode the ZCL header:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `frameTypeMask` | integer | Mask applied to frame control to read the frame type. |
+| `generalFrameType` | integer | Frame type for general commands. |
+| `clusterFrameType` | integer | Frame type for cluster-specific commands. |
+| `directionToClientBit` | integer | Frame-control bit for server-to-client direction. |
+| `disableDefaultResponseBit` | integer | Frame-control bit for disabling the default response. |
+| `manufacturerSpecificBit` | integer | Frame-control bit for a manufacturer-specific frame. |
+| `frameControlMask` | integer | Mask used when matching the frame control in filters. |
+| `manufacturerCodeLength` | integer | Width of the manufacturer code in bytes. |
+| `manufacturerCodeEndian` | string | `big` or `little`. |
+
+Semantic `role` values on EZSP fields drive the builder and decoder:
+
+| Role | Used for |
+| --- | --- |
+| `target` | Unicast destination NWK address. Enables the known-device picker. |
+| `broadcast` | Broadcast destination address. |
+| `source` | Sender NWK address in callbacks. |
+| `cluster` | ZCL cluster ID. |
+| `profile` | ZCL application profile ID. |
+| `group` | Multicast group ID. |
+| `sourceEndpoint`, `destinationEndpoint` | ZCL endpoints. |
+| `payload` | Nested ZCL frame. Also enables typed ZCL composition. |
+| `destinationType` | Enum that selects direct, binding, group, broadcast, or multicast delivery. The builder shows the known-device picker for the enum value with `"direct": true`. |
+| `length` | Length field used by the decoder. |
+
+Payload-filter slots are independent of `role` and let the filter editor use
+any field without command-ID switches:
+
+| `filterSlot` | Meaning |
+| --- | --- |
+| `network` | Network sender, destination, or broadcast address. |
+| `group` | Multicast group ID. |
+| `cluster` | ZCL cluster ID. |
+| `endpoint` | Source or destination endpoint. |
+| `payload` | ZCL message contents. |
+
+Fields without a dedicated semantic slot appear under **Other EZSP fields** in
+the filter, provided their frame offset is fixed. This includes fields such as
+`profileId`, `apsOptions`, `type`, and response status values.
+
+Unknown commands and clusters are shown as raw bytes with their command or
+cluster ID.
 
 ## `zwave.json`
 
 The bundled catalog is version 1 and currently describes 135 command classes
-with 377 commands, 141 Serial API commands, and 76 packed groups. Most common
+with 377 commands, 141 Serial API commands, and 59 packed groups. Most common
 commands have typed layouts; the remaining raw fields are documented fallbacks
 for variable-length lists and vendor-specific or union payloads.
 
@@ -181,10 +326,26 @@ SendData and SendDataMulti read TX options from the selected serial command's
 `AUTO_ROUTE`, `NO_ROUTE`, and `EXPLORE`; the default is ACK on. Broadcast keeps
 the fixed recommended options (ACK off, `NO_ROUTE` on).
 
+The Z-Wave payload filter derives frame labels and offsets from the serial
+command layouts in `zwave.json`. It uses field roles and kinds rather than fixed
+byte positions: `target`, `targets`, `source`, `length`, `commandClass`,
+`rxStatus`, and `txStatus`; plus `txOptions`, `callbackId`, and `nodeList` field
+kinds. Broadcast uses the `ZW_SendData` layout with the fixed broadcast node and
+TX options. Control-frame labels come from `controlFrames`.
+
+Command-class payloads also use typed fixed-width fields from `commandClasses`.
+The field editors are selected by kind: enums use a dropdown, flags use
+checkboxes, booleans use a checkbox, numbers use numeric inputs, and hex or text
+fields keep their respective editors. The raw command-data field becomes an
+extra tail for variable-length or vendor bytes when typed fields are enabled.
+Typed fields stop at the first variable-length field or packed group; the rest
+remains raw command data. Only checked fields participate in the match;
+unchecked fields are omitted from the generated condition. The node field offers
+known nodes from `entities.json` for the selected Z-Wave services.
+
 The per-send TTL is an **Override TTL** checkbox followed by the same
 integer-and-unit editor used by service parameters. Unchecked inherits the
-service's `outgoingMaxTTL`, then the protocol default (10 s); checked sends an
-explicit value.
+service's `outgoingMaxTTL` (10 s by default); `0 s` disables expiry.
 
 Fields referenced by `lengthFrom` or `countFrom` are computed from the data or
 node list and shown as read-only values. `derived` fields are emitted
@@ -230,10 +391,13 @@ The builder's **Command class** picker lists every class in `zwave.json`,
 including legacy classes with no commands, and filters by name or code. The
 **Command** picker lists that class's commands as a normal dropdown. Commands
 with field descriptors use typed controls; other commands accept optional raw
-parameter bytes after the command ID. The bundled catalog covers the known
-standard command-class ID range, including legacy Security Panel Mode, Security
-Panel Zone, and Security Panel Zone Sensor entries. Use **Raw command class
-bytes** for a class with no command definitions.
+parameter bytes after the command ID. When a class has no named commands, the
+builder shows a raw command-bytes field and adds the selected class byte
+automatically. The filter mirrors this with a numeric command ID and raw
+parameters. The bundled catalog covers the known standard command-class ID
+range, including legacy Security Panel Mode, Security Panel Zone, and Security
+Panel Zone Sensor entries. Use **Raw command class bytes** when the class ID
+itself is also arbitrary.
 
 ### Fields
 
@@ -256,14 +420,16 @@ Fields are shared by serial commands and command classes.
 | `label` | string | Label shown in the Parsed view. |
 | `kind` | string | Decoder type; see below. |
 | `description` | string, optional | Field explanation. |
+| `default` | string, optional | Initial builder value, parsed according to `kind`. |
 | `required` | boolean | Defaults to `true`. Missing required fields are reported as decode issues. |
 | `min`, `max` | integer, optional | Allowed range for numeric fields and builder inputs. |
-| `values` | array | `{ "value": number, "name": string, "length": number }` entries for enums and flags. `length` is optional and selects a field width. |
+| `values` | array | `{ "value": number, "name": string, "length": number, "direct": boolean }` entries for enums and flags. `length` is optional and selects a field width. `direct` marks the destination-type value that enables the known-device picker. |
 | `mask` | integer, optional | Mask applied before looking up an enum value, or within a packed group. |
 | `shift` | integer, optional | Right-shift applied after `mask` in a packed group. Defaults to `0`. |
 | `rawSuffix` | boolean | Append the raw byte to enum/flag labels. |
 | `unknown` | string, optional | Text used when an enum value is not known. |
-| `role` | string, optional | Semantic role: `value` (default), `length`, `target`, `targets`, `source`, or `commandClass`. |
+| `role` | string, optional | Semantic role: `value` (default), `length`, `target`, `targets`, `broadcast`, `source`, `commandClass`, `cluster`, `profile`, `group`, `sourceEndpoint`, `destinationEndpoint`, `payload`, `destinationType`, `rxStatus`, or `txStatus`. ZigBee uses the protocol-specific roles; Z-Wave uses the address, command-class, and status roles. |
+| `filterSlot` | string, optional | ZigBee payload-filter category: `network`, `group`, `cluster`, `endpoint`, or `payload`. |
 | `format` | string, optional | Display format: `default`, `hex`, `decimal`, `level`, `duration`, `meterRateScale`, or `txOptions`. |
 | `length` | integer, optional | Fixed byte length for variable-width fields such as `text` and `hex`. |
 | `lengthFrom` | string, optional | Take the byte length from an earlier numeric field. If the source is an enum with `length` metadata, use that mapped length. |
@@ -354,7 +520,7 @@ Rules:
 - The same group schema is used by `serialCommands` and `commandClasses`,
   including request, response, and callback layouts.
 
-Bundled packed groups (76 in the current catalog) cover Thermostat Setpoint,
+Bundled packed groups (59 in the current catalog) cover Thermostat Setpoint,
 Sensor Multilevel, Meter, Configuration Properties, Multi Channel
 endpoint/capability fields, Door Lock handles/conditions/options, Central Scene
 key attributes, Supervision session flags, and the Add/Remove/Node ID inclusion
@@ -407,15 +573,13 @@ The decoder is intentionally tolerant:
 This is why the catalog can cover a large ID set without every command needing a
 fully described layout.
 
----
-
 ## `entities.json`
 
 `entities.json` maps native service/device IDs to readable labels. The top level
 is intentionally protocol-neutral; other applications may add their own fields
 and preserve them.
 
-### Top level
+### Top-level shape
 
 ```json
 {
@@ -465,14 +629,26 @@ The `services` object uses one of two key forms:
 {
   "key:zwave/serial/COM3": {
     "devices": [
-      { "device_id": "controller", "service_id": 1 },
-      { "device_id": "hallway-dimmer", "service_id": 3 }
+      { "deviceId": "controller", "serviceId": 1 },
+      { "deviceId": "hallway-dimmer", "serviceId": 3 }
     ]
   },
   "alias:ZW": {
     "devices": [
-      { "device_id": "controller", "service_id": 1 },
-      { "device_id": "office-lamp", "service_id": 2 }
+      { "deviceId": "controller", "serviceId": 1 },
+      { "deviceId": "office-lamp", "serviceId": 2 }
+    ]
+  },
+  "alias:ZB": {
+    "devices": [
+      { "deviceId": "controller", "serviceId": "0x0000", "endpoint": 1 },
+      {
+        "deviceId": "office-lamp",
+        "serviceId": "0x1234",
+        "eui64": "00124b000f123456",
+        "endpoint": 1,
+        "profile": 260
+      }
     ]
   }
 }
@@ -489,9 +665,15 @@ Each device mapping has:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `device_id` | string | Must match a device `id` in the top-level `devices` list. |
-| `service_id` | number or string | Native ID inside the service. Z-Wave uses numeric node IDs; other protocols may use text. |
+| `deviceId` | string | Must match a device `id` in the top-level `devices` list. |
+| `serviceId` | number or string | Native ID inside the service. Z-Wave uses numeric node IDs; ZigBee accepts a 16-bit NWK address as a number or as `0x1234`. |
+| `eui64` | string, optional | Stable ZigBee EUI-64 identity. Survives NWK-address changes; informational in the current UI. |
+| `endpoint` | number, optional | ZigBee application endpoint on the mapped node. Used by the builder device picker. |
+| `profile` | number, optional | ZigBee application profile for an endpoint-specific mapping. |
 | other keys | any | Preserved. |
+
+The legacy `device_id` and `service_id` spellings are still accepted as aliases, but
+new files should use `deviceId` and `serviceId`.
 
 ### Resolution order
 
@@ -505,14 +687,46 @@ the protocol/transport/entry identity stays the same. If the composite key has
 no entry, the alias key is used.
 
 Numeric service IDs in the range `0..=255` also work as Z-Wave node IDs in the
-builder's node picker and message views. Unknown IDs fall back to the raw node
-number; they are never invented as labels.
+builder's node picker and message views. For ZigBee, a 16-bit NWK address in
+`serviceId` maps the device into the builder's device picker and the parsed
+message view. Unknown IDs fall back to the raw address; they are never invented
+as labels.
+
+NWK addresses are assigned by the network and can change after a device rejoins.
+Prefer recording `eui64` when you need an identity that survives rejoining, and
+treat `serviceId` as the current network address.
 
 ### Editing tips
 
 - Keep device IDs stable; they are join keys, not display text.
 - Prefer composite service keys for mappings that should survive alias renames.
-- Duplicate `device_id` values in `devices` are not expected; keep them unique.
+- Duplicate `deviceId` values in `devices` are not expected; keep them unique.
 - The bundled file is demo/fixture data. A real deployment can replace it next
   to the executable or in the web bundle.
 - Invalid JSON keeps the embedded catalog active.
+
+## Editing safely
+
+Before deploying an edited file:
+
+1. **Validate the JSON.** A trailing comma or missing brace makes the whole file
+   fall back to the embedded copy.
+2. **Check the protocol key.** `zwave.json` must say `zwave`; `zigbee.json` must
+   say `zigbee` with `stack: ezsp`.
+3. **Check IDs and references.** Command IDs are scoped to their array, and
+   `lengthFrom`/`countFrom` must name an earlier field in the same layout.
+4. **Reload or restart the UI.** Web builds pick up the file on reload; native
+   builds need a restart.
+5. **Verify in the builder and the Messages view.** Open the command you changed
+   and decode a frame, rather than assuming the new layout is correct.
+6. **Keep a copy of the previous file.** If something looks wrong, restoring the
+   old version is faster than debugging a fallback.
+
+If a file is invalid, hodeco keeps the embedded catalog for that file and logs a
+warning. The gateway itself keeps running.
+
+## Related pages
+
+- [Configuration](Configuration) — service entries and the `files` paths.
+- [Tasks](Tasks) — message triggers and payload conditions.
+- [Development](Development) — the codec crates and build checks.

@@ -75,7 +75,13 @@ async fn reconcile(state: &AppState, cursors: &mut BTreeMap<(String, String), Tr
         default_timezone: snapshot
             .timezone
             .as_deref()
-            .and_then(|timezone| timezone.parse().ok()),
+            .and_then(|timezone| timezone.parse().ok())
+            .or_else(|| {
+                state
+                    .system_timezone
+                    .as_deref()
+                    .and_then(|timezone| timezone.parse().ok())
+            }),
     };
     let now = Utc::now();
     let mut active = BTreeSet::new();

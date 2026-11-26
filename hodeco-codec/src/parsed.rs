@@ -29,6 +29,9 @@ pub enum FrameKind {
     Ack,
     Nak,
     Can,
+    Reset,
+    ResetAck,
+    Error,
     Unknown,
 }
 

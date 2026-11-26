@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::de;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -22,6 +22,11 @@ pub const DEFAULT_HISTORY_ROWS: u32 = 0;
 
 /// Upper bound for a task's optional start delay and its jitter.
 pub const MAX_TASK_START_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Maximum number of labels a task may carry.
+pub const MAX_TASK_LABELS: usize = 32;
+/// Maximum length of a single task label, in characters.
+pub const MAX_TASK_LABEL_LEN: usize = 32;
 
 pub fn default_run_timeout() -> HumanDuration {
     HumanDuration::from_std(DEFAULT_RUN_TIMEOUT)
@@ -53,6 +58,8 @@ pub struct TaskDefinition {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     pub enabled: bool,
     pub fail_fast: bool,
     pub run_timeout: HumanDuration,
@@ -73,6 +80,7 @@ impl Default for TaskDefinition {
             id: String::new(),
             name: String::new(),
             description: String::new(),
+            labels: Vec::new(),
             enabled: true,
             fail_fast: true,
             run_timeout: default_run_timeout(),
@@ -88,6 +96,15 @@ impl Default for TaskDefinition {
 }
 
 impl TaskDefinition {
+    /// Trims and sorts labels in place. Callers should validate afterwards so
+    /// empty labels are rejected rather than silently dropped.
+    pub fn normalize_labels(&mut self) {
+        for label in &mut self.labels {
+            *label = label.trim().to_string();
+        }
+        self.labels.sort_by_key(|label| label.to_lowercase());
+    }
+
     pub fn trigger(&self, id: &str) -> Option<&TaskTrigger> {
         self.triggers.iter().find(|trigger| trigger.id() == id)
     }
@@ -112,6 +129,39 @@ impl TaskDefinition {
             _ => None,
         })
     }
+}
+
+/// Validates task labels after [`TaskDefinition::normalize_labels`] has run.
+///
+/// Labels are a case-insensitive set within a task. They are shared across
+/// tasks, so there is no global uniqueness rule.
+pub fn validate_task_labels(labels: &[String]) -> Result<(), String> {
+    if labels.len() > MAX_TASK_LABELS {
+        return Err(format!("a task can have at most {MAX_TASK_LABELS} labels"));
+    }
+    let mut seen = BTreeSet::new();
+    for (index, label) in labels.iter().enumerate() {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(format!("label {} must not be empty", index + 1));
+        }
+        if label.chars().count() > MAX_TASK_LABEL_LEN {
+            return Err(format!(
+                "label '{label}' must be at most {MAX_TASK_LABEL_LEN} characters"
+            ));
+        }
+        if label.chars().any(char::is_control) {
+            return Err(format!(
+                "label '{label}' must not contain control characters"
+            ));
+        }
+        if !seen.insert(label.to_lowercase()) {
+            return Err(format!(
+                "duplicate label '{label}' (labels are case-insensitive)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +903,7 @@ mod tests {
 id: evening-lights
 name: Evening lights
 description: Turn on the porch lights
+labels: [automated, lighting]
 enabled: true
 failFast: true
 runTimeout: 10m
@@ -897,6 +948,7 @@ next:
 "#;
         let task: TaskDefinition = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(task.id, "evening-lights");
+        assert_eq!(task.labels, vec!["automated", "lighting"]);
         assert_eq!(
             task.delay,
             Some(HumanDuration::from_std(Duration::from_secs(5 * 60)))
@@ -924,6 +976,47 @@ next:
     fn task_history_is_disabled_by_default() {
         let task: TaskDefinition = serde_yaml_ng::from_str("id: quiet\nname: Quiet\n").unwrap();
         assert_eq!(task.history.max_rows, 0);
+        assert!(task.labels.is_empty());
+    }
+
+    #[test]
+    fn validates_and_normalizes_task_labels() {
+        let mut task = TaskDefinition {
+            labels: vec![
+                " automated ".to_string(),
+                "lighting".to_string(),
+                "Lighting".to_string(),
+            ],
+            ..TaskDefinition::default()
+        };
+        task.normalize_labels();
+        assert_eq!(task.labels[0], "automated");
+        let error = validate_task_labels(&task.labels).unwrap_err();
+        assert!(error.contains("duplicate label"), "{error}");
+
+        task.labels = vec![String::new()];
+        let error = validate_task_labels(&task.labels).unwrap_err();
+        assert!(error.contains("must not be empty"), "{error}");
+
+        task.labels = vec!["x".repeat(MAX_TASK_LABEL_LEN + 1)];
+        let error = validate_task_labels(&task.labels).unwrap_err();
+        assert!(error.contains("at most"), "{error}");
+
+        task.labels = (0..=MAX_TASK_LABELS)
+            .map(|index| format!("label-{index}"))
+            .collect();
+        let error = validate_task_labels(&task.labels).unwrap_err();
+        assert!(error.contains("at most"), "{error}");
+
+        task.labels = vec!["automated".to_string(), "lighting".to_string()];
+        validate_task_labels(&task.labels).unwrap();
+    }
+
+    #[test]
+    fn empty_labels_are_omitted_from_serialization() {
+        let task = TaskDefinition::default();
+        let value = serde_json::to_value(&task).unwrap();
+        assert!(value.get("labels").is_none());
     }
 
     #[test]

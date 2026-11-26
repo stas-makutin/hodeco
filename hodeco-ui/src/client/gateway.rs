@@ -662,6 +662,84 @@ mod tests {
     }
 
     #[test]
+    fn demo_gateway_reaches_ready_and_adds_services() {
+        use std::sync::Arc;
+
+        let now = Instant::now();
+        let wake: Wake = Arc::new(|| {});
+        let mut gateway = Gateway::new("", true);
+        gateway.start(now);
+        let mut events = Vec::new();
+        for step in 0..20 {
+            events.extend(gateway.poll(now + Duration::from_millis(step * 10), &wake));
+            if gateway.phase() == Phase::Ready {
+                break;
+            }
+        }
+        assert_eq!(gateway.phase(), Phase::Ready);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GatewayEvent::Synced))
+        );
+
+        gateway
+            .request(
+                RequestTag::ProtocolParams {
+                    protocol: "zigbee".to_string(),
+                    transport: "serial".to_string(),
+                },
+                Method::ProtocolsParams,
+                json!({"protocol": "zigbee", "transport": "serial"}),
+                now,
+            )
+            .unwrap();
+        let mut params = None;
+        for _ in 0..5 {
+            for event in gateway.poll(now + Duration::from_millis(100), &wake) {
+                if let GatewayEvent::Response { tag, result } = event
+                    && matches!(tag, RequestTag::ProtocolParams { .. })
+                {
+                    params = Some(result);
+                }
+            }
+        }
+        let params = params.expect("protocol params response");
+        assert!(
+            params["params"]
+                .as_array()
+                .is_some_and(|params| params.iter().any(|param| param["name"] == "baudRate"))
+        );
+
+        gateway
+            .request(
+                RequestTag::ServiceAdd,
+                Method::ServicesAdd,
+                json!({
+                    "alias": "ZB2",
+                    "protocol": "zigbee",
+                    "transport": "serial",
+                    "entry": "COM9",
+                }),
+                now,
+            )
+            .unwrap();
+        let mut added = None;
+        for _ in 0..5 {
+            for event in gateway.poll(now + Duration::from_millis(200), &wake) {
+                if let GatewayEvent::Response { tag, result } = event
+                    && tag == RequestTag::ServiceAdd
+                {
+                    added = Some(result);
+                }
+            }
+        }
+        let added = added.expect("service add response");
+        assert_eq!(added["service"]["alias"], "ZB2");
+        assert_eq!(added["service"]["protocol"], "zigbee");
+    }
+
+    #[test]
     fn backoff_is_bounded() {
         assert_eq!(backoff(0), Duration::from_millis(500));
         assert_eq!(backoff(1), Duration::from_secs(1));

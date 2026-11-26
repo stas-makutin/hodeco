@@ -12,7 +12,7 @@ pub struct Startup {
 impl Startup {
     pub fn native(endpoint: impl Into<String>, demo: bool) -> Result<Self, String> {
         let endpoint = endpoint::normalize(&endpoint.into())
-            .map_err(|error| format!("invalid --server endpoint: {error}"))?;
+            .map_err(|error| format!("invalid gateway endpoint: {error}"))?;
         Ok(Self { endpoint, demo })
     }
 }
@@ -32,14 +32,14 @@ USAGE:
     hodeco-ui [OPTIONS]
 
 OPTIONS:
-    --server <URL>    Gateway base URL or WebSocket URL
-                      (default: {DEFAULT_NATIVE_ENDPOINT})
-    --demo            Run with bundled fixture data; no network connection
-    -h, --help        Print this help
+    --gateway-url <URL>    Gateway base URL or WebSocket URL
+                           (default: {DEFAULT_NATIVE_ENDPOINT})
+    --demo                 Run with bundled fixture data; no network connection
+    -h, --help             Print this help
 
 Web:
-    ?server=<URL>     Override the gateway endpoint
-    ?demo=1           Run with bundled fixture data
+    ?gateway_url=<URL>     Override the gateway endpoint
+    ?demo=1                Run with bundled fixture data
 "
     )
 }
@@ -55,13 +55,16 @@ where
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
-            "--server" => {
+            "--gateway-url" | "--server" => {
                 endpoint = args
                     .next()
-                    .ok_or_else(|| "--server expects a URL".to_string())?;
+                    .ok_or_else(|| "--gateway-url expects a URL".to_string())?;
             }
             "--demo" => demo = true,
             "-h" | "--help" => return Ok(StartupAction::Help),
+            other if other.starts_with("--gateway-url=") => {
+                endpoint = other["--gateway-url=".len()..].to_string();
+            }
             other if other.starts_with("--server=") => {
                 endpoint = other["--server=".len()..].to_string();
             }
@@ -85,13 +88,17 @@ pub fn from_web_location(href: &str) -> Result<Startup, String> {
     };
     let mut endpoint = endpoint::web_default(location.scheme(), &host)
         .map_err(|error| format!("cannot derive a WebSocket endpoint: {error}"))?;
+    let mut gateway_override = None;
+    let mut legacy_override = None;
     let mut demo = false;
 
     for (key, value) in location.query_pairs() {
         match key.as_ref() {
+            "gateway_url" if !value.trim().is_empty() => {
+                gateway_override = Some(value.into_owned());
+            }
             "server" if !value.trim().is_empty() => {
-                endpoint = endpoint::web_override(&location, &value)
-                    .map_err(|error| format!("invalid ?server= endpoint: {error}"))?;
+                legacy_override = Some(value.into_owned());
             }
             "demo" => {
                 demo = value.is_empty()
@@ -102,6 +109,11 @@ pub fn from_web_location(href: &str) -> Result<Startup, String> {
             }
             _ => {}
         }
+    }
+
+    if let Some(value) = gateway_override.or(legacy_override) {
+        endpoint = endpoint::web_override(&location, &value)
+            .map_err(|error| format!("invalid ?gateway_url= endpoint: {error}"))?;
     }
 
     Ok(Startup { endpoint, demo })
@@ -130,12 +142,34 @@ mod tests {
             })
         );
 
-        let action = from_native_args(["--server", "http://127.0.0.1:9000", "--demo"]).unwrap();
+        let action =
+            from_native_args(["--gateway-url", "http://127.0.0.1:9000", "--demo"]).unwrap();
         assert_eq!(
             action,
             StartupAction::Run(Startup {
                 endpoint: "ws://127.0.0.1:9000/api/ws".to_string(),
                 demo: true,
+            })
+        );
+
+        let action = from_native_args(["--gateway-url=wss://example.com/api/ws"]).unwrap();
+        assert_eq!(
+            action,
+            StartupAction::Run(Startup {
+                endpoint: "wss://example.com/api/ws".to_string(),
+                demo: false,
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_legacy_server_flag() {
+        let action = from_native_args(["--server", "http://127.0.0.1:9000"]).unwrap();
+        assert_eq!(
+            action,
+            StartupAction::Run(Startup {
+                endpoint: "ws://127.0.0.1:9000/api/ws".to_string(),
+                demo: false,
             })
         );
 
@@ -152,6 +186,7 @@ mod tests {
     #[test]
     fn rejects_unknown_native_arguments() {
         assert!(from_native_args(["--wat"]).is_err());
+        assert!(from_native_args(["--gateway-url"]).is_err());
         assert!(from_native_args(["--server"]).is_err());
         assert_eq!(from_native_args(["--help"]).unwrap(), StartupAction::Help);
     }
@@ -163,14 +198,30 @@ mod tests {
         assert!(!startup.demo);
 
         let startup =
-            from_web_location("https://gateway.example/ui/?server=192.168.1.5:8180&demo=1")
+            from_web_location("https://gateway.example/ui/?gateway_url=192.168.1.5:8180&demo=1")
                 .unwrap();
         assert_eq!(startup.endpoint, "ws://192.168.1.5:8180/api/ws");
         assert!(startup.demo);
 
         let startup =
-            from_web_location("http://gateway.example/?server=%2Fprefix%2F&demo=true").unwrap();
+            from_web_location("http://gateway.example/?gateway_url=%2Fprefix%2F&demo=true")
+                .unwrap();
         assert_eq!(startup.endpoint, "ws://gateway.example/prefix/api/ws");
         assert!(startup.demo);
+    }
+
+    #[test]
+    fn accepts_legacy_server_query_key() {
+        let startup = from_web_location("https://gateway.example/?server=%2Fprefix%2F").unwrap();
+        assert_eq!(startup.endpoint, "wss://gateway.example/prefix/api/ws");
+    }
+
+    #[test]
+    fn canonical_gateway_url_wins_over_legacy_alias() {
+        let startup = from_web_location(
+            "https://gateway.example/?server=%2Flegacy%2F&gateway_url=%2Fcanonical%2F",
+        )
+        .unwrap();
+        assert_eq!(startup.endpoint, "wss://gateway.example/canonical/api/ws");
     }
 }

@@ -9,6 +9,7 @@ pub mod entities;
 pub mod filter;
 pub mod hex;
 pub mod parsed;
+pub mod zigbee;
 pub mod zwave;
 
 /// Maximum payload bytes decoded for compact summaries.

@@ -1,1 +1,1 @@
-hodeco is licensed under either the MIT license or the Apache License, Version 2.0, at your option. See the [releases](../releases) for published builds.
+hodeco is licensed under either the MIT license or the Apache License, Version 2.0, at your option. See the [releases](../releases) for published builds. The documentation source lives in [`wiki/`](../tree/HEAD/wiki).

@@ -35,6 +35,7 @@ rm -f "$dist"/*.d.ts
 cp "$root/index.html" "$dist/index.html"
 cp "$root/../hodeco-codec/data/zwave.json" "$dist/zwave.json"
 cp "$root/../hodeco-codec/data/entities.json" "$dist/entities.json"
+cp "$root/../hodeco-codec/data/zigbee.json" "$dist/zigbee.json"
 
 if [[ "$no_optimize" != true ]]; then
   wasm_opt_bin="${WASM_OPT:-wasm-opt}"

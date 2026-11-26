@@ -4,7 +4,7 @@ use crate::services::catalog;
 use hodeco_contract::config::{Config, ServicesFile};
 use hodeco_contract::domain::{
     ActionKind, CommandDefinition, DaySpec, MAX_TASK_START_DELAY, NextCondition,
-    ScheduleDefinition, ServiceRef, TaskDefinition, TaskTrigger,
+    ScheduleDefinition, ServiceRef, TaskDefinition, TaskTrigger, validate_task_labels,
 };
 use hodeco_contract::utils::{Size, is_valid_id};
 use std::collections::BTreeSet;
@@ -389,6 +389,9 @@ fn validate_task_at(
             "{prefix}.history.maxSize must be at least {}",
             MIN_TASK_HISTORY_SIZE
         ));
+    }
+    if let Err(error) = validate_task_labels(&task.labels) {
+        errors.push(format!("{prefix}.labels: {error}"));
     }
 
     let mut trigger_ids = BTreeSet::new();
@@ -947,6 +950,45 @@ mod automation_tests {
         let error = validate_bundle(&bundle).unwrap_err().to_string();
         assert!(error.contains("only one HTTP trigger"), "{error}");
         assert!(error.contains("only one command-result"), "{error}");
+    }
+
+    #[test]
+    fn validates_task_labels() {
+        let mut valid_bundle = bundle();
+        let mut valid_task = task("labeled");
+        valid_task.labels = vec!["automated".to_string(), "lighting".to_string()];
+        valid_bundle.tasks.tasks.push(valid_task);
+        validate_bundle(&valid_bundle).unwrap();
+
+        let mut duplicate_bundle = bundle();
+        let mut duplicate_task = task("labeled");
+        duplicate_task.labels = vec!["Automated".to_string(), "automated".to_string()];
+        duplicate_bundle.tasks.tasks.push(duplicate_task);
+        let error = validate_bundle(&duplicate_bundle).unwrap_err().to_string();
+        assert!(error.contains("duplicate label"), "{error}");
+
+        let mut empty_bundle = bundle();
+        let mut empty_task = task("labeled");
+        empty_task.labels = vec![String::new()];
+        empty_bundle.tasks.tasks.push(empty_task);
+        let error = validate_bundle(&empty_bundle).unwrap_err().to_string();
+        assert!(error.contains("must not be empty"), "{error}");
+
+        let mut long_bundle = bundle();
+        let mut long_task = task("labeled");
+        long_task.labels = vec!["x".repeat(hodeco_contract::domain::MAX_TASK_LABEL_LEN + 1)];
+        long_bundle.tasks.tasks.push(long_task);
+        let error = validate_bundle(&long_bundle).unwrap_err().to_string();
+        assert!(error.contains("at most"), "{error}");
+
+        let mut count_bundle = bundle();
+        let mut count_task = task("labeled");
+        count_task.labels = (0..=hodeco_contract::domain::MAX_TASK_LABELS)
+            .map(|index| format!("label-{index}"))
+            .collect();
+        count_bundle.tasks.tasks.push(count_task);
+        let error = validate_bundle(&count_bundle).unwrap_err().to_string();
+        assert!(error.contains("at most"), "{error}");
     }
 
     #[test]

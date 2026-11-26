@@ -85,8 +85,9 @@ pub fn web_default(protocol: &str, host: &str) -> Result<String, EndpointError> 
     normalize(&format!("{scheme}://{host}/api/ws"))
 }
 
-/// Resolves the `?server=` web override. A leading slash is treated as a path
-/// on the current origin; everything else is normalized as a full endpoint.
+/// Resolves the `?gateway_url=` web override (the legacy `?server=` key is
+/// handled by the caller). A leading slash is treated as a path on the current
+/// origin; everything else is normalized as a full endpoint.
 pub fn web_override(location: &Url, value: &str) -> Result<String, EndpointError> {
     let value = value.trim();
     if value.starts_with('/') {

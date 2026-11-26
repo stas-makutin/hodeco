@@ -107,7 +107,10 @@ pub fn load_bundle(path: &Path) -> Result<ConfigBundle, ConfigError> {
         .unwrap_or_else(|| Path::new("."));
 
     let services: ServicesFile = read_optional_yaml(&base.join(&config.files.services))?;
-    let tasks: TasksFile = read_optional_yaml(&base.join(&config.files.tasks))?;
+    let mut tasks: TasksFile = read_optional_yaml(&base.join(&config.files.tasks))?;
+    for task in &mut tasks.tasks {
+        task.normalize_labels();
+    }
     let schedules: SchedulesFile = read_optional_yaml(&base.join(&config.files.schedules))?;
     let commands: CommandsFile = read_optional_yaml(&base.join(&config.files.commands))?;
 
@@ -494,7 +497,7 @@ messageLog:
         .unwrap();
         std::fs::write(
             dir.join("tasks.yaml"),
-            "tasks:\n  - id: test\n    name: Test\n    actions:\n      - id: poll\n        command: meter\n",
+            "tasks:\n  - id: test\n    name: Test\n    labels: [\" automated \", lighting]\n    actions:\n      - id: poll\n        command: meter\n",
         )
         .unwrap();
 
@@ -503,6 +506,10 @@ messageLog:
         assert_eq!(bundle.commands.commands.len(), 1);
         assert_eq!(bundle.schedules.schedules.len(), 1);
         assert_eq!(bundle.tasks.tasks.len(), 1);
+        assert_eq!(
+            bundle.tasks.tasks[0].labels,
+            vec!["automated".to_string(), "lighting".to_string()]
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

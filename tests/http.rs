@@ -522,6 +522,50 @@ async fn read_only_methods_return_expected_shapes() {
 }
 
 #[tokio::test]
+async fn exposes_zigbee_protocol_defaults() {
+    let (state, _cancel) = app(Config::default());
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(r#"{"id":"1","method":"protocols.info","params":{"protocol":"zigbee"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value = body_json(&body);
+    assert_eq!(value["result"]["protocol"]["id"], "zigbee");
+    assert_eq!(
+        value["result"]["protocol"]["description"],
+        "Ember EZSP serial frame relay"
+    );
+    assert_eq!(value["result"]["protocol"]["transports"], json!(["serial"]));
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"2","method":"protocols.params","params":{"protocol":"zigbee","transport":"serial"}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let params = body_json(&body)["result"]["params"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        params
+            .iter()
+            .any(|param| { param["name"] == "baudRate" && param["default"] == json!(57_600) })
+    );
+    assert!(
+        params
+            .iter()
+            .any(|param| { param["name"] == "flowControl" && param["default"] == json!("none") })
+    );
+    assert!(params.iter().any(|param| param["name"] == "ashAckTimeout"));
+    assert!(params.iter().any(|param| param["name"] == "ashMaxRetries"));
+}
+
+#[tokio::test]
 async fn serves_static_assets_spa_fallback_and_gzip() {
     let site = tempfile::tempdir().unwrap();
     std::fs::write(site.path().join("index.html"), "<html>index</html>").unwrap();
@@ -1393,6 +1437,65 @@ async fn task_crud_fire_and_history_round_trip() {
         send(&state, rpc_request(r#"{"id":"8","method":"tasks.list"}"#)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body_json(&body)["result"]["tasks"], json!([]));
+}
+
+#[tokio::test]
+async fn task_labels_round_trip_and_validate() {
+    let (state, _cancel) = app(Config::default());
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"1","method":"tasks.add","params":{"task":{"id":"labeled","name":"Labeled","labels":[" automated ","Lighting"]}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(
+        body["result"]["task"]["task"]["labels"],
+        json!(["automated", "Lighting"])
+    );
+
+    let (status, _headers, body) =
+        send(&state, rpc_request(r#"{"id":"2","method":"tasks.list"}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(
+        body["result"]["tasks"][0]["task"]["labels"],
+        json!(["automated", "Lighting"])
+    );
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"3","method":"tasks.update","params":{"taskId":"labeled","task":{"id":"labeled","name":"Labeled","labels":["n8n"]}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert!(body["error"].is_null(), "{body}");
+    assert_eq!(body["result"]["task"]["task"]["labels"], json!(["n8n"]));
+
+    let (status, _headers, body) = send(
+        &state,
+        rpc_request(
+            r#"{"id":"4","method":"tasks.update","params":{"taskId":"labeled","task":{"id":"labeled","name":"Labeled","labels":["Automated","automated"]}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&body);
+    assert_eq!(body["error"]["code"], "configInvalid");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("duplicate label")),
+        "{body}"
+    );
 }
 
 #[tokio::test]

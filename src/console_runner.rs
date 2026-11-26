@@ -4,8 +4,7 @@ use crate::utils::timestamp;
 use tokio_util::sync::CancellationToken;
 
 pub fn run() -> bool {
-    service_main::service_main(console_log, CancellationToken::new());
-    true
+    service_main::service_main(console_log, CancellationToken::new())
 }
 
 fn console_log(level: ServiceLogLevel, message: &str) {

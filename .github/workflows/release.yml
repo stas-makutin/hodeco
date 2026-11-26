@@ -412,10 +412,18 @@ jobs:
           set -euo pipefail
           rm -rf pkgroot
           mkdir -p \
+            pkgroot/etc/hodeco \
             pkgroot/usr/bin \
+            pkgroot/usr/lib/systemd/system \
+            pkgroot/usr/lib/sysusers.d \
             pkgroot/usr/share/hodeco/site \
             pkgroot/usr/share/doc/hodeco
           install -m 0755 "target/${TARGET}/release/hodeco" pkgroot/usr/bin/hodeco
+          install -m 0644 packaging/config.yaml pkgroot/etc/hodeco/config.yaml
+          install -m 0644 packaging/hodeco.service \
+            pkgroot/usr/lib/systemd/system/hodeco.service
+          install -m 0644 packaging/hodeco.sysusers.conf \
+            pkgroot/usr/lib/sysusers.d/hodeco.conf
           cp -a hodeco-ui/dist/. pkgroot/usr/share/hodeco/site/
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md \
             pkgroot/usr/share/doc/hodeco/

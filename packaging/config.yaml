@@ -1,0 +1,25 @@
+# Default configuration installed by the hodeco .deb and .rpm packages.
+#
+# The package keeps this file in /etc/hodeco as a configuration file, so local
+# edits survive upgrades. The service account can write the file and the
+# sibling catalog files because /etc/hodeco is group-writable by "hodeco".
+workingDir: /var/lib/hodeco
+
+log:
+  dir: /var/log/hodeco
+  file: hodeco.log
+  dirMode: "0750"
+  fileMode: "0640"
+  archive: zip
+
+httpServer:
+  static:
+    dir: /usr/share/hodeco/site
+
+messageLog:
+  file: /var/lib/hodeco/messages.log
+  fileMode: "0640"
+
+taskLog:
+  dir: tasks
+  fileMode: "0640"

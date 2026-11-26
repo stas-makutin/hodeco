@@ -514,12 +514,8 @@ fn editor_modal(app: &mut App, ui: &mut Ui) {
                         ui.label(task);
                     }
                 }
-                if let Some(error) = &editor.error {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(error).color(palette.red));
-                }
             });
-            widgets::dialog_footer(ui, |ui| {
+            widgets::dialog_footer(ui, theme, editor.error.as_deref(), |ui| {
                 if ui.button("Cancel").clicked() {
                     close = true;
                 }

@@ -386,7 +386,7 @@ impl eframe::App for Gallery {
                             );
                         }
                     });
-                    widgets::dialog_footer(ui, |ui| {
+                    widgets::dialog_footer(ui, theme, None, |ui| {
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
