@@ -151,7 +151,7 @@ was written.
 
 ## Project status
 
-The project is pre-1.0 (`0.3.1`). The protocol version is independent of the
+The project is pre-1.0 (`0.3.2`). The protocol version is independent of the
 crate version and is currently `1.0`. Z-Wave and ZigBee EZSP over serial are
 supported today. New protocols are added behind the same shared contract, so the
 API shape stays consistent as support grows.

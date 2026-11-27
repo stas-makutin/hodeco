@@ -38,7 +38,7 @@ A successful response looks like:
 {
   "id": "1",
   "result": {
-    "version": "0.3.1",
+    "version": "0.3.2",
     "protocolVersion": "1.0",
     "startedAt": "2026-01-01T12:00:00Z"
   }

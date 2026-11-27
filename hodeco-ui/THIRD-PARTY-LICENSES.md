@@ -4596,10 +4596,10 @@ SOFTWARE.
 
 Used by:
 
-- hodeco-codec 0.3.1
-- hodeco-contract 0.3.1
-- hodeco-schedule 0.3.1
-- hodeco-ui 0.3.1
+- hodeco-codec 0.3.2
+- hodeco-contract 0.3.2
+- hodeco-schedule 0.3.2
+- hodeco-ui 0.3.2
 - accesskit 0.25.2 ([source](https://github.com/AccessKit/accesskit))
 - block2 0.5.1 ([source](https://github.com/madsmtm/objc2))
 - block2 0.6.2 ([source](https://github.com/madsmtm/objc2))

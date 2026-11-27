@@ -2821,7 +2821,7 @@ SOFTWARE.
 
 Used by:
 
-- hodeco 0.3.1
+- hodeco 0.3.2
 
 ```
 MIT License
@@ -2852,9 +2852,9 @@ SOFTWARE.
 
 Used by:
 
-- hodeco-codec 0.3.1
-- hodeco-contract 0.3.1
-- hodeco-schedule 0.3.1
+- hodeco-codec 0.3.2
+- hodeco-contract 0.3.2
+- hodeco-schedule 0.3.2
 - chrono-tz 0.10.4 ([source](https://github.com/chronotope/chrono-tz))
 - chrono 0.4.45 ([source](https://github.com/chronotope/chrono))
 - windows-core 0.58.0 ([source](https://github.com/microsoft/windows-rs))
