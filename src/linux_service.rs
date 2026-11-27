@@ -2,7 +2,7 @@ use super::ServiceManager as ServiceManagerTrait;
 use crate::command_line::ServiceOptions;
 use crate::config;
 use crate::logging::ServiceLogLevel;
-use crate::service_main;
+use crate::service_main::{self, ServiceOutcome};
 use crate::utils::timestamp;
 use std::env;
 use std::fs;
@@ -23,6 +23,8 @@ const SYSTEMD_RUNNING_STATE: &str = "active";
 const SYSTEMD_STOPPED_STATE: &str = "inactive";
 const SERVICE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Non-zero exit that makes a `Restart=on-failure` unit start the process again.
+const RESTART_EXIT_CODE: i32 = 75;
 
 #[derive(Clone, Copy)]
 enum InitSystem {
@@ -46,8 +48,10 @@ pub fn run_as_service() -> bool {
         return false;
     }
 
-    if !service_main::service_main(service_log, CancellationToken::new()) {
-        std::process::exit(1);
+    match service_main::service_main(service_log, CancellationToken::new()) {
+        ServiceOutcome::Stopped => {}
+        ServiceOutcome::Restarting => std::process::exit(RESTART_EXIT_CODE),
+        ServiceOutcome::Failed => std::process::exit(1),
     }
     true
 }

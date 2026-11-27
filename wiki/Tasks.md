@@ -327,6 +327,11 @@ oldest run is evicted when either limit is exceeded. Feed rows are full run
 records, so `tasks.getRun` can resolve recent detail without reading a history
 file. The feed clears on restart.
 
+The per-task History view asks `tasks.history` to merge matching feed rows with
+`includeFeed: true`. Duplicate run IDs are returned once, so recent runs appear
+even when the task has no history file. Those feed rows still disappear on
+restart unless the task writes them to a history file.
+
 Task history is separate and opt-in. Set `history.maxRows` greater than zero to
 enable it; `maxSize` must then be at least 1 KiB. Enabling it from the task
 editor starts with 200 rows / 100 KiB; existing tasks keep their configured
@@ -351,9 +356,11 @@ history is disabled.
 complete `next` bound pair. It has no manual page count.
 
 `tasks.history` reads history files and uses the same paging semantics. It
-supports task, trigger, trigger type, outcome, time, and order filters. The
-full-page history view exposes trigger type, outcome, and period filters through
-these request fields rather than filtering a local copy of the file.
+supports task, trigger, trigger type, outcome, time, and order filters. With
+`includeFeed: true`, matching rows from the live feed are merged in and
+deduplicated by run ID before paging. The full-page history view sets this flag
+and exposes trigger type, outcome, and period filters through these request
+fields rather than filtering a local copy of the file.
 
 `tasks.get` returns one task and its runtime status, including `runningRunId`
 while a run is active. `tasks.getRun` checks the feed first, then the task's
@@ -435,13 +442,14 @@ and **Esc** or **Close** clears it. With a running row selected, Tab moves focus
 to that row's **Cancel** action. Running detail also offers **Cancel run**.
 
 The task row's **History** action opens a full-page per-task history backed by
-`tasks.history`. It uses the same 50-row window, chronology, keyboard
-navigation, selection, and bottom autoscroll as Runs. Trigger type, outcome, and
-period filters are sent to `tasks.history`; history rows are never loaded
-wholesale to filter them in the UI. Selecting a row fetches the full run with
-`tasks.getRun` and shows it in the bottom detail pane. Run details are grouped
-into General, Trigger, Actions, Selector, Next tasks, Error, and Raw JSON
-sections; all sections are collapsible.
+`tasks.history` with `includeFeed: true`, so recent in-memory runs are visible
+even when the task has no persistent history. It uses the same 50-row window,
+chronology, keyboard navigation, selection, and bottom autoscroll as Runs.
+Trigger type, outcome, and period filters are sent to `tasks.history`; history
+rows are never loaded wholesale to filter them in the UI. Selecting a row fetches
+the full run with `tasks.getRun` and shows it in the bottom detail pane. Run
+details are grouped into General, Trigger, Actions, Selector, Next tasks, Error,
+and Raw JSON sections; all sections are collapsible.
 
 ### From a file or the API
 

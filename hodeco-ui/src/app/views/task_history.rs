@@ -111,6 +111,7 @@ fn page_params(dialog: &TaskHistoryUi, kind: RunPageKind) -> TasksHistoryParams 
         until,
         order,
         limit: Some(PAGE_LIMIT),
+        include_feed: true,
         ..Default::default()
     }
 }
@@ -397,7 +398,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                 } else {
                     ui.label(
                         RichText::new(
-                            "No persistent run history. Enable history for this task or use the Runs tab for recent runs.",
+                            "No run history. Recent completed runs appear here until the gateway restarts; enable history for this task to keep runs.",
                         )
                         .color(palette.muted),
                     );
@@ -657,5 +658,6 @@ mod tests {
         assert_eq!(params.outcomes, vec![RunOutcome::Failed]);
         assert!(params.from.is_some());
         assert!(params.until.is_none());
+        assert!(params.include_feed);
     }
 }

@@ -660,6 +660,42 @@ mod tests {
     }
 
     #[test]
+    fn size_fields_use_literal_byte_counts() {
+        let definitions = bundled();
+        for (class, command_id) in [
+            (0x31, 0x05),
+            (0x32, 0x02),
+            (0x43, 0x01),
+            (0x43, 0x03),
+            (0x64, 0x01),
+            (0x64, 0x03),
+            (0x70, 0x04),
+            (0x70, 0x06),
+            (0x70, 0x07),
+            (0x70, 0x09),
+            (0x70, 0x0F),
+        ] {
+            let command = definitions.command(class, command_id).unwrap();
+            let size = command
+                .fields
+                .iter()
+                .flat_map(LayoutField::fields)
+                .find(|field| field.name == "size")
+                .unwrap_or_else(|| panic!("0x{class:02x}/0x{command_id:02x} has no size field"));
+            let mapped = size
+                .values
+                .iter()
+                .filter_map(|value| value.length.map(|length| (value.value, length)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                mapped,
+                vec![(1, 1), (2, 2), (4, 4)],
+                "0x{class:02x}/0x{command_id:02x} size field"
+            );
+        }
+    }
+
+    #[test]
     fn serial_field_references_resolve() {
         let definitions = bundled();
         for command in &definitions.serial_commands {
@@ -878,10 +914,16 @@ mod tests {
                     .strip_prefix("0x")
                     .and_then(|text| u8::from_str_radix(text, 16).ok())
                     .or_else(|| default.parse::<u8>().ok());
+                let is_flags = matches!(field.kind, FieldType::Flags | FieldType::TxOptions);
+                let known_bits = field
+                    .values
+                    .iter()
+                    .fold(0u8, |mask, value| mask | value.value);
                 assert!(
                     field.values.iter().any(|value| value.name == default)
                         || number.is_some_and(|number| {
                             field.values.iter().any(|value| value.value == number)
+                                || (is_flags && number & !known_bits == 0)
                         }),
                     "{context}: field {} default '{default}' is not one of its values",
                     field.name

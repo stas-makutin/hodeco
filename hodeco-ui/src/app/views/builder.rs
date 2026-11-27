@@ -963,10 +963,29 @@ impl BuilderDialog {
     }
 
     fn tx_options(&self) -> u8 {
-        self.serial_fields
+        if let Some(value) = self
+            .serial_fields
             .get("txOptions")
             .and_then(|state| match state {
                 SerialFieldState::Flags(value) => Some(*value),
+                _ => None,
+            })
+        {
+            return value;
+        }
+        let definitions = definitions::current();
+        self.operation
+            .serial_command_id()
+            .and_then(|id| definitions.serial_command(id))
+            .and_then(|command| {
+                command
+                    .fields
+                    .iter()
+                    .flat_map(LayoutField::fields)
+                    .find(|field| field.kind == FieldType::TxOptions)
+            })
+            .and_then(|field| match default_serial_state(field) {
+                SerialFieldState::Flags(value) => Some(value),
                 _ => None,
             })
             .unwrap_or(codec::TX_OPTION_ACK)
@@ -3432,7 +3451,13 @@ mod tests {
         assert_eq!(dialog.command_bytes().unwrap(), vec![0x2A, 0x01, 0x1e]);
         assert_eq!(
             dialog.build().unwrap(),
-            codec::build_send_data(2, &[0x2A, 0x01, 0x1e], codec::TX_OPTION_ACK, 1).unwrap()
+            codec::build_send_data(
+                2,
+                &[0x2A, 0x01, 0x1e],
+                codec::TX_OPTION_ACK | codec::TX_OPTION_AUTO_ROUTE,
+                1
+            )
+            .unwrap()
         );
     }
 
@@ -3584,7 +3609,7 @@ mod tests {
         let command = definitions.serial_command(0x14).unwrap();
         assert_eq!(
             encode_serial_fields(command, &dialog.serial_fields).unwrap(),
-            [0x02, 0x02, 0x03, 0x03, 0x20, 0x01, 0xff, 0x01, 0x01]
+            [0x02, 0x02, 0x03, 0x03, 0x20, 0x01, 0xff, 0x05, 0x01]
         );
     }
 
@@ -3671,7 +3696,10 @@ mod tests {
     #[test]
     fn send_data_tx_options_come_from_the_serial_state() {
         let mut dialog = serial_dialog(0x13);
-        assert_eq!(dialog.tx_options(), codec::TX_OPTION_ACK);
+        assert_eq!(
+            dialog.tx_options(),
+            codec::TX_OPTION_ACK | codec::TX_OPTION_AUTO_ROUTE
+        );
 
         dialog.serial_fields.insert(
             "txOptions".to_string(),
@@ -3745,26 +3773,26 @@ mod tests {
             .insert("setpointType".to_string(), SerialFieldState::Enum(1));
         dialog
             .serial_fields
-            .insert("size".to_string(), SerialFieldState::Enum(0));
+            .insert("size".to_string(), SerialFieldState::Enum(1));
         dialog.serial_fields.insert(
             "value".to_string(),
             SerialFieldState::Text("21".to_string()),
         );
         assert_eq!(
             dialog.command_bytes().unwrap(),
-            vec![0x43, 0x01, 0x01, 0x00, 0x15]
+            vec![0x43, 0x01, 0x01, 0x01, 0x15]
         );
 
         dialog
             .serial_fields
-            .insert("size".to_string(), SerialFieldState::Enum(1));
+            .insert("size".to_string(), SerialFieldState::Enum(2));
         dialog.serial_fields.insert(
             "value".to_string(),
             SerialFieldState::Text("-5".to_string()),
         );
         assert_eq!(
             dialog.command_bytes().unwrap(),
-            vec![0x43, 0x01, 0x01, 0x01, 0xff, 0xfb]
+            vec![0x43, 0x01, 0x01, 0x02, 0xff, 0xfb]
         );
     }
 

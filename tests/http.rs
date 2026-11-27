@@ -118,6 +118,7 @@ fn app_with_state_in(
         resync,
         cancel: cancel.clone(),
         shutting_down: Arc::new(AtomicBool::new(false)),
+        restart_requested: Arc::new(AtomicBool::new(false)),
         ws_limits: Arc::new(tokio::sync::Semaphore::new(ws_limit)),
         started_at: Utc::now(),
         system_timezone: None,
@@ -188,6 +189,17 @@ async fn health_reports_ok() {
     let (status, _headers, body) = send(&state, request).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body_json(&body), json!({"status": "ok"}));
+}
+
+#[tokio::test]
+async fn system_restart_marks_a_restart_and_stops_the_runtime() {
+    let (state, cancel) = app(Config::default());
+    let result = rpc_json(&state, "system.restart", json!({})).await;
+    assert_eq!(result, json!({}));
+    tokio::time::timeout(Duration::from_secs(1), cancel.cancelled())
+        .await
+        .expect("restart should cancel the runtime");
+    assert!(state.restart_requested.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
@@ -1004,6 +1016,7 @@ async fn rolls_back_service_add_when_config_write_fails() {
 async fn serves_http_and_websocket_connections() {
     let port = free_port();
     let mut config = Config::default();
+    config.http_server.bind = "127.0.0.1".to_string();
     config.http_server.port = port;
     let (state, _cancel) = app(config);
     let cancel = CancellationToken::new();
@@ -1051,6 +1064,7 @@ async fn serves_http_and_websocket_connections() {
 async fn rejects_websocket_connections_over_the_limit() {
     let port = free_port();
     let mut config = Config::default();
+    config.http_server.bind = "127.0.0.1".to_string();
     config.http_server.port = port;
     config.http_server.max_connections = 1;
     let (state, _cancel) = app(config);
@@ -1173,13 +1187,14 @@ async fn enforces_the_idle_timeout_on_keep_alive_connections() {
 }
 
 fn start_http_server(
-    config: Config,
+    mut config: Config,
 ) -> (
     String,
     CancellationToken,
     tokio::task::JoinHandle<Result<(), hodeco::app::AppError>>,
 ) {
     let port = config.http_server.port;
+    config.http_server.bind = "127.0.0.1".to_string();
     let (state, _cancel) = app(config);
     let cancel = CancellationToken::new();
     let server = tokio::spawn(hodeco::http::serve(state, cancel.clone()));
@@ -2320,6 +2335,19 @@ async fn task_history_can_be_disabled_with_max_rows_zero() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body_json(&body)["result"]["runs"], json!([]));
 
+    let live = rpc_json(
+        &state,
+        "tasks.history",
+        json!({ "taskIds": ["no-history"], "includeFeed": true }),
+    )
+    .await;
+    assert_eq!(
+        live["runs"].as_array().map(Vec::len),
+        Some(1),
+        "recent in-memory run should be visible: {live}"
+    );
+    assert_eq!(live["runs"][0]["taskId"], "no-history", "{live}");
+
     let (status, _headers, body) =
         send(&state, rpc_request(r#"{"id":"4","method":"tasks.list"}"#)).await;
     assert_eq!(status, StatusCode::OK);
@@ -2576,6 +2604,19 @@ async fn only_persistent_history_survives_restart() {
         .find(|run| run["taskId"] == "file-task")
         .unwrap()["id"]
         .clone();
+
+    let live_memory = rpc_json(
+        &state,
+        "tasks.history",
+        json!({ "taskIds": ["memory-task"], "includeFeed": true }),
+    )
+    .await;
+    assert_eq!(
+        live_memory["runs"].as_array().map(Vec::len),
+        Some(1),
+        "{live_memory}"
+    );
+    assert_eq!(live_memory["runs"][0]["id"], memory_run, "{live_memory}");
 
     for _ in 0..80 {
         let history = rpc_json(&state, "tasks.history", json!({ "taskIds": ["file-task"] })).await;

@@ -15,8 +15,10 @@ and to stay out of the way: one binary, a small set of YAML files, no external
 database, no cloud account.
 
 > **Trusted networks only.** Authentication and TLS are not implemented, and the
-> default bind address is `127.0.0.1`. If you expose it beyond your LAN, put it
-> behind a reverse proxy that provides both.
+> default bind address is `0.0.0.0`, so the UI and API listen on every network
+> interface. Set `httpServer.bind` to `127.0.0.1` to restrict access to the local
+> host. If you expose it beyond your LAN, put it behind a reverse proxy that
+> provides both.
 
 **On this page:** [What hodeco does](#what-hodeco-does) ·
 [Quick start](#quick-start) · [Connect a controller](#connect-a-controller) ·
@@ -107,7 +109,9 @@ cd hodeco-<version>-linux-x86_64
 
 Then:
 
-1. Open <http://127.0.0.1:8180/> for the web UI.
+1. Open <http://127.0.0.1:8180/> for the web UI. From another machine on the
+   network, use the host's address instead, for example
+   <http://192.168.1.5:8180/>.
 2. Check <http://127.0.0.1:8180/api/health> if the page does not load.
 3. Add your controller in the UI, or put it in `services.yaml` and restart.
 
@@ -366,9 +370,9 @@ The `.deb` and `.rpm` packages install the systemd unit and manage the account
 and permissions:
 
 ```sh
-sudo apt install ./hodeco_0.3.0_amd64.deb
+sudo apt install ./hodeco_0.3.1_amd64.deb
 # or
-sudo dnf install ./hodeco-0.3.0-1.x86_64.rpm
+sudo dnf install ./hodeco-0.3.1-1.x86_64.rpm
 ```
 
 Installation creates the `hodeco` system user and group, adds the account to

@@ -618,7 +618,21 @@ async fn dispatch(
         }
         Method::TasksHistory => {
             let params: TasksHistoryParams = parse_params(method, params)?;
-            ok(state.history.list(&params).await.map_err(history_error)?)
+            let feed_runs = if params.include_feed {
+                state.run_feed.summaries(
+                    &params.task_ids,
+                    &params.trigger_ids,
+                    &params.types,
+                    &params.outcomes,
+                )
+            } else {
+                Vec::new()
+            };
+            ok(state
+                .history
+                .list_with_feed(&params, feed_runs)
+                .await
+                .map_err(history_error)?)
         }
         Method::TasksRunFeed => {
             let params: TasksRunFeedParams = parse_params(method, params)?;

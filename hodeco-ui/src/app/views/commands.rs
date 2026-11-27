@@ -419,10 +419,6 @@ fn editor_modal(app: &mut App, ui: &mut Ui) {
                                         if response.changed() {
                                             editor.id_auto = editor.draft.id.trim().is_empty();
                                         }
-                                        if editor.id_auto && editor.draft.id.trim().is_empty() {
-                                            editor.draft.id =
-                                                id_from_name("command", editor.draft.name.trim());
-                                        }
                                     },
                                 );
                             } else {

@@ -365,6 +365,9 @@ pub struct TasksHistoryParams {
     pub order: MessageOrder,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Merge matching recent rows from the in-memory run feed into the result.
+    #[serde(default)]
+    pub include_feed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

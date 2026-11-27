@@ -3,7 +3,7 @@
 use super::run_list::page_runs;
 use hodeco_contract::api::payloads::{RunFeedTotals, TasksRunFeedParams, TasksRunFeedResult};
 use hodeco_contract::config::RunFeedConfig;
-use hodeco_contract::domain::{RunOutcome, TaskRun, TriggerType};
+use hodeco_contract::domain::{RunOutcome, RunSummary, TaskRun, TriggerType};
 use parking_lot::Mutex;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
@@ -82,33 +82,14 @@ impl RunFeed {
     }
 
     pub fn list(&self, params: &TasksRunFeedParams) -> TasksRunFeedResult {
-        let task_filter: BTreeSet<&str> = params.task_ids.iter().map(String::as_str).collect();
-        let trigger_filter: BTreeSet<&str> =
-            params.trigger_ids.iter().map(String::as_str).collect();
-        let outcomes: BTreeSet<RunOutcome> = params.outcomes.iter().copied().collect();
-        let types: BTreeSet<TriggerType> = params.types.iter().copied().collect();
-
         let inner = self.inner.lock();
-        let mut selected = Vec::new();
-        for id in &inner.order {
-            let Some(entry) = inner.runs.get(id) else {
-                continue;
-            };
-            let summary = &entry.run.summary;
-            if !task_filter.is_empty() && !task_filter.contains(summary.task_id.as_str()) {
-                continue;
-            }
-            if !trigger_filter.is_empty() && !trigger_filter.contains(summary.trigger.id.as_str()) {
-                continue;
-            }
-            if !types.is_empty() && !types.contains(&summary.trigger.kind) {
-                continue;
-            }
-            if !outcomes.is_empty() && !outcomes.contains(&summary.outcome) {
-                continue;
-            }
-            selected.push(summary.clone());
-        }
+        let selected = matching_summaries(
+            &inner,
+            &params.task_ids,
+            &params.trigger_ids,
+            &params.types,
+            &params.outcomes,
+        );
         let totals = RunFeedTotals {
             rows: inner.order.len() as u64,
             bytes: inner.bytes,
@@ -129,6 +110,19 @@ impl RunFeed {
             next,
             feed: totals,
         }
+    }
+
+    /// Returns every matching summary so callers can merge the feed into
+    /// another run source before paging.
+    pub fn summaries(
+        &self,
+        task_ids: &[String],
+        trigger_ids: &[String],
+        types: &[TriggerType],
+        outcomes: &[RunOutcome],
+    ) -> Vec<RunSummary> {
+        let inner = self.inner.lock();
+        matching_summaries(&inner, task_ids, trigger_ids, types, outcomes)
     }
 
     pub fn remove_task(&self, task_id: &str) -> Vec<Uuid> {
@@ -154,6 +148,41 @@ impl RunFeed {
         inner.order = kept;
         removed
     }
+}
+
+fn matching_summaries(
+    inner: &FeedInner,
+    task_ids: &[String],
+    trigger_ids: &[String],
+    types: &[TriggerType],
+    outcomes: &[RunOutcome],
+) -> Vec<RunSummary> {
+    let task_filter: BTreeSet<&str> = task_ids.iter().map(String::as_str).collect();
+    let trigger_filter: BTreeSet<&str> = trigger_ids.iter().map(String::as_str).collect();
+    let outcomes: BTreeSet<RunOutcome> = outcomes.iter().copied().collect();
+    let types: BTreeSet<TriggerType> = types.iter().copied().collect();
+
+    let mut selected = Vec::new();
+    for id in &inner.order {
+        let Some(entry) = inner.runs.get(id) else {
+            continue;
+        };
+        let summary = &entry.run.summary;
+        if !task_filter.is_empty() && !task_filter.contains(summary.task_id.as_str()) {
+            continue;
+        }
+        if !trigger_filter.is_empty() && !trigger_filter.contains(summary.trigger.id.as_str()) {
+            continue;
+        }
+        if !types.is_empty() && !types.contains(&summary.trigger.kind) {
+            continue;
+        }
+        if !outcomes.is_empty() && !outcomes.contains(&summary.outcome) {
+            continue;
+        }
+        selected.push(summary.clone());
+    }
+    selected
 }
 
 impl std::fmt::Debug for RunFeed {

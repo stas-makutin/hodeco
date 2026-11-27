@@ -329,10 +329,20 @@ impl HistoryStore {
         self: &Arc<Self>,
         params: &TasksHistoryParams,
     ) -> Result<TasksHistoryResult, HistoryError> {
+        self.list_with_feed(params, Vec::new()).await
+    }
+
+    /// Lists persistent rows together with already-filtered recent feed rows.
+    /// Duplicate run IDs (a recent run may be in both stores) are returned once.
+    pub async fn list_with_feed(
+        self: &Arc<Self>,
+        params: &TasksHistoryParams,
+        feed_runs: Vec<RunSummary>,
+    ) -> Result<TasksHistoryResult, HistoryError> {
         let _guard = self.mutation.read().await;
         let this = self.clone();
         let params = params.clone();
-        tokio::task::spawn_blocking(move || this.list_blocking(&params))
+        tokio::task::spawn_blocking(move || this.list_blocking(&params, feed_runs))
             .await
             .map_err(blocking_error)?
     }
@@ -340,6 +350,7 @@ impl HistoryStore {
     fn list_blocking(
         &self,
         params: &TasksHistoryParams,
+        feed_runs: Vec<RunSummary>,
     ) -> Result<TasksHistoryResult, HistoryError> {
         let task_filter: BTreeSet<&str> = params.task_ids.iter().map(String::as_str).collect();
         let trigger_filter: BTreeSet<&str> =
@@ -379,6 +390,11 @@ impl HistoryStore {
                 }
                 selected.push(summary);
             })?;
+        }
+        if !feed_runs.is_empty() {
+            selected.extend(feed_runs);
+            let mut seen = BTreeSet::new();
+            selected.retain(|run| seen.insert(run.id));
         }
 
         let (runs, next) = super::run_list::page_runs(
@@ -1697,6 +1713,47 @@ mod tests {
             reloaded.list(&Default::default()).await.unwrap().runs.len(),
             0
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_with_feed_merges_and_deduplicates_runs() {
+        let dir = std::env::temp_dir().join(format!("hodeco-tlog-feed-test-{}", Uuid::new_v4()));
+        let store = Arc::new(HistoryStore::new(TaskLogConfig::default(), dir.clone()));
+        store.load(&BTreeSet::from(["task".to_string()])).unwrap();
+
+        let first = run("task", Uuid::new_v4(), 1_000);
+        let second = run("task", Uuid::new_v4(), 1_001);
+        for run in [&first, &second] {
+            let record = encode_run(run).unwrap();
+            store
+                .append(Arc::new(run.clone()), record, &TaskHistoryConfig::default())
+                .unwrap();
+        }
+        let feed_only = run("task", Uuid::new_v4(), 1_002);
+        let feed_runs = vec![
+            first.summary.clone(),
+            second.summary.clone(),
+            feed_only.summary.clone(),
+        ];
+
+        let page = store
+            .list_with_feed(
+                &TasksHistoryParams {
+                    task_ids: vec!["task".to_string()],
+                    order: hodeco_contract::domain::MessageOrder::OldestFirst,
+                    ..Default::default()
+                },
+                feed_runs,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.runs.len(), 3);
+        assert_eq!(
+            page.runs.iter().map(|run| run.id).collect::<Vec<_>>(),
+            vec![first.summary.id, second.summary.id, feed_only.summary.id]
+        );
+
         fs::remove_dir_all(&dir).unwrap();
     }
 

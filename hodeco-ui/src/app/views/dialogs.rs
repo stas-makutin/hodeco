@@ -517,12 +517,12 @@ fn show_confirm_restart(app: &mut App, ctx: &Context, keep_open: &mut bool) {
             ui,
             theme,
             "Restart server?",
-            Some("The gateway process will stop and must be restarted externally."),
+            Some("The gateway will stop, save state, and start again."),
         );
         widgets::dialog_body(ui, 320.0, |ui| {
             ui.label(
                 RichText::new(
-                    "This stops the hodeco process. It will only come back if a service manager or external supervisor restarts it.",
+                    "The gateway performs a graceful shutdown and then starts a new process. Connections drop while it restarts.",
                 )
                 .color(palette.amber),
             );
@@ -531,11 +531,9 @@ fn show_confirm_restart(app: &mut App, ctx: &Context, keep_open: &mut bool) {
             ui.label("The message buffer is persisted during a graceful shutdown.");
             ui.add_space(8.0);
             ui.label(
-                RichText::new(
-                    "The UI keeps reconnecting in the background. Do not assume the server will return.",
-                )
-                .size(13.5)
-                .color(palette.muted),
+                RichText::new("The UI reconnects automatically when the server is back.")
+                    .size(13.5)
+                    .color(palette.muted),
             );
         });
         widgets::dialog_footer(ui, theme, None, |ui| {

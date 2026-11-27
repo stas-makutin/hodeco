@@ -12,7 +12,7 @@
 #
 # and run, for example:
 #
-#   HODECO_VERSION=0.3.0 HODECO_ARCH=amd64 HODECO_STAGE="$PWD/pkgroot" \
+#   HODECO_VERSION=0.3.1 HODECO_ARCH=amd64 HODECO_STAGE="$PWD/pkgroot" \
 #   HODECO_MAINTAINER="Stas Makutin <33303268+stas-makutin@users.noreply.github.com>" \
 #   HODECO_HOMEPAGE="https://github.com/OWNER/REPO" \
 #   nfpm package --config packaging/nfpm.yaml --packager deb --target /tmp/hodeco.deb

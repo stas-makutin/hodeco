@@ -30,6 +30,13 @@ const MESSAGE_LOG_QUEUE: usize = 4096;
 
 pub type AppError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// Why the application runtime stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownReason {
+    Stopped,
+    Restart,
+}
+
 /// Shared application services used by the HTTP/WebSocket API.
 #[derive(Clone)]
 pub struct AppState {
@@ -47,6 +54,7 @@ pub struct AppState {
     pub resync: broadcast::Sender<()>,
     pub cancel: CancellationToken,
     pub shutting_down: Arc<AtomicBool>,
+    pub restart_requested: Arc<AtomicBool>,
     pub ws_limits: Arc<Semaphore>,
     pub started_at: DateTime<Utc>,
     /// System IANA time zone, resolved once at startup for `schedules.list`.
@@ -54,8 +62,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Asks the application to stop after giving the current response time to flush.
+    /// Asks the application to restart after giving the current response time
+    /// to flush. The caller decides how to start a new process.
     pub fn request_restart(&self) {
+        self.restart_requested.store(true, Ordering::SeqCst);
         let cancel = self.cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(RESTART_DELAY).await;
@@ -201,7 +211,7 @@ pub async fn run(
     bundle: ConfigBundle,
     config_path: PathBuf,
     cancel_token: CancellationToken,
-) -> Result<(), AppError> {
+) -> Result<ShutdownReason, AppError> {
     let ConfigBundle {
         config,
         services,
@@ -318,6 +328,7 @@ pub async fn run(
         resync,
         cancel: cancel_token.clone(),
         shutting_down: Arc::new(AtomicBool::new(false)),
+        restart_requested: Arc::new(AtomicBool::new(false)),
         ws_limits,
         started_at: Utc::now(),
         system_timezone,
@@ -414,7 +425,11 @@ pub async fn run(
     state.runtime.wait_for_runs(SHUTDOWN_TIMEOUT).await;
 
     if cancel_token.is_cancelled() {
-        Ok(())
+        Ok(if state.restart_requested.load(Ordering::SeqCst) {
+            ShutdownReason::Restart
+        } else {
+            ShutdownReason::Stopped
+        })
     } else {
         Err(early_error.unwrap_or_else(|| "application stopped unexpectedly".to_string().into()))
     }

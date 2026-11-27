@@ -323,8 +323,9 @@ The `builder` value selects the editor:
 
 SendData and SendDataMulti read TX options from the selected serial command's
 `txOptions` field. The bundled definitions expose `ACK`, `LOW_POWER`,
-`AUTO_ROUTE`, `NO_ROUTE`, and `EXPLORE`; the default is ACK on. Broadcast keeps
-the fixed recommended options (ACK off, `NO_ROUTE` on).
+`AUTO_ROUTE`, `NO_ROUTE`, and `EXPLORE`; the default is ACK and `AUTO_ROUTE` on
+(`default: "5"`). Broadcast keeps the fixed recommended options (ACK off,
+`NO_ROUTE` on).
 
 The Z-Wave payload filter derives frame labels and offsets from the serial
 command layouts in `zwave.json`. It uses field roles and kinds rather than fixed
@@ -478,9 +479,9 @@ into one big-endian integer:
       "mask": 7,
       "shift": 0,
       "values": [
-        { "value": 0, "name": "1 byte (8 bits)", "length": 1 },
-        { "value": 1, "name": "2 bytes (16 bits)", "length": 2 },
-        { "value": 2, "name": "4 bytes (32 bits)", "length": 4 }
+        { "value": 1, "name": "1 byte (8 bits)", "length": 1 },
+        { "value": 2, "name": "2 bytes (16 bits)", "length": 2 },
+        { "value": 4, "name": "4 bytes (32 bits)", "length": 4 }
       ]
     },
     {

@@ -42,7 +42,8 @@ use windows::{
 
 use crate::command_line::ServiceOptions;
 use crate::logging::ServiceLogLevel;
-use crate::service_main;
+use crate::service_main::{self, ServiceOutcome};
+use std::process::{Command, Stdio};
 
 const SERVICE_NAME: PCWSTR = w!("Hodeco Service");
 const DISPLAY_NAME: &str = "Hodeco Service";
@@ -110,7 +111,7 @@ extern "system" fn win32_service_main(_: u32, _: *mut PWSTR) {
 
     report_status(SERVICE_START_PENDING);
     report_status(SERVICE_RUNNING);
-    let success = service_main::service_main(
+    let outcome = service_main::service_main(
         service_log,
         STOP_TOKEN.get_or_init(CancellationToken::new).clone(),
     );
@@ -120,7 +121,31 @@ extern "system" fn win32_service_main(_: u32, _: *mut PWSTR) {
         let _ = unsafe { DeregisterEventSource(HANDLE(event_log)) };
     }
 
-    report_stopped(success);
+    report_stopped(outcome.succeeded());
+    if outcome == ServiceOutcome::Restarting {
+        spawn_restart_helper();
+    }
+}
+
+/// Starts a detached `hodeco restart` helper after the service reports stopped.
+/// The service account is `LocalSystem`, so the helper can ask the SCM to start
+/// the service again.
+fn spawn_restart_helper() {
+    let result = std::env::current_exe().and_then(|executable| {
+        Command::new(executable)
+            .arg("restart")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+    });
+    if let Err(error) = result {
+        service_log(
+            ServiceLogLevel::Error,
+            &format!("unable to start the restart helper: {error}"),
+        );
+    }
 }
 
 /// Writes a log entry to the Windows Event Log for the service's event source.

@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn uses_defaults_for_empty_configuration() {
         let config = parse_str("{}").unwrap();
-        assert_eq!(config.http_server.bind, "127.0.0.1");
+        assert_eq!(config.http_server.bind, "0.0.0.0");
         assert_eq!(config.http_server.port, 8180);
         assert_eq!(config.http_server.max_connections, 1000);
         assert_eq!(config.http_server.static_assets.index, "index.html");

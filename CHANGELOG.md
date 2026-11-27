@@ -4,6 +4,58 @@ All notable changes to hodeco are recorded here. The project follows semantic
 versioning for the application release. The JSON-RPC protocol version is listed
 separately because it can stay compatible across releases.
 
+## 0.3.1 — 2026-11-26
+
+Patch release with run-history, Z-Wave builder, restart, and first-run access
+fixes. There are no configuration or message-log format breaks.
+
+### Added
+
+- **Live rows in per-task history.** `tasks.history` accepts
+  `includeFeed: true`. Matching rows from the in-memory run feed are merged with
+  file rows and deduplicated by run ID before paging. The History view sets this
+  flag, so recent runs remain visible for tasks without persistent history.
+- **AUTO_ROUTE by default.** Z-Wave SendData-style builder operations select
+  `ACK` and `AUTO_ROUTE` by default. The defaults come from the command catalog
+  and can still be changed per message.
+- **Thermostat Setpoint types.** Added Away heating, Away cooling, and Full
+  power labels for the newer setpoint type values.
+
+### Changed
+
+- **Server restart now restarts the gateway.** `system.restart` performs a
+  graceful shutdown and starts the gateway again instead of only stopping it.
+  Console runs start a replacement process, systemd uses its failure-restart
+  policy, and the Windows service restarts through the service manager. The
+  Server tab and confirmation dialog explain the new behavior.
+- **Default HTTP bind is now `0.0.0.0`.** The UI and API accept connections on
+  every IPv4 interface by default. Set `httpServer.bind: 127.0.0.1` for
+  loopback-only access. Authentication and TLS are still not implemented.
+- **Blank catalog IDs stay blank until save, then the server generates them.**
+  The task, schedule, and command editors no longer refill an intentionally
+  cleared ID field while typing. IDs are still derived from the name by default.
+
+### Fixed
+
+- **Z-Wave Thermostat Setpoint size parsing and building.** The size field now
+  uses the wire values `1`, `2`, and `4` for 1-, 2-, and 4-byte values instead
+  of `0`, `1`, and `2`. One- and two-byte reports decode correctly, and the
+  builder emits the matching precision/scale/size byte and value width.
+- **Per-task history for tasks without persistent history.** The History action
+  now shows recent in-memory runs instead of an empty page when the task has no
+  TLOG file. Rows that also exist in the file are returned once.
+- **Browser ID generation.** IDs generated in the web UI use `web-time` instead
+  of `std::time::SystemTime`, which panics on `wasm32-unknown-unknown`.
+- **Z-Wave size-field regression coverage.** Added a catalog test covering the
+  size mappings for Thermostat Setpoint, Multilevel Sensor, Meter, Humidity
+  Control Setpoint, and Configuration.
+
+### Protocol
+
+- Protocol version stays `1.0`. `tasks.history` adds the optional `includeFeed`
+  request field; it defaults to `false`, so existing clients keep file-only
+  behavior.
+
 ## 0.3.0 — 2026-11-25
 
 Phase 3 adds ZigBee support over Ember EZSP serial coordinators, with the same

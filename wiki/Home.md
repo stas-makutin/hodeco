@@ -14,8 +14,10 @@ files, and a browser. It runs on a Raspberry Pi, a mini-PC, or a Windows box,
 with no external database and no cloud account.
 
 > **Trusted networks only.** Authentication and TLS are not implemented, and the
-> default bind address is `127.0.0.1`. If you need access from outside your LAN,
-> put hodeco behind a reverse proxy that provides both.
+> default bind address is `0.0.0.0`, so the UI and API listen on every network
+> interface. Set `httpServer.bind` to `127.0.0.1` to restrict access to the local
+> host. If you need access from outside your LAN, put hodeco behind a reverse
+> proxy that provides both.
 
 ## New here? Start with a path
 
@@ -149,7 +151,7 @@ was written.
 
 ## Project status
 
-The project is pre-1.0 (`0.3.0`). The protocol version is independent of the
+The project is pre-1.0 (`0.3.1`). The protocol version is independent of the
 crate version and is currently `1.0`. Z-Wave and ZigBee EZSP over serial are
 supported today. New protocols are added behind the same shared contract, so the
 API shape stays consistent as support grows.

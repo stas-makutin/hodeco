@@ -926,7 +926,7 @@ fn list_ui(app: &mut App, ui: &mut Ui) {
                                 }
                                 if ui
                                     .add_enabled(ready, egui::Button::new("History").small())
-                                    .on_hover_text("Open persistent run history")
+                                    .on_hover_text("Open run history")
                                     .clicked()
                                 {
                                     app.open_task_history(&task.id);
@@ -1465,9 +1465,6 @@ fn general_section(app: &mut App, ui: &mut Ui, editor: &mut TaskEditor) {
                             );
                             if response.changed() {
                                 editor.id_auto = editor.draft.id.trim().is_empty();
-                            }
-                            if editor.id_auto && editor.draft.id.trim().is_empty() {
-                                editor.draft.id = id_from_name("task", editor.draft.name.trim());
                             }
                         },
                     );

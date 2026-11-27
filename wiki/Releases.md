@@ -216,7 +216,7 @@ Get-FileHash .\hodeco-<version>-windows-x86_64.zip -Algorithm SHA256
 
 Release tags are `v<version>` and must match both workspace versions
 (`Cargo.toml` and `hodeco-ui/Cargo.toml`). Pre-release tags such as
-`v0.3.0-rc.1` are marked as pre-releases on GitHub. The GitHub release notes are
+`v0.3.1-rc.1` are marked as pre-releases on GitHub. The GitHub release notes are
 the `CHANGELOG.md` section for the tag version. Protocol compatibility is
 tracked separately through `server.info.protocolVersion`, currently `1.0`.
 

@@ -624,6 +624,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -701,6 +702,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -785,6 +787,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -895,6 +898,7 @@
           "label": "TX options",
           "kind": "txOptions",
           "format": "txOptions",
+          "default": "5",
           "description": "Transmit option bits.",
           "required": true,
           "values": [
@@ -1020,6 +1024,7 @@
           "label": "TX options",
           "kind": "txOptions",
           "format": "txOptions",
+          "default": "5",
           "description": "Transmit option bits.",
           "required": true,
           "values": [
@@ -1152,6 +1157,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -2024,6 +2030,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -3323,6 +3330,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -3391,6 +3399,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -3607,6 +3616,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -3690,6 +3700,7 @@
           "kind": "txOptions",
           "required": true,
           "format": "txOptions",
+          "default": "5",
           "values": [
             {
               "value": 1,
@@ -6129,11 +6140,15 @@
                 },
                 {
                   "value": 13,
-                  "name": "Heating secondary"
+                  "name": "Away heating"
                 },
                 {
                   "value": 14,
-                  "name": "Cooling secondary"
+                  "name": "Away cooling"
+                },
+                {
+                  "value": 15,
+                  "name": "Full power"
                 }
               ]
             },
@@ -6150,17 +6165,17 @@
                   "required": true,
                   "values": [
                     {
-                      "value": 0,
+                      "value": 1,
                       "name": "1 byte (8 bits)",
                       "length": 1
                     },
                     {
-                      "value": 1,
+                      "value": 2,
                       "name": "2 bytes (16 bits)",
                       "length": 2
                     },
                     {
-                      "value": 2,
+                      "value": 4,
                       "name": "4 bytes (32 bits)",
                       "length": 4
                     }
@@ -6249,11 +6264,15 @@
                 },
                 {
                   "value": 13,
-                  "name": "Heating secondary"
+                  "name": "Away heating"
                 },
                 {
                   "value": 14,
-                  "name": "Cooling secondary"
+                  "name": "Away cooling"
+                },
+                {
+                  "value": 15,
+                  "name": "Full power"
                 }
               ]
             }
@@ -6303,11 +6322,15 @@
                 },
                 {
                   "value": 13,
-                  "name": "Heating secondary"
+                  "name": "Away heating"
                 },
                 {
                   "value": 14,
-                  "name": "Cooling secondary"
+                  "name": "Away cooling"
+                },
+                {
+                  "value": 15,
+                  "name": "Full power"
                 }
               ]
             },
@@ -6324,17 +6347,17 @@
                   "required": true,
                   "values": [
                     {
-                      "value": 0,
+                      "value": 1,
                       "name": "1 byte (8 bits)",
                       "length": 1
                     },
                     {
-                      "value": 1,
+                      "value": 2,
                       "name": "2 bytes (16 bits)",
                       "length": 2
                     },
                     {
-                      "value": 2,
+                      "value": 4,
                       "name": "4 bytes (32 bits)",
                       "length": 4
                     }

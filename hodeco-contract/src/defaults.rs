@@ -107,7 +107,7 @@ impl Default for LogConfig {
 impl Default for HttpServerConfig {
     fn default() -> Self {
         Self {
-            bind: "127.0.0.1".to_string(),
+            bind: "0.0.0.0".to_string(),
             port: 8180,
             max_connections: 1000,
             read_timeout: HumanDuration::from_std(Duration::from_secs(5)),

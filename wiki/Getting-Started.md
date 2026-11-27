@@ -97,7 +97,9 @@ cd hodeco-<version>-linux-x86_64
 ```
 
 `run` starts the gateway in the foreground. Leave it running and open
-<http://127.0.0.1:8180/>.
+<http://127.0.0.1:8180/>. The default bind address is `0.0.0.0`, so from another
+machine on the network use the host's address instead, for example
+<http://192.168.1.5:8180/>.
 
 On Windows the default static directory is `<exe_dir>\site`, so the bundled UI
 is used automatically. Linux portable archives include a `config.yaml` that

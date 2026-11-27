@@ -38,7 +38,7 @@ A successful response looks like:
 {
   "id": "1",
   "result": {
-    "version": "0.3.0",
+    "version": "0.3.1",
     "protocolVersion": "1.0",
     "startedAt": "2026-01-01T12:00:00Z"
   }
@@ -221,8 +221,10 @@ Requests do not take a `next` field. Use the returned `next.from` and
 `tasks.runFeed` reads the volatile in-memory recent-run buffer;
 `tasks.history` reads persistent per-task history files. Both accept `taskIds`,
 `triggerIds`, `types`, and `outcomes` filters; the service applies them before
-paging. `tasks.getRun` checks the feed first and falls back to the task's
-history file.
+paging. Set `includeFeed: true` on `tasks.history` to merge matching feed rows
+and remove duplicate run IDs before paging; the UI uses this so recent runs
+remain visible for tasks without persistent history. `tasks.getRun` checks the
+feed first and falls back to the task's history file.
 
 ## Static assets
 

@@ -81,7 +81,7 @@ log:
   archive: zip        # zip (default) or none
 
 httpServer:
-  bind: 127.0.0.1
+  bind: 0.0.0.0
   port: 8180
   maxConnections: 1000  # 0 removes the practical limit
   readTimeout: 5 s
@@ -158,7 +158,7 @@ in [Logging](Logging).
 
 | Field | What it controls |
 | --- | --- |
-| `bind`, `port` | The listening address. The default is `127.0.0.1:8180`. |
+| `bind`, `port` | The listening address. The default is `0.0.0.0:8180`, which accepts connections on every IPv4 interface. Set `bind` to `127.0.0.1` for loopback-only access. |
 | `maxConnections` | Connection cap; `0` removes the practical limit. |
 | `readTimeout`, `readHeaderTimeout`, `writeTimeout`, `idleTimeout` | Request and connection timeouts. |
 | `maxHeaderBytes` | Maximum request header size. |
@@ -167,9 +167,11 @@ in [Logging](Logging).
 | `static.spaFallback` | Serve the index for extensionless navigation paths. |
 | `static.precompressed` | Serve `.br`/`.gz` sidecars when the client accepts them. |
 
-The default bind address is loopback only. There is no authentication or TLS; if
-you need access from other machines, put hodeco behind a reverse proxy that
-provides both.
+The default bind address is `0.0.0.0`, so the server accepts connections from
+other machines on the network. Set `httpServer.bind` to `127.0.0.1` if hodeco
+should only be reachable from the local host. There is no authentication or TLS;
+if you expose hodeco beyond your LAN, put it behind a reverse proxy that provides
+both.
 
 `precompressed: true` serves a matching `.br` or `.gz` sidecar and falls back to
 the raw file when the client accepts neither. JSON definition files are always

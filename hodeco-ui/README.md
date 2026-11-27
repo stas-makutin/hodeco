@@ -258,7 +258,8 @@ normal dropdown.
   render typed controls for nodes, numbers, enums, flags, booleans, and hex
   data; lengths and counts are computed automatically.
 - `ZW_SendData` and `ZW_SendDataMulti` read TX options from the serial command's
-  `txOptions` values (`ACK`, `LOW_POWER`, `AUTO_ROUTE`, `NO_ROUTE`, `EXPLORE`).
+  `txOptions` values (`ACK`, `LOW_POWER`, `AUTO_ROUTE`, `NO_ROUTE`, `EXPLORE`);
+  ACK and `AUTO_ROUTE` are selected by default.
 - The per-send TTL uses an **Override TTL** checkbox with the same
   integer-and-unit editor as service parameters; unchecked inherits the
   service's `outgoingMaxTTL` (10 s by default); `0 s` disables expiry.

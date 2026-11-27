@@ -1,4 +1,4 @@
-use crate::app;
+use crate::app::{self, ShutdownReason};
 use crate::command_line::CommandLine;
 use crate::config;
 use crate::config::ConfigBundle;
@@ -7,13 +7,29 @@ use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-/// Runs the gateway from process startup through shutdown. Returns `false` when
-/// configuration loading, runtime setup, or the gateway itself failed.
-pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) -> bool {
+/// Result of one gateway process lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceOutcome {
+    Stopped,
+    Restarting,
+    Failed,
+}
+
+impl ServiceOutcome {
+    pub fn succeeded(self) -> bool {
+        !matches!(self, Self::Failed)
+    }
+}
+
+/// Runs the gateway from process startup through shutdown. A failed load,
+/// runtime setup, or gateway run returns [`ServiceOutcome::Failed`]; a requested
+/// restart returns [`ServiceOutcome::Restarting`] so the caller can start a new
+/// process.
+pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) -> ServiceOutcome {
     let command_line = CommandLine::from_env();
     let loaded = match load_config(&command_line, logger) {
         Some(config) => config,
-        None => return false,
+        None => return ServiceOutcome::Failed,
     };
     let config = loaded.bundle.config.clone();
     let services_count = loaded.bundle.services.services.len();
@@ -21,14 +37,14 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) -> b
 
     if let Err(error) = config::prepare_working_directory(&config) {
         logger(ServiceLogLevel::Error, &format!("{error}"));
-        return false;
+        return ServiceOutcome::Failed;
     }
 
     let warnings = match config::prepare_runtime_directories(&config) {
         Ok(warnings) => warnings,
         Err(error) => {
             logger(ServiceLogLevel::Error, &format!("{error}"));
-            return false;
+            return ServiceOutcome::Failed;
         }
     };
 
@@ -37,7 +53,7 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) -> b
             ServiceLogLevel::Error,
             &format!("Failed to initialize logging: {error}"),
         );
-        return false;
+        return ServiceOutcome::Failed;
     }
 
     for warning in warnings {
@@ -70,28 +86,32 @@ pub fn service_main(logger: ServiceLogger, cancel_token: CancellationToken) -> b
                 &format!("Failed to initialize service runtime: {error}"),
             );
             logging::shutdown();
-            return false;
+            return ServiceOutcome::Failed;
         }
     };
 
     let shutdown = cancel_token.clone();
-    let success = match runtime.block_on(async move {
+    let outcome = match runtime.block_on(async move {
         install_signal_handlers(cancel_token);
         app::run(loaded.bundle, config_path, shutdown).await
     }) {
-        Ok(()) => {
+        Ok(ShutdownReason::Stopped) => {
             info!("service stopped");
-            true
+            ServiceOutcome::Stopped
+        }
+        Ok(ShutdownReason::Restart) => {
+            info!("service restarting");
+            ServiceOutcome::Restarting
         }
         Err(error) => {
             error!(error = %error, "service failed");
             logger(ServiceLogLevel::Error, &format!("Service failed: {error}"));
-            false
+            ServiceOutcome::Failed
         }
     };
 
     logging::shutdown();
-    success
+    outcome
 }
 
 /// Installs console and SIGTERM handling on the service runtime. This keeps

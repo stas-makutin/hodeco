@@ -47,8 +47,11 @@ actions are stored. Run rows use a monotonically increasing `time` for paging.
 
 History is file-backed. The service keeps per-task row/byte metadata and the
 latest summary, not the full run set, and reads the file on demand. The separate
-in-memory run feed is volatile and is not part of persistent task history. See
-[Tasks](Tasks) for the feed/history split and how to enable history.
+in-memory run feed is volatile and is not part of persistent task history. The
+History view can merge recent feed rows with `tasks.history` and
+`includeFeed: true`; those rows disappear on restart unless the task writes them
+to a history file. See [Tasks](Tasks) for the feed/history split and how to
+enable history.
 
 `tasks.purgeHistory` clears the task's history file, removes that task's feed
 rows, resets the in-memory `maxRuns` counters, and clears the cached last-run

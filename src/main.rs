@@ -56,7 +56,12 @@ fn execute_action(
         ServiceAction::Uninstall => service_manager.uninstall(),
         ServiceAction::Start => service_manager.start(),
         ServiceAction::Stop => service_manager.stop(),
-        ServiceAction::Restart => service_manager.stop() && service_manager.start(),
+        ServiceAction::Restart => {
+            // A restart helper can see the service already stopped; start it
+            // either way.
+            let _ = service_manager.stop();
+            service_manager.start()
+        }
         ServiceAction::Status => service_manager.status(),
         ServiceAction::Run => console_runner::run(),
     }

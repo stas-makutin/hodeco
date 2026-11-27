@@ -326,7 +326,11 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                             &config.http_server.bind,
                             &mut changed,
                         );
-                        note_row(ui, theme, "Interface to bind; 0.0.0.0 listens on all interfaces.");
+                        note_row(
+                            ui,
+                            theme,
+                            "Interface to bind; 0.0.0.0 (default) listens on all interfaces, 127.0.0.1 only on this host.",
+                        );
                         number_row_u16(
                             ui,
                             theme,

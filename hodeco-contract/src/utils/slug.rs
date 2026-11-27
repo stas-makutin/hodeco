@@ -5,7 +5,10 @@
 //! as file names, so the character set is deliberately conservative.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+// `std::time::SystemTime::now` panics on `wasm32-unknown-unknown`, and the UI
+// calls `id_from_name` directly from the browser build.
+use web_time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_ID_LEN: usize = 64;
 
@@ -110,6 +113,13 @@ mod tests {
     #[test]
     fn falls_back_for_non_ascii_names() {
         let id = id_from_name("task", "Привет");
+        assert!(id.starts_with("task-"));
+        assert!(is_valid_id(&id));
+    }
+
+    #[test]
+    fn falls_back_for_empty_names() {
+        let id = id_from_name("task", "");
         assert!(id.starts_with("task-"));
         assert!(is_valid_id(&id));
     }

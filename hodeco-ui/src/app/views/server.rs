@@ -118,9 +118,9 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let restart = ui.button("Restart server…").on_hover_text(
-                "Stop the gateway process; an external supervisor must start it again.",
-            );
+            let restart = ui
+                .button("Restart server…")
+                .on_hover_text("Gracefully stop the gateway and start it again.");
             if restart.clicked() {
                 app.dialog = Some(Dialog::ConfirmRestart);
             }

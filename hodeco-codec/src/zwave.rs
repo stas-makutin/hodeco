@@ -1322,10 +1322,11 @@ mod tests {
             SERIAL_APPLICATION_COMMAND_HANDLER,
             0,
             9,
-            5,
+            6,
             0x43,
             0x03,
             0x01,
+            0x22,
             0x00,
             0x15,
         ]);
@@ -1340,7 +1341,7 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|field| field.label == "Size" && field.value == "1 byte (8 bits)")
+                .any(|field| field.label == "Size" && field.value == "2 bytes (16 bits)")
         );
         assert!(
             fields
@@ -1350,7 +1351,35 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|field| field.label == "Precision" && field.value == "0")
+                .any(|field| field.label == "Precision" && field.value == "1")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.label == "Value" && field.value == "21")
+        );
+    }
+
+    #[test]
+    fn decodes_thermostat_setpoint_one_byte_value() {
+        let frame = request(&[
+            SERIAL_APPLICATION_COMMAND_HANDLER,
+            0,
+            9,
+            5,
+            0x43,
+            0x03,
+            0x01,
+            0x01,
+            0x15,
+        ]);
+        let decoded = decode(&frame);
+        assert!(decoded.issues.is_empty());
+        let fields = &decoded.frames[0].fields;
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.label == "Size" && field.value == "1 byte (8 bits)")
         );
         assert!(
             fields

@@ -2012,14 +2012,6 @@ fn editor_ui(app: &mut App, ui: &mut Ui) {
                                                 editor.id_auto =
                                                     editor.draft.id.trim().is_empty();
                                             }
-                                            if editor.id_auto
-                                                && editor.draft.id.trim().is_empty()
-                                            {
-                                                editor.draft.id = id_from_name(
-                                                    "schedule",
-                                                    editor.draft.name.trim(),
-                                                );
-                                            }
                                         },
                                     );
                                 } else {
