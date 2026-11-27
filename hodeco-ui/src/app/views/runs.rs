@@ -496,8 +496,10 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
         apply_run_activation(app, activation);
     }
 
-    // Row clicks must win over text selection in the cells, as in Messages.
-    ui.style_mut().interaction.selectable_labels = false;
+    // Text in the table stays selectable so Ctrl+C can copy it. Selectable
+    // labels consume clicks, so row selection is also checked from raw pointer
+    // input below.
+    ui.style_mut().interaction.selectable_labels = true;
     let ctx = ui.ctx().clone();
 
     egui::ScrollArea::horizontal()
@@ -509,7 +511,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                 .id_salt("runs-table")
                 .striped(true)
                 .resizable(true)
-                .sense(egui::Sense::CLICK)
+                .sense(egui::Sense::hover())
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::initial(150.0).at_least(120.0))
                 .column(Column::initial(160.0).at_least(120.0))
@@ -590,7 +592,8 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                                     ui.label(RichText::new("—").color(palette.muted));
                                 }
                             });
-                            if row.response().clicked() {
+                            let response = row.response();
+                            if response.clicked() || widgets::row_clicked(&response) {
                                 let activation =
                                     RunActivation::History(run.task_id.clone(), run.id);
                                 if activation_matches(app, &activation) {
@@ -673,7 +676,10 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                             row.col(|ui| {
                                 ui.label(RichText::new("—").color(palette.muted));
                             });
-                            if !cancel_clicked && row.response().clicked() {
+                            let response = row.response();
+                            if !cancel_clicked
+                                && (response.clicked() || widgets::row_clicked(&response))
+                            {
                                 let activation = RunActivation::Running(run.id);
                                 if activation_matches(app, &activation) {
                                     clear_run_selection(app);
@@ -755,6 +761,7 @@ fn run_context(app: &mut App, ui: &mut Ui) {
                 .inner_margin(egui::Margin::symmetric(12, 8)),
         )
         .show(ui, |ui| {
+            widgets::allow_text_selection(ui);
             ui.painter().rect_filled(ui.max_rect(), 0.0, palette.panel);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -841,6 +848,7 @@ fn run_context(app: &mut App, ui: &mut Ui) {
 }
 
 fn running_detail_ui(ui: &mut Ui, run: &RunningRun, app: &App) {
+    widgets::allow_text_selection(ui);
     let palette = app.palette();
     let now = Utc::now();
     let delayed = run.delayed_until.is_some_and(|until| until > now);
@@ -1077,6 +1085,7 @@ fn detail_label(ui: &mut Ui, palette: &crate::theme::Palette, text: &str) {
 }
 
 pub(crate) fn detail_ui(ui: &mut Ui, run: &TaskRun, app: &App) {
+    widgets::allow_text_selection(ui);
     let palette = app.palette();
     egui::CollapsingHeader::new(RichText::new("General").strong())
         .default_open(true)

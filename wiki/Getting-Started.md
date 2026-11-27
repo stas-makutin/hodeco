@@ -185,8 +185,10 @@ sudo systemctl restart hodeco
 ```
 
 `/etc/hodeco/config.yaml` is a package configuration file, so local edits
-survive upgrades. Uninstalling stops and disables the unit but keeps the
-`hodeco` user and the data directories for a later reinstall.
+survive upgrades. The device-label catalog `site/entities.json` is also a
+configuration file, so custom node labels survive package upgrades. Uninstalling
+stops and disables the unit but keeps the `hodeco` user and the data directories
+for a later reinstall.
 
 For the package layout and which file to download, see [Releases](Releases).
 

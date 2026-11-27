@@ -18,7 +18,7 @@ use hodeco_codec::zigbee as zigbee_codec;
 use hodeco_contract::catalog::SERVICE_PARAM_OUTGOING_MAX_TTL;
 use hodeco_contract::domain::{ProtocolInfo, ServiceInfo, ServiceRef};
 use hodeco_contract::utils::{Base64Bytes, HumanDuration};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuilderOperation {
@@ -191,7 +191,7 @@ impl CommandPreset {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SerialFieldState {
     Text(String),
     Bool(bool),
@@ -648,12 +648,240 @@ fn restore_zwave_command(dialog: &mut BuilderDialog) -> bool {
             dialog.dimming = params[1].to_string();
         }
         CommandPreset::Generic => {
-            if !command.fields.is_empty() || !params.is_empty() {
-                return false;
+            if command.fields.is_empty() {
+                if !params.is_empty() {
+                    return false;
+                }
+            } else {
+                let Some(fields) = decode_fields(&command.fields, params) else {
+                    return false;
+                };
+                dialog.serial_fields.extend(fields);
             }
         }
     }
     true
+}
+
+/// Names of fields the encoder derives from other fields. Their state is
+/// ignored when building, so re-opening a message must not populate them.
+fn computed_target_names(layout: &[LayoutField]) -> BTreeSet<String> {
+    let field_map = layout_field_map(layout);
+    let mut targets = BTreeSet::new();
+    for field in layout.iter().flat_map(LayoutField::fields) {
+        if let Some(target) = &field.length_from {
+            let source_has_mapping = field_map
+                .get(target.as_str())
+                .is_some_and(|source| has_length_mapping(source));
+            if !source_has_mapping && !matches!(field.kind, FieldType::Int | FieldType::Uint) {
+                targets.insert(target.clone());
+            }
+        }
+        if let Some(target) = &field.count_from {
+            targets.insert(target.clone());
+        }
+    }
+    targets
+}
+
+/// Decodes typed command fields from a command-class payload. Returns `None`
+/// when the bytes are not an exact fit so callers can fall back to raw bytes.
+fn decode_fields(
+    layout: &[LayoutField],
+    data: &[u8],
+) -> Option<BTreeMap<String, SerialFieldState>> {
+    let field_map = layout_field_map(layout);
+    let computed = computed_target_names(layout);
+    let mut states = BTreeMap::new();
+    let mut values = BTreeMap::new();
+    let mut cursor = 0usize;
+    for item in layout {
+        match item {
+            LayoutField::Group(group) => {
+                let end = cursor.checked_add(group.length)?;
+                let bytes = data.get(cursor..end)?;
+                let raw = bytes
+                    .iter()
+                    .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+                for field in &group.fields {
+                    let mask = field.mask?;
+                    if mask == 0 || field.shift >= 64 {
+                        return None;
+                    }
+                    let value = (raw & mask) >> field.shift;
+                    values.insert(field.name.clone(), value);
+                    if !field.derived && !computed.contains(&field.name) {
+                        states.insert(field.name.clone(), group_field_state(field, value)?);
+                    }
+                }
+                cursor = end;
+            }
+            LayoutField::Field(field) => {
+                let width = field_width(
+                    field,
+                    &field_map,
+                    &values,
+                    data.len().saturating_sub(cursor),
+                )?;
+                let end = cursor.checked_add(width)?;
+                let bytes = data.get(cursor..end)?;
+                if let Some(value) = field_number(field, bytes) {
+                    values.insert(field.name.clone(), value);
+                }
+                if !field.derived && !computed.contains(&field.name) {
+                    states.insert(field.name.clone(), field_state(field, bytes)?);
+                }
+                cursor = end;
+            }
+        }
+    }
+    (cursor == data.len()).then_some(states)
+}
+
+fn field_width(
+    field: &FieldDef,
+    layout: &BTreeMap<&str, &FieldDef>,
+    values: &BTreeMap<String, u64>,
+    available: usize,
+) -> Option<usize> {
+    if matches!(field.kind, FieldType::Int | FieldType::Uint) {
+        let width = field.length.or_else(|| {
+            let source = field.length_from.as_deref()?;
+            let source_field = layout.get(source)?;
+            let raw = *values.get(source)?;
+            source_field
+                .values
+                .iter()
+                .find(|value| u64::from(value.value) == raw)
+                .and_then(|value| value.length)
+        })?;
+        return matches!(width, 1 | 2 | 4).then_some(width);
+    }
+    if let Some(width) = field.kind.fixed_width() {
+        return Some(width);
+    }
+    if field.remaining {
+        return Some(available);
+    }
+    if let Some(width) = field.length {
+        return Some(width);
+    }
+    if let Some(source) = &field.length_from {
+        let raw = *values.get(source)?;
+        let source_field = layout.get(source.as_str()).copied();
+        return Some(source_length(source_field, raw));
+    }
+    if let Some(source) = &field.count_from {
+        return usize::try_from(*values.get(source)?).ok();
+    }
+    Some(available)
+}
+
+fn source_length(field: Option<&FieldDef>, raw: u64) -> usize {
+    field
+        .and_then(|field| {
+            field
+                .values
+                .iter()
+                .find(|value| u64::from(value.value) == raw)
+        })
+        .and_then(|value| value.length)
+        .unwrap_or(raw as usize)
+}
+
+fn field_number(field: &FieldDef, bytes: &[u8]) -> Option<u64> {
+    match field.kind {
+        FieldType::Node
+        | FieldType::Uint8
+        | FieldType::Duration
+        | FieldType::CallbackId
+        | FieldType::TxOptions => bytes.first().map(|byte| u64::from(*byte)),
+        FieldType::Bool => Some(u64::from(bytes.first().is_some_and(|byte| *byte != 0))),
+        FieldType::Enum | FieldType::Flags => bytes.first().map(|byte| u64::from(*byte)),
+        FieldType::Uint16 | FieldType::Uint32 | FieldType::Uint => {
+            Some(field.endian.read_unsigned(bytes))
+        }
+        FieldType::Int
+        | FieldType::NodeList
+        | FieldType::Hex
+        | FieldType::Text
+        | FieldType::CommandClassData => None,
+    }
+}
+
+fn field_state(field: &FieldDef, bytes: &[u8]) -> Option<SerialFieldState> {
+    match field.kind {
+        FieldType::Bool => Some(SerialFieldState::Bool(
+            bytes.first().is_some_and(|byte| *byte != 0),
+        )),
+        FieldType::Enum => Some(SerialFieldState::Enum(*bytes.first()?)),
+        FieldType::Flags | FieldType::TxOptions => Some(SerialFieldState::Flags(*bytes.first()?)),
+        FieldType::Node => Some(SerialFieldState::Text(bytes.first()?.to_string())),
+        FieldType::NodeList => Some(SerialFieldState::Text(
+            bytes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        )),
+        FieldType::Uint8 | FieldType::Duration | FieldType::CallbackId => {
+            serial_number_state(field, field.endian.read_unsigned(bytes), 1)
+        }
+        FieldType::Uint16 => serial_number_state(field, field.endian.read_unsigned(bytes), 2),
+        FieldType::Uint32 => serial_number_state(field, field.endian.read_unsigned(bytes), 4),
+        FieldType::Uint => {
+            serial_number_state(field, field.endian.read_unsigned(bytes), bytes.len())
+        }
+        FieldType::Int => Some(SerialFieldState::Text(
+            field.endian.read_signed(bytes).to_string(),
+        )),
+        FieldType::Hex | FieldType::CommandClassData => {
+            Some(SerialFieldState::Text(spaced_hex(bytes)))
+        }
+        FieldType::Text => Some(SerialFieldState::Text(
+            String::from_utf8_lossy(bytes).to_string(),
+        )),
+    }
+}
+
+fn group_field_state(field: &FieldDef, value: u64) -> Option<SerialFieldState> {
+    match field.kind {
+        FieldType::Bool => Some(SerialFieldState::Bool(value != 0)),
+        FieldType::Enum => Some(SerialFieldState::Enum(u8::try_from(value).ok()?)),
+        FieldType::Flags | FieldType::TxOptions => {
+            Some(SerialFieldState::Flags(u8::try_from(value).ok()?))
+        }
+        FieldType::Node => Some(SerialFieldState::Text(value.to_string())),
+        FieldType::Uint8 | FieldType::Duration | FieldType::CallbackId => {
+            serial_number_state(field, value, 1)
+        }
+        FieldType::Uint16 => serial_number_state(field, value, 2),
+        FieldType::Uint32 => serial_number_state(field, value, 4),
+        FieldType::Uint => serial_number_state(field, value, field.kind.fixed_width().unwrap_or(1)),
+        FieldType::Int
+        | FieldType::NodeList
+        | FieldType::Hex
+        | FieldType::Text
+        | FieldType::CommandClassData => None,
+    }
+}
+
+fn serial_number_state(field: &FieldDef, value: u64, width: usize) -> Option<SerialFieldState> {
+    let max = match width {
+        1 => u64::from(u8::MAX),
+        2 => u64::from(u16::MAX),
+        4 => u64::from(u32::MAX),
+        _ => return None,
+    };
+    if value > max {
+        return None;
+    }
+    let text = if field.format == FieldFormat::Hex {
+        spaced_hex(&field.endian.encode_unsigned(value, width))
+    } else {
+        value.to_string()
+    };
+    Some(SerialFieldState::Text(text))
 }
 
 fn command_has_zcl_payload(command_id: u16) -> bool {
@@ -3439,6 +3667,118 @@ mod tests {
         assert_eq!(dialog.command_class, None);
         assert_eq!(dialog.raw_cc, "f0 01 aa");
         assert_eq!(dialog.build().unwrap(), frame);
+    }
+
+    #[test]
+    fn restores_thermostat_setpoint_fields() {
+        // Heating, size=2, Celsius, precision=1, value=20.0 °C.
+        let command = [0x43, 0x01, 0x01, 0x22, 0x00, 0xC8];
+        let frame = codec::build_send_data(5, &command, codec::TX_OPTION_ACK, 9).unwrap();
+        let dialog =
+            new_task_message_builder(None, &[], &[], 4, &Base64Bytes::from(frame.clone()), None);
+        assert_eq!(
+            dialog.operation,
+            BuilderOperation::SerialCommand(hodeco_codec::zwave::SERIAL_SEND_DATA)
+        );
+        assert_eq!(dialog.command_class, Some(0x43));
+        assert_eq!(dialog.command_id, Some(0x01));
+        assert_eq!(
+            dialog.serial_fields.get("setpointType"),
+            Some(&SerialFieldState::Enum(1))
+        );
+        assert_eq!(
+            dialog.serial_fields.get("size"),
+            Some(&SerialFieldState::Enum(2))
+        );
+        assert_eq!(
+            dialog.serial_fields.get("scale"),
+            Some(&SerialFieldState::Enum(0))
+        );
+        assert_eq!(
+            dialog.serial_fields.get("precision"),
+            Some(&SerialFieldState::Text("1".to_string()))
+        );
+        assert_eq!(
+            dialog.serial_fields.get("value"),
+            Some(&SerialFieldState::Text("200".to_string()))
+        );
+        assert_eq!(dialog.build().unwrap(), frame);
+    }
+
+    #[test]
+    fn restores_fields_with_a_length_source() {
+        // Configuration Set, parameter 1, size=2, signed value -1.
+        let command = [0x70, 0x04, 0x00, 0x01, 0x02, 0xFF, 0xFF];
+        let frame = codec::build_send_data(3, &command, codec::TX_OPTION_ACK, 1).unwrap();
+        let mut dialog = new_builder(None, &[], &[]);
+        assert!(restore_protocol_builder(&mut dialog, &frame));
+        assert_eq!(dialog.command_class, Some(0x70));
+        assert_eq!(dialog.command_id, Some(0x04));
+        assert_eq!(
+            dialog.serial_fields.get("size"),
+            Some(&SerialFieldState::Enum(2))
+        );
+        assert_eq!(
+            dialog.serial_fields.get("value"),
+            Some(&SerialFieldState::Text("-1".to_string()))
+        );
+        assert_eq!(dialog.build().unwrap(), frame);
+    }
+
+    #[test]
+    fn restores_fields_with_a_computed_length_inside_a_group() {
+        // Notification Report: 2 event parameters followed by a sequence number.
+        let command = [
+            0x71, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB, 0x07,
+        ];
+        let frame = codec::build_send_data(4, &command, codec::TX_OPTION_ACK, 1).unwrap();
+        let mut dialog = new_builder(None, &[], &[]);
+        assert!(restore_protocol_builder(&mut dialog, &frame));
+        assert_eq!(dialog.command_class, Some(0x71));
+        assert_eq!(dialog.command_id, Some(0x05));
+        assert_eq!(
+            dialog.serial_fields.get("eventParameters"),
+            Some(&SerialFieldState::Text("aa bb".to_string()))
+        );
+        assert_eq!(
+            dialog.serial_fields.get("sequenceNumber"),
+            Some(&SerialFieldState::Text("7".to_string()))
+        );
+        assert_eq!(dialog.build().unwrap(), frame);
+    }
+
+    #[test]
+    fn restores_every_fielded_zwave_command_from_defaults() {
+        let definitions = definitions::current();
+        for class in &definitions.command_classes {
+            for command in &class.commands {
+                if command.fields.is_empty() {
+                    continue;
+                }
+                let mut dialog = new_builder(None, &[], &[]);
+                dialog.command_class = Some(class.id);
+                dialog.command_id = Some(command.id);
+                dialog.reset_command_fields();
+                let Ok(bytes) = dialog.command_bytes() else {
+                    continue;
+                };
+                let frame = codec::build_send_data(1, &bytes, codec::TX_OPTION_ACK, 1).unwrap();
+                let mut restored = new_builder(None, &[], &[]);
+                assert!(
+                    restore_protocol_builder(&mut restored, &frame),
+                    "{} / {} did not restore typed fields",
+                    class.name,
+                    command.name
+                );
+                assert_eq!(
+                    restored.build().unwrap(),
+                    frame,
+                    "{} / {} did not rebuild the frame",
+                    class.name,
+                    command.name
+                );
+            }
+        }
     }
 
     #[test]

@@ -6193,6 +6193,73 @@ mod tests {
         panic!("the add error did not arrive");
     }
 
+    fn drag_select(demo: &mut DemoUi, rect: egui::Rect) {
+        let start = egui::pos2(rect.left() + 1.0, rect.center().y);
+        let end = egui::pos2(rect.right() - 1.0, rect.center().y);
+        let modifiers = egui::Modifiers::default();
+        let _ = demo.run(vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers,
+            },
+        ]);
+        let _ = demo.run(vec![
+            egui::Event::PointerMoved(end),
+            egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            },
+        ]);
+        let _ = demo.run(Vec::new());
+    }
+
+    fn copy_text(output: &egui::FullOutput) -> Option<String> {
+        output.platform_output.commands.iter().find_map(|command| {
+            if let egui::OutputCommand::CopyText(text) = command {
+                Some(text.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn message_table_and_context_text_supports_copy() {
+        let mut demo = DemoUi::new();
+        demo.wait_until_ready();
+        demo.app.tab = Tab::Messages;
+
+        let mut output = demo.run(Vec::new());
+        for _ in 0..40 {
+            if !demo.app.messages.messages.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            output = demo.run(Vec::new());
+        }
+        // Table labels are selectable and copy with Ctrl+C.
+        let header_rect = text_rect(&output, "Time");
+        drag_select(&mut demo, header_rect);
+        let copy = demo.run(vec![egui::Event::Copy]);
+        assert_eq!(copy_text(&copy).as_deref(), Some("Time"));
+
+        // A plain click still selects the row even though the label consumed it.
+        demo.click(egui::pos2(60.0, 500.0));
+        let _ = demo.run(Vec::new());
+        assert!(demo.app.messages.selected.is_some());
+
+        // The bottom context pane supports the same drag-and-copy flow.
+        let rect = text_rect(&demo.run(Vec::new()), "Message ID");
+        drag_select(&mut demo, rect);
+        let output = demo.run(vec![egui::Event::Copy]);
+        assert_eq!(copy_text(&output).as_deref(), Some("Message ID"));
+    }
+
     #[test]
     fn demo_discovery_add_service_adds_the_discovered_entry() {
         use hodeco_contract::domain::DiscoveryEntry;

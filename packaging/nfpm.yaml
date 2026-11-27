@@ -3,6 +3,7 @@
 # The release workflow sets the HODECO_* variables before invoking nfpm.
 # For a local build, stage the files under $HODECO_STAGE as:
 #
+#   conffiles/entities.json
 #   etc/hodeco/config.yaml
 #   usr/bin/hodeco
 #   usr/lib/systemd/system/hodeco.service
@@ -10,9 +11,12 @@
 #   usr/share/hodeco/site/
 #   usr/share/doc/hodeco/
 #
+# The staged site tree must not contain entities.json; it is installed as a
+# conffile from conffiles/entities.json instead. See the contents entry below.
+#
 # and run, for example:
 #
-#   HODECO_VERSION=0.3.1 HODECO_ARCH=amd64 HODECO_STAGE="$PWD/pkgroot" \
+#   HODECO_VERSION=0.3.2 HODECO_ARCH=amd64 HODECO_STAGE="$PWD/pkgroot" \
 #   HODECO_MAINTAINER="Stas Makutin <33303268+stas-makutin@users.noreply.github.com>" \
 #   HODECO_HOMEPAGE="https://github.com/OWNER/REPO" \
 #   nfpm package --config packaging/nfpm.yaml --packager deb --target /tmp/hodeco.deb
@@ -69,6 +73,18 @@ contents:
     dst: /usr/share/hodeco/site
     type: tree
     expand: true
+
+  # Device labels are user-editable UI data. Keep this file out of the site
+  # tree above and install it as a conffile so upgrades preserve local edits.
+  # Deb marks it in conffiles; RPM maps the type to %config(noreplace).
+  # This is intentionally outside /etc because the web UI fetches the file from
+  # the site root and it is presentation data, not daemon configuration.
+  - src: ${HODECO_STAGE}/conffiles/entities.json
+    dst: /usr/share/hodeco/site/entities.json
+    type: config|noreplace
+    expand: true
+    file_info:
+      mode: 0644
 
   - src: ${HODECO_STAGE}/usr/share/doc/hodeco
     dst: /usr/share/doc/hodeco

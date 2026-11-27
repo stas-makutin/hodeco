@@ -77,9 +77,10 @@
           "name": "nodeList",
           "label": "Node list",
           "kind": "hex",
+          "role": "nodeBitmask",
           "lengthFrom": "nodeListLength",
           "description": "Bitmask of node IDs present in the controller.",
-          "required": true
+          "required": false
         },
         {
           "name": "chipType",
@@ -325,6 +326,7 @@
           "name": "supportedFunctions",
           "label": "Supported functions",
           "kind": "hex",
+          "role": "functionBitmask",
           "remaining": true,
           "description": "Bitmask of supported Serial API function IDs.",
           "required": true
@@ -490,6 +492,7 @@
           "name": "commandClasses",
           "label": "Command classes",
           "kind": "hex",
+          "role": "commandClassList",
           "lengthFrom": "ccLength",
           "description": "Supported and controlled command classes with the control mark.",
           "required": true
@@ -1886,45 +1889,290 @@
       ],
       "responseFields": [
         {
-          "name": "capabilities",
-          "label": "Capabilities",
-          "kind": "uint8",
-          "format": "hex",
-          "required": true,
-          "description": "Protocol capability bits."
+          "group": "capabilities",
+          "length": 1,
+          "fields": [
+            {
+              "name": "listening",
+              "label": "Listening",
+              "kind": "bool",
+              "mask": 128,
+              "shift": 7,
+              "required": true
+            },
+            {
+              "name": "routing",
+              "label": "Routing",
+              "kind": "bool",
+              "mask": 64,
+              "shift": 6,
+              "required": true
+            },
+            {
+              "name": "supports40k",
+              "label": "Supports 40 kbps",
+              "kind": "bool",
+              "mask": 16,
+              "shift": 4,
+              "required": true
+            },
+            {
+              "name": "supports9600",
+              "label": "Supports 9600 bps",
+              "kind": "bool",
+              "mask": 8,
+              "shift": 3,
+              "required": true
+            },
+            {
+              "name": "protocolVersion",
+              "label": "Protocol version",
+              "kind": "uint8",
+              "mask": 7,
+              "shift": 0,
+              "required": true
+            }
+          ]
         },
         {
-          "name": "security",
-          "label": "Security",
-          "kind": "uint8",
-          "format": "hex",
-          "required": true,
-          "description": "Protocol security bits."
+          "group": "nodeOptions",
+          "length": 1,
+          "fields": [
+            {
+              "name": "optionalFunctionality",
+              "label": "Optional functionality",
+              "kind": "bool",
+              "mask": 128,
+              "shift": 7,
+              "required": true
+            },
+            {
+              "name": "frequentListening",
+              "label": "Frequent listening",
+              "kind": "enum",
+              "mask": 96,
+              "shift": 5,
+              "required": true,
+              "values": [
+                {
+                  "value": 0,
+                  "name": "No"
+                },
+                {
+                  "value": 1,
+                  "name": "250 ms"
+                },
+                {
+                  "value": 2,
+                  "name": "1000 ms"
+                }
+              ]
+            },
+            {
+              "name": "beaming",
+              "label": "Beaming",
+              "kind": "bool",
+              "mask": 16,
+              "shift": 4,
+              "required": true
+            },
+            {
+              "name": "controller",
+              "label": "Controller node",
+              "kind": "bool",
+              "mask": 2,
+              "shift": 1,
+              "required": true
+            },
+            {
+              "name": "routingEndNode",
+              "label": "Routing end node",
+              "kind": "bool",
+              "mask": 8,
+              "shift": 3,
+              "required": true
+            },
+            {
+              "name": "hasSpecificDeviceClass",
+              "label": "Has specific device class",
+              "kind": "bool",
+              "mask": 4,
+              "shift": 2,
+              "required": true
+            },
+            {
+              "name": "security",
+              "label": "Security",
+              "kind": "bool",
+              "mask": 1,
+              "shift": 0,
+              "required": true
+            }
+          ]
         },
         {
-          "name": "reserved",
-          "label": "Reserved",
-          "kind": "uint8",
-          "format": "hex",
-          "required": true
+          "group": "speedExtension",
+          "length": 1,
+          "fields": [
+            {
+              "name": "supports100k",
+              "label": "Supports 100 kbps",
+              "kind": "bool",
+              "mask": 1,
+              "shift": 0,
+              "required": true
+            }
+          ]
         },
         {
           "name": "basicType",
-          "label": "Basic type",
-          "kind": "uint8",
-          "format": "hex",
-          "required": true
+          "label": "Basic device class",
+          "kind": "enum",
+          "rawSuffix": true,
+          "required": true,
+          "values": [
+            {
+              "value": 0,
+              "name": "Not known"
+            },
+            {
+              "value": 1,
+              "name": "Controller"
+            },
+            {
+              "value": 2,
+              "name": "Static Controller"
+            },
+            {
+              "value": 3,
+              "name": "Slave"
+            },
+            {
+              "value": 4,
+              "name": "Routing Slave"
+            }
+          ]
         },
         {
           "name": "genericType",
-          "label": "Generic type",
-          "kind": "uint8",
-          "format": "hex",
-          "required": true
+          "label": "Generic device class",
+          "kind": "enum",
+          "rawSuffix": true,
+          "required": true,
+          "values": [
+            {
+              "value": 0,
+              "name": "Not known"
+            },
+            {
+              "value": 1,
+              "name": "Generic Controller"
+            },
+            {
+              "value": 2,
+              "name": "Static Controller"
+            },
+            {
+              "value": 3,
+              "name": "AV Control Point"
+            },
+            {
+              "value": 4,
+              "name": "Display"
+            },
+            {
+              "value": 5,
+              "name": "Network Extender"
+            },
+            {
+              "value": 6,
+              "name": "Appliance"
+            },
+            {
+              "value": 7,
+              "name": "Sensor Notification"
+            },
+            {
+              "value": 8,
+              "name": "Thermostat"
+            },
+            {
+              "value": 9,
+              "name": "Window Covering"
+            },
+            {
+              "value": 15,
+              "name": "Repeater Slave"
+            },
+            {
+              "value": 16,
+              "name": "Binary Switch"
+            },
+            {
+              "value": 17,
+              "name": "Multilevel Switch"
+            },
+            {
+              "value": 18,
+              "name": "Remote Switch"
+            },
+            {
+              "value": 19,
+              "name": "Toggle Switch"
+            },
+            {
+              "value": 21,
+              "name": "ZIP Node"
+            },
+            {
+              "value": 22,
+              "name": "Ventilation"
+            },
+            {
+              "value": 23,
+              "name": "Security Panel"
+            },
+            {
+              "value": 24,
+              "name": "Wall Controller"
+            },
+            {
+              "value": 32,
+              "name": "Binary Sensor"
+            },
+            {
+              "value": 33,
+              "name": "Multilevel Sensor"
+            },
+            {
+              "value": 48,
+              "name": "Pulse Meter"
+            },
+            {
+              "value": 49,
+              "name": "Meter"
+            },
+            {
+              "value": 64,
+              "name": "Entry Control"
+            },
+            {
+              "value": 80,
+              "name": "Semi-Interoperable"
+            },
+            {
+              "value": 161,
+              "name": "Alarm Sensor"
+            },
+            {
+              "value": 255,
+              "name": "Non-Interoperable"
+            }
+          ]
         },
         {
           "name": "specificType",
-          "label": "Specific type",
+          "label": "Specific device class",
           "kind": "uint8",
           "format": "hex",
           "required": true
@@ -2133,6 +2381,7 @@
       "name": "ApplicationControllerUpdate",
       "description": "Application update notification.",
       "incomingOnly": true,
+      "requestSummary": "Node {nodeId} · {status}",
       "fields": [
         {
           "name": "status",
@@ -2168,6 +2417,18 @@
             {
               "value": 132,
               "name": "Node info received"
+            },
+            {
+              "value": 133,
+              "name": "Smart Start home ID received"
+            },
+            {
+              "value": 134,
+              "name": "Smart Start node info received"
+            },
+            {
+              "value": 135,
+              "name": "Smart Start Long Range home ID received"
             }
           ]
         },
@@ -2188,6 +2449,8 @@
           "name": "nodeInfo",
           "label": "Node information",
           "kind": "hex",
+          "role": "nodeInfo",
+          "description": "Basic, generic, and specific device classes followed by supported command classes; 0xEF starts the controlled-class list.",
           "lengthFrom": "length",
           "required": false
         }
@@ -7430,6 +7693,7 @@
               "name": "commandClasses",
               "label": "Command classes",
               "kind": "hex",
+              "role": "commandClassList",
               "description": "Supported command class IDs.",
               "remaining": true,
               "required": true

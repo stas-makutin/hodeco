@@ -4,6 +4,49 @@ All notable changes to hodeco are recorded here. The project follows semantic
 versioning for the application release. The JSON-RPC protocol version is listed
 separately because it can stay compatible across releases.
 
+## 0.3.2 — 2026-11-26
+
+Patch release with task-builder restoration, package upgrade safety, copyable
+UI text, and more complete Z-Wave decoding. There are no configuration or
+message-log format breaks.
+
+### Added
+
+- **Copyable text in Messages and Runs.** Table text and the inline message,
+  run, and run-history detail panes are selectable. `Ctrl+C` copies the
+  selection. Row clicks and double-click-to-expand still work.
+- **Z-Wave node information decoding.** `ApplicationControllerUpdate`
+  `node info received` payloads are split into basic, generic, and specific
+  device classes plus supported and controlled command class lists. The
+  `0xEF` support/control marker is honored. Other update statuses keep their
+  raw payloads.
+- **More Z-Wave catalog decoding.** `SerialAPIStarted` and
+  `Multi Channel Capability Report` command-class lists resolve to class names.
+  `GetInitData` node bitmasks expand to node IDs. `GetCapabilities` function
+  bitmasks expand to Serial API function names. `ZW_GetNodeProtocolInfo`
+  responses expose listening/routing/speed/protocol flags, optional/FLiRS/
+  beaming/security flags, and basic/generic device class names.
+
+### Changed
+
+- **Package upgrades preserve device labels.** Linux packages install
+  `/usr/share/hodeco/site/entities.json` as a conffile (`%config(noreplace)` on
+  RPM), so local node labels survive upgrades. Debian may prompt with a
+  `.dpkg-dist` merge file; RPM writes `.rpmnew`. The staged package site tree no
+  longer contains `entities.json`; it is installed through the conffile entry.
+
+### Fixed
+
+- **Task message builder restores typed Z-Wave fields.** Reopening a saved task
+  message now restores fields for any command with a `zwave.json` layout, not
+  only the built-in command presets. The stored frame is rebuilt and compared
+  before the typed state is accepted; otherwise the raw editor remains.
+
+### Protocol
+
+- Protocol version stays `1.0`. There are no JSON-RPC request or response
+  changes in this release.
+
 ## 0.3.1 — 2026-11-26
 
 Patch release with run-history, Z-Wave builder, restart, and first-run access

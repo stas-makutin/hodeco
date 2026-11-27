@@ -216,6 +216,10 @@ timestamp-only paging. The list uses the gateway's returned `next` bounds for
 older/newer paging. Details for a message that is no longer loaded are fetched
 with `messages.get`.
 
+Table text and the inline message, run, and run-history detail panes are
+selectable; `Ctrl+C` copies the selection. Row clicks still select rows, and
+double-clicking a message row opens the expanded message dialog.
+
 Filters are a separate OR-of-AND payload condition list plus state, protocol,
 transport, and service metadata. **Options...** adds ANDed search-only
 conditions without hiding rows. Filters are evaluated by the gateway over the
@@ -312,6 +316,9 @@ Deferred:
 - Codec data is bundled, with optional runtime overrides: `zwave.json`,
   `zigbee.json`, and `entities.json` are read next to the native executable or
   web bundle when present. Invalid files fall back to the embedded copies.
+  Linux packages treat the installed `site/entities.json` as a conffile, so
+  device-label edits survive upgrades; `zwave.json` and `zigbee.json` remain
+  package data.
 
 ## Tests and gallery
 

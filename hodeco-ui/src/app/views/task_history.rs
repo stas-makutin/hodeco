@@ -422,12 +422,15 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                 history.scroll_to_selected = false;
                 history.scroll_to_bottom = false;
 
-                ui.style_mut().interaction.selectable_labels = false;
+                // Text in the table stays selectable so Ctrl+C can copy it.
+                // Selectable labels consume clicks, so row selection is also
+                // checked from raw pointer input below.
+                ui.style_mut().interaction.selectable_labels = true;
                 let mut table = TableBuilder::new(ui)
                     .id_salt("task-history-table")
                     .striped(true)
                     .resizable(true)
-                    .sense(egui::Sense::CLICK)
+                    .sense(egui::Sense::hover())
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                     .column(Column::initial(150.0).at_least(120.0))
                     .column(Column::initial(160.0).at_least(110.0))
@@ -503,7 +506,8 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                                     ui.label(RichText::new("—").color(palette.muted));
                                 }
                             });
-                            if row.response().clicked() {
+                            let response = row.response();
+                            if response.clicked() || widgets::row_clicked(&response) {
                                 if history.selected == Some(run.id) {
                                     history.clear_selection();
                                     selected_row = None;
@@ -579,6 +583,7 @@ fn detail_frame(app: &App, ui: &mut Ui, history: &mut TaskHistoryUi) {
         .stroke(egui::Stroke::new(1.0, palette.border))
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
+            widgets::allow_text_selection(ui);
             ui.set_min_width(ui.available_width());
             ui.set_min_height(280.0);
             ui.add_space(4.0);

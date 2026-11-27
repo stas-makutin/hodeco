@@ -671,15 +671,20 @@ fn decode_field_layout(
                     data_offset + cursor
                 ));
             }
-            if !bytes.is_empty() {
-                push_field(
+            if !bytes.is_empty()
+                && let Some(summary) = decode_field_payload(
+                    definitions,
                     fields,
                     field,
                     bytes,
                     data_offset + cursor,
                     &mut parsed,
                     meta,
-                );
+                    issues,
+                    context,
+                )
+            {
+                parsed.nested_summary = Some(summary);
             }
             cursor = data.len();
             continue;
@@ -761,28 +766,18 @@ fn decode_field_layout(
         }
 
         let bytes = &data[cursor..cursor + length];
-        if field.kind == FieldType::CommandClassData {
-            let nested = decode_command_class(
-                definitions,
-                fields,
-                bytes,
-                data_offset + cursor,
-                meta,
-                issues,
-                context,
-            );
-            if nested.summary.is_some() {
-                parsed.nested_summary = nested.summary;
-            }
-        } else {
-            push_field(
-                fields,
-                field,
-                bytes,
-                data_offset + cursor,
-                &mut parsed,
-                meta,
-            );
+        if let Some(summary) = decode_field_payload(
+            definitions,
+            fields,
+            field,
+            bytes,
+            data_offset + cursor,
+            &mut parsed,
+            meta,
+            issues,
+            context,
+        ) {
+            parsed.nested_summary = Some(summary);
         }
 
         cursor += length;
@@ -790,6 +785,48 @@ fn decode_field_layout(
 
     parsed.consumed = cursor;
     parsed
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_field_payload(
+    definitions: &ZWaveDefinitions,
+    fields: &mut Vec<DecodedField>,
+    field: &FieldDef,
+    bytes: &[u8],
+    offset: usize,
+    parsed: &mut LayoutResult,
+    meta: &mut DecodeMeta,
+    issues: &mut Vec<String>,
+    context: &str,
+) -> Option<String> {
+    match field.role {
+        FieldRole::NodeInfo => decode_node_info(
+            definitions,
+            fields,
+            field,
+            bytes,
+            offset,
+            parsed,
+            issues,
+            context,
+        ),
+        FieldRole::CommandClassList => {
+            decode_command_class_list(definitions, fields, field, bytes, offset, parsed)
+        }
+        FieldRole::NodeBitmask => decode_node_bitmask(fields, field, bytes, offset, parsed),
+        FieldRole::FunctionBitmask => {
+            decode_function_bitmask(definitions, fields, field, bytes, offset, parsed)
+        }
+        _ => {
+            if field.kind == FieldType::CommandClassData {
+                let nested =
+                    decode_command_class(definitions, fields, bytes, offset, meta, issues, context);
+                return nested.summary;
+            }
+            push_field(fields, field, bytes, offset, parsed, meta);
+        }
+    }
+    None
 }
 
 fn push_field(
@@ -835,8 +872,315 @@ fn push_field(
         | FieldRole::Payload
         | FieldRole::DestinationType
         | FieldRole::RxStatus
-        | FieldRole::TxStatus => {}
+        | FieldRole::TxStatus
+        | FieldRole::NodeInfo
+        | FieldRole::CommandClassList
+        | FieldRole::NodeBitmask
+        | FieldRole::FunctionBitmask => {}
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_node_info(
+    definitions: &ZWaveDefinitions,
+    fields: &mut Vec<DecodedField>,
+    field: &FieldDef,
+    bytes: &[u8],
+    data_offset: usize,
+    parsed: &mut LayoutResult,
+    issues: &mut Vec<String>,
+    context: &str,
+) {
+    if bytes.is_empty() {
+        if field.required {
+            issues.push(format!(
+                "{context}: missing {} at offset 0x{:04x}",
+                field.label, data_offset
+            ));
+        }
+        return;
+    }
+
+    let status = parsed.values.get("status").and_then(|value| value.number);
+    if !status.is_none_or(|status| status == 0x84) {
+        push_raw_node_info(fields, field, bytes, data_offset, parsed);
+        return;
+    }
+    if bytes.len() < 3 {
+        issues.push(format!(
+            "{context}: {} needs at least 3 bytes at offset 0x{:04x}, found {}",
+            field.label,
+            data_offset,
+            bytes.len()
+        ));
+        push_raw_node_info(fields, field, bytes, data_offset, parsed);
+        return;
+    }
+
+    let basic = bytes[0];
+    let generic = bytes[1];
+    let specific = bytes[2];
+    fields.push(DecodedField {
+        label: "Basic device class".to_string(),
+        value: named_device_class(basic_device_class_name(basic), basic),
+        kind: FieldKind::Value,
+        range: data_offset..data_offset + 1,
+    });
+    fields.push(DecodedField {
+        label: "Generic device class".to_string(),
+        value: named_device_class(generic_device_class_name(generic), generic),
+        kind: FieldKind::Value,
+        range: data_offset + 1..data_offset + 2,
+    });
+    fields.push(DecodedField {
+        label: "Specific device class".to_string(),
+        value: format!("0x{specific:02x}"),
+        kind: FieldKind::Value,
+        range: data_offset + 2..data_offset + 3,
+    });
+
+    let classes = &bytes[3..];
+    let control_mark = classes.iter().position(|class| *class == 0xEF);
+    let supported_end = control_mark.unwrap_or(classes.len());
+    let supported = &classes[..supported_end];
+    if !supported.is_empty() {
+        fields.push(DecodedField {
+            label: "Command classes".to_string(),
+            value: command_class_list(definitions, supported),
+            kind: FieldKind::CommandClass,
+            range: data_offset + 3..data_offset + 3 + supported.len(),
+        });
+    }
+    if let Some(mark) = control_mark {
+        let controlled = &classes[mark + 1..];
+        if !controlled.is_empty() {
+            fields.push(DecodedField {
+                label: "Controlled command classes".to_string(),
+                value: command_class_list(definitions, controlled),
+                kind: FieldKind::CommandClass,
+                range: data_offset + 3 + mark + 1..data_offset + bytes.len(),
+            });
+        }
+    }
+
+    if !field.name.is_empty() {
+        parsed.values.insert(
+            field.name.clone(),
+            FieldValue {
+                text: spaced_hex(bytes),
+                number: None,
+            },
+        );
+    }
+}
+
+fn push_raw_node_info(
+    fields: &mut Vec<DecodedField>,
+    field: &FieldDef,
+    bytes: &[u8],
+    data_offset: usize,
+    parsed: &mut LayoutResult,
+) {
+    fields.push(DecodedField {
+        label: field.label.clone(),
+        value: spaced_hex(bytes),
+        kind: FieldKind::Value,
+        range: data_offset..data_offset + bytes.len(),
+    });
+    if !field.name.is_empty() {
+        parsed.values.insert(
+            field.name.clone(),
+            FieldValue {
+                text: spaced_hex(bytes),
+                number: None,
+            },
+        );
+    }
+}
+
+fn named_device_class(name: Option<&str>, value: u8) -> String {
+    match name {
+        Some(name) => format!("{name} (0x{value:02x})"),
+        None => format!("0x{value:02x}"),
+    }
+}
+
+fn basic_device_class_name(value: u8) -> Option<&'static str> {
+    match value {
+        0x01 => Some("Controller"),
+        0x02 => Some("Static Controller"),
+        0x03 => Some("Slave"),
+        0x04 => Some("Routing Slave"),
+        _ => None,
+    }
+}
+
+fn generic_device_class_name(value: u8) -> Option<&'static str> {
+    match value {
+        0x01 => Some("Generic Controller"),
+        0x02 => Some("Static Controller"),
+        0x03 => Some("AV Control Point"),
+        0x04 => Some("Display"),
+        0x05 => Some("Network Extender"),
+        0x06 => Some("Appliance"),
+        0x07 => Some("Sensor Notification"),
+        0x08 => Some("Thermostat"),
+        0x09 => Some("Window Covering"),
+        0x0F => Some("Repeater Slave"),
+        0x10 => Some("Binary Switch"),
+        0x11 => Some("Multilevel Switch"),
+        0x12 => Some("Remote Switch"),
+        0x13 => Some("Toggle Switch"),
+        0x15 => Some("ZIP Node"),
+        0x16 => Some("Ventilation"),
+        0x17 => Some("Security Panel"),
+        0x18 => Some("Wall Controller"),
+        0x20 => Some("Binary Sensor"),
+        0x21 => Some("Multilevel Sensor"),
+        0x30 => Some("Pulse Meter"),
+        0x31 => Some("Meter"),
+        0x40 => Some("Entry Control"),
+        0x50 => Some("Semi-Interoperable"),
+        0xA1 => Some("Alarm Sensor"),
+        0xFF => Some("Non-Interoperable"),
+        _ => None,
+    }
+}
+
+fn decode_command_class_list(
+    definitions: &ZWaveDefinitions,
+    fields: &mut Vec<DecodedField>,
+    field: &FieldDef,
+    bytes: &[u8],
+    offset: usize,
+    parsed: &mut LayoutResult,
+) {
+    let control_mark = bytes.iter().position(|class| *class == 0xEF);
+    let supported_end = control_mark.unwrap_or(bytes.len());
+    let supported = &bytes[..supported_end];
+    if !supported.is_empty() {
+        fields.push(DecodedField {
+            label: "Command classes".to_string(),
+            value: command_class_list(definitions, supported),
+            kind: FieldKind::CommandClass,
+            range: offset..offset + supported.len(),
+        });
+    }
+    if let Some(mark) = control_mark {
+        let controlled = &bytes[mark + 1..];
+        if !controlled.is_empty() {
+            fields.push(DecodedField {
+                label: "Controlled command classes".to_string(),
+                value: command_class_list(definitions, controlled),
+                kind: FieldKind::CommandClass,
+                range: offset + mark + 1..offset + bytes.len(),
+            });
+        }
+    }
+    if !field.name.is_empty() {
+        parsed.values.insert(
+            field.name.clone(),
+            FieldValue {
+                text: spaced_hex(bytes),
+                number: None,
+            },
+        );
+    }
+}
+
+fn decode_node_bitmask(
+    fields: &mut Vec<DecodedField>,
+    field: &FieldDef,
+    bytes: &[u8],
+    offset: usize,
+    parsed: &mut LayoutResult,
+) {
+    let nodes = bytes
+        .iter()
+        .enumerate()
+        .flat_map(|(byte_index, byte)| {
+            let byte = *byte;
+            (0..8u32).filter_map(move |bit| {
+                (byte & (1u8 << bit) != 0).then_some(byte_index * 8 + bit as usize + 1)
+            })
+        })
+        .collect::<Vec<_>>();
+    let text = if nodes.is_empty() {
+        "None".to_string()
+    } else {
+        nodes
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    fields.push(DecodedField {
+        label: field.label.clone(),
+        value: text.clone(),
+        kind: FieldKind::Node,
+        range: offset..offset + bytes.len(),
+    });
+    if !field.name.is_empty() {
+        parsed
+            .values
+            .insert(field.name.clone(), FieldValue { text, number: None });
+    }
+}
+
+fn decode_function_bitmask(
+    definitions: &ZWaveDefinitions,
+    fields: &mut Vec<DecodedField>,
+    field: &FieldDef,
+    bytes: &[u8],
+    offset: usize,
+    parsed: &mut LayoutResult,
+) {
+    let functions = bytes
+        .iter()
+        .enumerate()
+        .flat_map(|(byte_index, byte)| {
+            let byte = *byte;
+            (0..8u32).filter_map(move |bit| {
+                (byte & (1u8 << bit) != 0).then_some(byte_index * 8 + bit as usize + 1)
+            })
+        })
+        .map(|function| {
+            u8::try_from(function)
+                .ok()
+                .and_then(|id| definitions.serial_command(id))
+                .map(|definition| definition.name.clone())
+                .unwrap_or_else(|| format!("0x{function:02x}"))
+        })
+        .collect::<Vec<_>>();
+    let text = if functions.is_empty() {
+        "None".to_string()
+    } else {
+        functions.join(", ")
+    };
+    fields.push(DecodedField {
+        label: field.label.clone(),
+        value: text.clone(),
+        kind: FieldKind::Value,
+        range: offset..offset + bytes.len(),
+    });
+    if !field.name.is_empty() {
+        parsed
+            .values
+            .insert(field.name.clone(), FieldValue { text, number: None });
+    }
+}
+
+fn command_class_list(definitions: &ZWaveDefinitions, classes: &[u8]) -> String {
+    classes
+        .iter()
+        .map(|class| {
+            definitions
+                .command_class(*class)
+                .map(|definition| definition.name.clone())
+                .unwrap_or_else(|| format!("0x{class:02x}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn decode_field_value(field: &FieldDef, bytes: &[u8]) -> FieldValue {
@@ -1025,7 +1369,11 @@ fn field_kind(field: &FieldDef) -> FieldKind {
         | FieldRole::Payload
         | FieldRole::DestinationType
         | FieldRole::RxStatus
-        | FieldRole::TxStatus => match field.kind {
+        | FieldRole::TxStatus
+        | FieldRole::NodeInfo
+        | FieldRole::CommandClassList
+        | FieldRole::NodeBitmask
+        | FieldRole::FunctionBitmask => match field.kind {
             FieldType::Node | FieldType::NodeList => FieldKind::Node,
             FieldType::CommandClassData => FieldKind::CommandClass,
             _ => FieldKind::Value,
@@ -1500,8 +1848,154 @@ mod tests {
             decoded.frames[0]
                 .fields
                 .iter()
-                .any(|field| field.label == "Node information" && field.value == "04 11 06")
+                .any(|field| field.label == "Basic device class"
+                    && field.value == "Routing Slave (0x04)")
         );
+        assert!(
+            decoded.frames[0]
+                .fields
+                .iter()
+                .any(|field| field.label == "Generic device class"
+                    && field.value == "Multilevel Switch (0x11)")
+        );
+        assert!(
+            decoded.frames[0]
+                .fields
+                .iter()
+                .any(|field| field.label == "Specific device class" && field.value == "0x06")
+        );
+    }
+
+    #[test]
+    fn decodes_application_controller_update_command_classes() {
+        let frame = request(&[
+            0x49, 0x84, 4, 8, 0x04, 0x11, 0x06, 0x25, 0x70, 0xEF, 0x20, 0x25,
+        ]);
+        let decoded = decode(&frame);
+        let fields = &decoded.frames[0].fields;
+        assert!(fields.iter().any(|field| {
+            field.label == "Command classes" && field.value == "Switch Binary, Configuration"
+        }));
+        assert!(fields.iter().any(|field| {
+            field.label == "Controlled command classes" && field.value == "Basic, Switch Binary"
+        }));
+    }
+
+    #[test]
+    fn application_controller_update_keeps_other_status_payloads_raw() {
+        let frame = request(&[0x49, 0x85, 0, 3, 0x00, 0x12, 0x34]);
+        let decoded = decode(&frame);
+        let fields = &decoded.frames[0].fields;
+        assert!(fields.iter().any(|field| {
+            field.label == "Update status" && field.value == "Smart Start home ID received (0x85)"
+        }));
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.label == "Node information" && field.value == "00 12 34")
+        );
+    }
+
+    #[test]
+    fn decodes_serial_api_started_command_classes() {
+        let frame = request(&[
+            0x0A, 0x00, 0x01, 0x01, 0x11, 0x06, 0x04, 0x25, 0x70, 0xEF, 0x20, 0x00,
+        ]);
+        let decoded = decode(&frame);
+        let fields = &decoded.frames[0].fields;
+        assert!(fields.iter().any(|field| {
+            field.label == "Command classes" && field.value == "Switch Binary, Configuration"
+        }));
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.label == "Controlled command classes" && field.value == "Basic")
+        );
+    }
+
+    #[test]
+    fn decodes_multi_channel_capability_command_classes() {
+        let frame = request(&[
+            0x04, 0x00, 0x05, 0x07, 0x60, 0x0A, 0x01, 0x11, 0x06, 0x25, 0x70,
+        ]);
+        let decoded = decode(&frame);
+        assert!(
+            decoded.frames[0]
+                .fields
+                .iter()
+                .any(|field| field.label == "Command classes"
+                    && field.value == "Switch Binary, Configuration")
+        );
+    }
+
+    #[test]
+    fn decodes_init_data_node_list_bitmask() {
+        let frame = response(&[0x02, 0x01, 0x00, 0x02, 0x03, 0x04, 0x04, 0x00]);
+        let decoded = decode(&frame);
+        let fields = &decoded.frames[0].fields;
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.label == "Node list" && field.value == "1, 2, 11")
+        );
+    }
+
+    #[test]
+    fn accepts_empty_init_data_node_list_for_end_devices() {
+        let frame = response(&[0x02, 0x01, 0x00, 0x00, 0x04, 0x00]);
+        let decoded = decode(&frame);
+        assert!(decoded.issues.is_empty());
+        assert!(
+            !decoded.frames[0]
+                .fields
+                .iter()
+                .any(|field| field.label == "Node list")
+        );
+    }
+
+    #[test]
+    fn decodes_capabilities_supported_functions() {
+        let frame = response(&[
+            0x07, 0x01, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x06, 0x00, 0x00,
+        ]);
+        let decoded = decode(&frame);
+        let fields = &decoded.frames[0].fields;
+        assert!(fields.iter().any(|field| {
+            field.label == "Supported functions"
+                && field.value == "GetInitData, ApplicationNodeInformation"
+        }));
+    }
+
+    #[test]
+    fn decodes_node_protocol_info_flags_and_device_classes() {
+        let frame = response(&[0x41, 0xCB, 0xDD, 0x01, 0x04, 0x40, 0x01]);
+        let decoded = decode(&frame);
+        let fields = &decoded.frames[0].fields;
+        for (label, value) in [
+            ("Listening", "On"),
+            ("Routing", "On"),
+            ("Supports 40 kbps", "Off"),
+            ("Supports 9600 bps", "On"),
+            ("Protocol version", "3"),
+            ("Optional functionality", "On"),
+            ("Frequent listening", "1000 ms"),
+            ("Beaming", "On"),
+            ("Controller node", "Off"),
+            ("Routing end node", "On"),
+            ("Has specific device class", "On"),
+            ("Security", "On"),
+            ("Supports 100 kbps", "On"),
+            ("Basic device class", "Routing Slave (0x04)"),
+            ("Generic device class", "Entry Control (0x40)"),
+            ("Specific device class", "0x01"),
+        ] {
+            assert!(
+                fields
+                    .iter()
+                    .any(|field| field.label == label && field.value == value),
+                "missing {label}: {value}; fields={fields:?}"
+            );
+        }
     }
 
     #[test]

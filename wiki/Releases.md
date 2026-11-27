@@ -118,7 +118,10 @@ They install:
 The documentation directory contains the app licenses and both backend and
 frontend third-party notices (`THIRD-PARTY-LICENSES.md` and
 `THIRD-PARTY-LICENSES-UI.md`). The configuration file is installed as a package
-configuration file, so local edits survive upgrades.
+configuration file, so local edits survive upgrades. `site/entities.json` is
+installed as a configuration file too, so local device-label edits survive
+package upgrades; the package's new default is left beside the user copy as
+`entities.json.dpkg-dist` or `entities.json.rpmnew` when it conflicts.
 
 Install with the normal package manager:
 

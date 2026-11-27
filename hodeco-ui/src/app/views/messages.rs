@@ -281,9 +281,10 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
             return;
         }
 
-        // Row selection should work anywhere in a row. Selectable labels would
-        // otherwise consume the click and start a text selection instead.
-        ui.style_mut().interaction.selectable_labels = false;
+        // Text in the table stays selectable so Ctrl+C can copy it. Selectable
+        // labels consume clicks, so row selection is also checked from raw
+        // pointer input below.
+        ui.style_mut().interaction.selectable_labels = true;
 
         let services = app.services.clone();
         let compact = ui.available_width() < 1200.0;
@@ -368,7 +369,7 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                     .id_salt("messages-table")
                     .striped(true)
                     .resizable(true)
-                    .sense(egui::Sense::CLICK)
+                    .sense(egui::Sense::hover())
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                     .column(Column::initial(150.0).at_least(132.0))
                     .column(Column::initial(110.0).at_least(80.0))
@@ -455,14 +456,14 @@ pub(crate) fn ui(app: &mut App, ui: &mut Ui) {
                                 });
                             }
                             let response = row.response();
-                            if response.double_clicked() {
+                            if response.double_clicked() || widgets::row_double_clicked(&response) {
                                 app.messages.selected = Some(message.id);
                                 app.messages.selected_message = Some(message.clone());
                                 app.messages.scroll_to_selected = true;
                                 app.messages.invalidate_search();
                                 reset_view_for_message(app, &services);
                                 app.open_message(message.id);
-                            } else if response.clicked() {
+                            } else if response.clicked() || widgets::row_clicked(&response) {
                                 if app.messages.selected == Some(message.id) {
                                     app.messages.clear_selection();
                                 } else {
@@ -2748,6 +2749,7 @@ pub(crate) fn render_message(
     view: MessageView,
     text_encoding: model::TextEncoding,
 ) -> Option<model::TextEncoding> {
+    widgets::allow_text_selection(ui);
     let palette = crate::theme::palette(theme);
     match view {
         MessageView::Summary => {

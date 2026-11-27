@@ -722,6 +722,41 @@ fn copy_text(ui: &Ui, value: &str) -> bool {
     true
 }
 
+/// Keep text selection enabled in a detail pane even when an ancestor table
+/// disabled it for row clicks.
+pub(crate) fn allow_text_selection(ui: &mut Ui) {
+    let interaction = &mut ui.style_mut().interaction;
+    interaction.selectable_labels = true;
+    interaction.multi_widget_text_select = true;
+}
+
+/// True when the primary button was clicked inside this row. Selectable labels
+/// consume the click, so the row response alone is not enough.
+pub(crate) fn row_clicked(response: &Response) -> bool {
+    response.container_contains_pointer()
+        && response.ctx.input(|input| {
+            input.pointer.primary_clicked()
+                && input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|pos| response.rect.contains(pos))
+        })
+}
+
+/// True when the primary button was double-clicked inside this row.
+pub(crate) fn row_double_clicked(response: &Response) -> bool {
+    response.container_contains_pointer()
+        && response.ctx.input(|input| {
+            input
+                .pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                && input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|pos| response.rect.contains(pos))
+        })
+}
+
 #[cfg(target_arch = "wasm32")]
 fn copy_text_fallback(value: &str) -> bool {
     use wasm_bindgen::JsCast;

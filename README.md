@@ -370,9 +370,9 @@ The `.deb` and `.rpm` packages install the systemd unit and manage the account
 and permissions:
 
 ```sh
-sudo apt install ./hodeco_0.3.1_amd64.deb
+sudo apt install ./hodeco_0.3.2_amd64.deb
 # or
-sudo dnf install ./hodeco-0.3.1-1.x86_64.rpm
+sudo dnf install ./hodeco-0.3.2-1.x86_64.rpm
 ```
 
 Installation creates the `hodeco` system user and group, adds the account to
@@ -382,9 +382,10 @@ Installation creates the `hodeco` system user and group, adds the account to
 running service before replacing files and starts it again only if it had been
 running. `/etc/hodeco/config.yaml` is a package configuration file, and
 `/etc/hodeco` is group-writable by `hodeco` so configuration and catalog
-write-back through the API works. While the package owns the unit,
-`hodeco install` and `hodeco uninstall` leave it alone; use the package manager
-instead.
+write-back through the API works. The device-label catalog
+`site/entities.json` is also a configuration file, so local label edits survive
+package upgrades. While the package owns the unit, `hodeco install` and
+`hodeco uninstall` leave it alone; use the package manager instead.
 
 ```sh
 sudo systemctl status hodeco

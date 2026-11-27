@@ -56,6 +56,31 @@ Each file is handled independently. A missing file keeps the embedded copy. An
 invalid file logs a warning and keeps the embedded copy for that file. Editing an
 external file takes effect when the UI is restarted or the page is reloaded.
 
+### Edits and package upgrades
+
+Linux packages install `/usr/share/hodeco/site/entities.json` as a package
+configuration file: Debian records it as a conffile and RPM uses
+`%config(noreplace)`. Local device-label edits are therefore preserved when the
+package is upgraded. If the package also ships a new default and your copy was
+modified, Debian reports a conffile conflict (the new file may be written as
+`entities.json.dpkg-dist`) and RPM writes the new file as
+`entities.json.rpmnew`. Merge the new devices or services you want into your
+copy, then remove the side file.
+
+`zwave.json` and `zigbee.json` are package data, not conffiles. A package
+upgrade replaces them with the definitions shipped by the package. Use the
+registry keys in [`entities.json`](#entitiesjson) for device labels, not custom
+edits to the protocol files, unless you are prepared to reapply those edits
+after each upgrade.
+
+Earlier releases shipped `entities.json` as ordinary site data. The first
+upgrade that switches it to conffile handling may report a conflict even if you
+did not edit it, because the package manager has no previous conffile checksum
+to compare. Back up your current file before that one upgrade.
+
+Portable archives and ZIPs do not have package-manager conffile handling, so
+extracting a new archive over an old directory replaces `entities.json`.
+
 ## Before you edit
 
 - Keep the top-level `version` key. Protocol files must also keep a matching
@@ -65,8 +90,10 @@ external file takes effect when the UI is restarted or the page is reloaded.
   [`zwave.json`](#zwavejson) section.
 - JSON has no comments. Validate the file before deploying it; an invalid file
   silently falls back to the embedded copy and only logs a warning.
-- Prefer a small, targeted override next to the executable or in `site/` over
-  editing the bundled file in a release directory.
+- For portable and native builds, prefer a copy next to the executable or in
+  `site/` over editing the bundled file in a release directory. For Linux
+  packages, edit the installed `site/entities.json`; upgrades preserve it as a
+  conffile.
 - If you change a definition that the UI previews, reload the page. Native UIs
   need a restart.
 
@@ -283,6 +310,17 @@ A callback looks like:
 `dataLength` is the number of command-parameter bytes that selects this callback
 layout. Callback fields and summaries work like request/response fields.
 
+A field with `"role": "nodeInfo"` is decoded as a node information frame. For a
+`node info received` status it becomes separate basic, generic, and specific
+device class fields plus supported and controlled command class lists. The
+payload is split at the `0xEF` support/control marker. Other update-status
+payloads (for example Smart Start frames) stay as raw hex.
+
+`"role": "commandClassList"` decodes a repeated list of command class IDs and
+splits supported and controlled classes at `0xEF` when the marker is present.
+`"role": "nodeBitmask"` expands a node bitmask into node IDs. `"role":
+"functionBitmask"` expands a Serial API function-ID bitmask into function names.
+
 ### Operation picker
 
 The **Send message** dialog assembles its Operation list from three sources:
@@ -429,7 +467,7 @@ Fields are shared by serial commands and command classes.
 | `shift` | integer, optional | Right-shift applied after `mask` in a packed group. Defaults to `0`. |
 | `rawSuffix` | boolean | Append the raw byte to enum/flag labels. |
 | `unknown` | string, optional | Text used when an enum value is not known. |
-| `role` | string, optional | Semantic role: `value` (default), `length`, `target`, `targets`, `broadcast`, `source`, `commandClass`, `cluster`, `profile`, `group`, `sourceEndpoint`, `destinationEndpoint`, `payload`, `destinationType`, `rxStatus`, or `txStatus`. ZigBee uses the protocol-specific roles; Z-Wave uses the address, command-class, and status roles. |
+| `role` | string, optional | Semantic role: `value` (default), `length`, `target`, `targets`, `broadcast`, `source`, `commandClass`, `cluster`, `profile`, `group`, `sourceEndpoint`, `destinationEndpoint`, `payload`, `destinationType`, `rxStatus`, `txStatus`, `nodeInfo`, `commandClassList`, `nodeBitmask`, or `functionBitmask`. ZigBee uses the protocol-specific roles; Z-Wave uses the address, command-class, status, node-information, and bitmask roles. |
 | `filterSlot` | string, optional | ZigBee payload-filter category: `network`, `group`, `cluster`, `endpoint`, or `payload`. |
 | `format` | string, optional | Display format: `default`, `hex`, `decimal`, `level`, `duration`, `meterRateScale`, or `txOptions`. |
 | `length` | integer, optional | Fixed byte length for variable-width fields such as `text` and `hex`. |

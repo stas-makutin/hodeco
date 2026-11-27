@@ -354,6 +354,16 @@ pub enum FieldRole {
     DestinationType,
     RxStatus,
     TxStatus,
+    /// A node information frame: basic/generic/specific device classes and
+    /// supported/controlled command classes.
+    NodeInfo,
+    /// A repeated list of command class IDs, optionally split by the 0xEF
+    /// support/control marker.
+    CommandClassList,
+    /// A node-ID bitmask; bit 0 of byte 0 is node 1.
+    NodeBitmask,
+    /// A Serial API function-ID bitmask; bit 0 of byte 0 is function 1.
+    FunctionBitmask,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]

@@ -697,7 +697,11 @@ fn field_kind(field: &FieldDef) -> FieldKind {
         | FieldRole::Payload
         | FieldRole::DestinationType
         | FieldRole::RxStatus
-        | FieldRole::TxStatus => FieldKind::Value,
+        | FieldRole::TxStatus
+        | FieldRole::NodeInfo
+        | FieldRole::CommandClassList
+        | FieldRole::NodeBitmask
+        | FieldRole::FunctionBitmask => FieldKind::Value,
     }
 }
 
